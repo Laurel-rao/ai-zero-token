@@ -2,7 +2,7 @@
 
 ## Release Defaults
 
-When the user asks to publish, release, or ship a new version, treat it as the full npm release flow unless they explicitly narrow the request.
+When the user asks to publish, release, or ship a new version, treat it as the full npm plus desktop GitHub Release flow unless they explicitly narrow the request.
 
 Always check these files first:
 
@@ -10,7 +10,7 @@ Always check these files first:
 - `docs/DESKTOP_RELEASE.md` for desktop artifact rules.
 - `CHANGELOG.md` for the release notes entry.
 
-For a normal npm release:
+For a normal release:
 
 1. Confirm the intended version from `package.json`.
 2. Update `package.json`, `package-lock.json`, and `CHANGELOG.md`.
@@ -30,8 +30,27 @@ For a normal npm release:
 9. Run `npm publish`.
 10. Verify with `npm view ai-zero-token version`.
 11. Push `master` and the release tag.
+12. Build desktop artifacts:
 
-If GitHub CLI is installed, create or update the matching GitHub Release after the tag is pushed. If it is not installed, say so clearly.
+   ```bash
+   npm run dist:mac
+   npm run dist:win
+   ```
+
+   If disk space is low, clean only ignored/rebuildable `release/` old-version artifacts and unpacked intermediate directories, never source files or user data.
+13. Rename or stage the generated desktop assets so the GitHub Release has the standard user-facing artifacts:
+
+   ```text
+   AI Zero Token-{version}-mac-arm64.dmg
+   AI Zero Token-{version}-mac-x64.dmg
+   AI Zero Token Setup {version}.exe
+   AI Zero Token-{version}-win.zip
+   ```
+
+   Do not upload mac zip files, blockmaps, unpacked app directories, debug metadata, or auto-update metadata unless the release explicitly enables an auto-update channel.
+14. Create or update the matching GitHub Release and upload the four desktop artifacts. If `gh` is installed, use it. If `gh` is not installed, load the ignored project-local `.env.github` token and use the GitHub Releases API. Never print or commit GitHub token values.
+
+GitHub may normalize uploaded asset names by replacing spaces with dots. Still verify that the four expected macOS/Windows artifacts are present on the release.
 
 Do not stage unrelated local files unless the user explicitly asks. In particular, leave `docs/images/wechat-free-account-settings.png` and `tmp/` alone when they are untracked.
 
