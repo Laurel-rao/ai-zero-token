@@ -19,9 +19,17 @@ For a normal npm release:
 5. Run `npm run pack:dry` and inspect the packed file list.
 6. Commit with `Release vX.Y.Z`.
 7. Create tag `vX.Y.Z`.
-8. Run `npm publish`.
-9. Verify with `npm view ai-zero-token version`.
-10. Push `master` and the release tag.
+8. Before publishing, verify npm auth from the project-local publish config:
+
+   ```bash
+   set -a; [ -f ./.env.publish ] && . ./.env.publish; set +a
+   npm whoami --registry=https://registry.npmjs.org/
+   ```
+
+   The command must return the maintainer account with publish permission. If it returns `E401`, do not publish; update the ignored local `.env.publish` or `.npmrc` token first. Never print or commit token values.
+9. Run `npm publish`.
+10. Verify with `npm view ai-zero-token version`.
+11. Push `master` and the release tag.
 
 If GitHub CLI is installed, create or update the matching GitHub Release after the tag is pushed. If it is not installed, say so clearly.
 
