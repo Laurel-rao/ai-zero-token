@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import type { ArtifactCandidate, ChatToolCall, CodexQuotaSnapshot, OAuthProfile } from "../../types.js";
 import { DEFAULT_CODEX_MODEL } from "../../models/openai-codex-models.js";
 import { requestStream, requestText } from "../http-client.js";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_COMPACT_URL = `${CODEX_RESPONSES_URL}/compact`;
+const COMPAT_PROMPT_CACHE_KEY_PREFIX = "compat_cc_";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type CodexResponsesEndpoint = "responses" | "responses/compact";
 
@@ -102,8 +105,145 @@ function parseUpstreamErrorBody(body: string): UpstreamErrorBody | undefined {
   }
 }
 
-function buildCodexRequestHeaders(profile: OAuthProfile): Record<string, string> {
-  return {
+function hashShort(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function stableStringify(value: unknown): string {
+  if (typeof value === "undefined") {
+    return "";
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? String(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function shouldAutoInjectPromptCacheKeyForCompat(model: unknown): boolean {
+  const normalized = typeof model === "string" && model.trim() ? model.trim().toLowerCase() : DEFAULT_CODEX_MODEL.toLowerCase();
+  return normalized.includes("gpt-5") || normalized.includes("codex");
+}
+
+function extractInputContentText(content: unknown): string {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    const record = asRecord(content);
+    return typeof record?.text === "string" ? record.text.trim() : "";
+  }
+  return content
+    .map((part) => {
+      const record = asRecord(part);
+      if (!record) {
+        return "";
+      }
+      if (typeof record.text === "string") {
+        return record.text.trim();
+      }
+      if (typeof record.input_text === "string") {
+        return record.input_text.trim();
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function extractFirstInputTextByRole(input: unknown, roles: Set<string>): string {
+  if (typeof input === "string") {
+    return roles.has("user") ? input.trim() : "";
+  }
+  if (!Array.isArray(input)) {
+    return "";
+  }
+  for (const item of input) {
+    const record = asRecord(item);
+    if (!record) {
+      continue;
+    }
+    const role = typeof record.role === "string" ? record.role.trim().toLowerCase() : "user";
+    if (!roles.has(role)) {
+      continue;
+    }
+    const text = extractInputContentText(record.content);
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function deriveCompatPromptCacheKey(body: Record<string, unknown>): string {
+  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : DEFAULT_CODEX_MODEL;
+  if (!shouldAutoInjectPromptCacheKeyForCompat(model)) {
+    return "";
+  }
+
+  const seedParts = [`model=${model}`];
+  const reasoning = asRecord(body.reasoning);
+  if (typeof reasoning?.effort === "string" && reasoning.effort.trim()) {
+    seedParts.push(`reasoning_effort=${reasoning.effort.trim()}`);
+  }
+  if (typeof body.tool_choice !== "undefined") {
+    seedParts.push(`tool_choice=${stableStringify(body.tool_choice)}`);
+  }
+  if (Array.isArray(body.tools) && body.tools.length > 0) {
+    seedParts.push(`tools=${stableStringify(body.tools)}`);
+  }
+  if (typeof body.instructions === "string" && body.instructions.trim()) {
+    seedParts.push(`instructions=${body.instructions.trim()}`);
+  }
+
+  const systemText = extractFirstInputTextByRole(body.input, new Set(["system", "developer"]));
+  if (systemText) {
+    seedParts.push(`system=${systemText}`);
+  }
+  const firstUserText = extractFirstInputTextByRole(body.input, new Set(["user"]));
+  if (firstUserText) {
+    seedParts.push(`first_user=${firstUserText}`);
+  }
+
+  return `${COMPAT_PROMPT_CACHE_KEY_PREFIX}${hashShort(seedParts.join("|"))}`;
+}
+
+function withCompatPromptCacheKey(body: Record<string, unknown>): Record<string, unknown> {
+  const existing = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key.trim() : "";
+  if (existing) {
+    return body;
+  }
+  const promptCacheKey = deriveCompatPromptCacheKey(body);
+  return promptCacheKey ? { ...body, prompt_cache_key: promptCacheKey } : body;
+}
+
+function deterministicSessionUUID(seed: string): string {
+  const hash = Buffer.from(createHash("sha256").update(seed).digest().subarray(0, 16));
+  hash[6] = (hash[6] & 0x0f) | 0x40;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  const hex = hash.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function normalizeSessionIdentifier(value: string): string {
+  const trimmed = value.trim();
+  return UUID_RE.test(trimmed) ? trimmed : deterministicSessionUUID(trimmed);
+}
+
+function requestBodyString(body: Record<string, unknown> | undefined, key: string): string {
+  const value = body?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function buildCodexRequestHeaders(profile: OAuthProfile, requestBody?: Record<string, unknown>): Record<string, string> {
+  const headers: Record<string, string> = {
     Accept: "text/event-stream",
     "Content-Type": "application/json",
     Authorization: `Bearer ${profile.access}`,
@@ -112,6 +252,17 @@ function buildCodexRequestHeaders(profile: OAuthProfile): Record<string, string>
     Originator: "pi",
     "User-Agent": "pi (bun demo)",
   };
+  const explicitSessionId = requestBodyString(requestBody, "session_id");
+  const conversationId = requestBodyString(requestBody, "conversation_id");
+  const promptCacheKey = requestBodyString(requestBody, "prompt_cache_key");
+  const sessionSeed = explicitSessionId || promptCacheKey || conversationId;
+  if (sessionSeed) {
+    headers.session_id = normalizeSessionIdentifier(sessionSeed);
+  }
+  if (conversationId) {
+    headers.conversation_id = normalizeSessionIdentifier(conversationId);
+  }
+  return headers;
 }
 
 function createCodexUpstreamError(
@@ -564,10 +715,10 @@ export async function askOpenAICodex(params: {
   system?: string;
   bodyOverride?: Record<string, unknown>;
 }): Promise<{ text: string; toolCalls: ChatToolCall[]; raw: unknown; artifacts: ArtifactCandidate[]; quota?: CodexQuotaSnapshot }> {
-  const requestBody = {
+  const requestBody = withCompatPromptCacheKey({
     ...buildDefaultRequestBody(params),
     ...(params.bodyOverride ?? {}),
-  };
+  });
 
   if (typeof requestBody.input === "undefined") {
     throw new Error("Codex 请求缺少 input。请提供 prompt 或在实验请求体里显式传入 input。");
@@ -576,7 +727,7 @@ export async function askOpenAICodex(params: {
   const response = await requestText({
     method: "POST",
     url: CODEX_RESPONSES_URL,
-    headers: buildCodexRequestHeaders(params.profile),
+    headers: buildCodexRequestHeaders(params.profile, requestBody),
     body: JSON.stringify(requestBody),
   });
   const quota = extractCodexQuotaSnapshot(response.headers, response.requestId);
@@ -603,10 +754,10 @@ export async function streamOpenAICodex(params: {
 }): Promise<CodexStreamResponse> {
   const requestBody = params.passthroughBody
     ? { ...(params.bodyOverride ?? {}) }
-    : {
+    : withCompatPromptCacheKey({
         ...buildDefaultRequestBody(params),
         ...(params.bodyOverride ?? {}),
-      };
+      });
 
   if (!params.passthroughBody && typeof requestBody.input === "undefined") {
     throw new Error("Codex 请求缺少 input。请提供 prompt 或在实验请求体里显式传入 input。");
@@ -615,7 +766,7 @@ export async function streamOpenAICodex(params: {
   const response = await requestStream({
     method: "POST",
     url: params.endpoint === "responses/compact" ? CODEX_RESPONSES_COMPACT_URL : CODEX_RESPONSES_URL,
-    headers: buildCodexRequestHeaders(params.profile),
+    headers: buildCodexRequestHeaders(params.profile, requestBody),
     body: JSON.stringify(requestBody),
     signal: params.signal,
   });

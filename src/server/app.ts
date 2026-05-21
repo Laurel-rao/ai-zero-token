@@ -19,7 +19,7 @@ import type { ChatResult, OAuthProfile, ProfileSummary } from "../core/types.js"
 import { isTransientHttpError, requestText } from "../core/providers/http-client.js";
 import { streamOpenAICodex } from "../core/providers/openai-codex/chat.js";
 import { generateChatGPTWebImage, type ChatGPTWebImageResult } from "../core/providers/openai-codex/chatgpt-web-image.js";
-import type { UsageImageRoute, UsageRecordEvent, UsageTokenUsage } from "../core/services/usage-service.js";
+import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 const adminUiDistDir = path.join(packageRoot, "admin-ui", "dist");
@@ -27,6 +27,7 @@ const adminUiIndexPath = path.join(adminUiDistDir, "index.html");
 const BYTES_PER_MIB = 1024 * 1024;
 const MAX_GATEWAY_REQUEST_LOGS = 100;
 const MAX_CODEX_RESPONSE_PROFILE_BINDINGS = 5000;
+const CODEX_STREAM_DRAIN_AFTER_CLIENT_CLOSE_MS = 30_000;
 const DEFAULT_ROUTE_BODY_LIMIT_BYTES = 128 * BYTES_PER_MIB;
 const CODEX_COMPACT_BODY_LIMIT_BYTES = 256 * BYTES_PER_MIB;
 const gunzipAsync = promisify(gunzip);
@@ -65,6 +66,7 @@ type GatewayRequestLog = {
 type GatewayRequestUsageMeta = {
   profile?: OAuthProfile | null;
   tokenUsage?: UsageTokenUsage | null;
+  tokenUsageStatus?: UsageTokenStatus;
   imageCount?: number;
   imageRoute?: UsageImageRoute;
   errorType?: string;
@@ -357,20 +359,62 @@ function tokenNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
 }
 
+function sumTokenNumbers(value: Record<string, unknown> | null, keys: string[]): number | null {
+  if (!value) {
+    return null;
+  }
+  let total = 0;
+  let seen = false;
+  for (const key of keys) {
+    const item = tokenNumber(value[key]);
+    if (item !== null) {
+      total += item;
+      seen = true;
+    }
+  }
+  return seen ? total : null;
+}
+
 function normalizeTokenUsage(value: unknown): UsageTokenUsage | null {
   if (!isObjectRecord(value)) {
     return null;
   }
   const inputTokens = tokenNumber(value.input_tokens ?? value.prompt_tokens);
   const outputTokens = tokenNumber(value.output_tokens ?? value.completion_tokens);
-  const totalTokens = tokenNumber(value.total_tokens) ?? (inputTokens !== null || outputTokens !== null ? (inputTokens ?? 0) + (outputTokens ?? 0) : null);
-  if (inputTokens === null && outputTokens === null && totalTokens === null) {
+  const inputDetails = isObjectRecord(value.input_tokens_details) ? value.input_tokens_details : null;
+  const promptDetails = isObjectRecord(value.prompt_tokens_details) ? value.prompt_tokens_details : null;
+  const cacheCreation = isObjectRecord(value.cache_creation) ? value.cache_creation : null;
+  const openAiCachedTokens = tokenNumber(inputDetails?.cached_tokens ?? promptDetails?.cached_tokens);
+  const cacheReadTokens = openAiCachedTokens ?? tokenNumber(value.cache_read_input_tokens ?? value.cached_tokens);
+  const cacheCreationTokens =
+    tokenNumber(value.cache_creation_input_tokens ?? value.cache_creation_tokens) ??
+    tokenNumber(inputDetails?.cache_creation_tokens ?? promptDetails?.cache_creation_tokens) ??
+    sumTokenNumbers(cacheCreation, ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"]);
+  const inputIncludesCacheRead = openAiCachedTokens !== null;
+  const inferredTotalTokens =
+    inputTokens !== null || outputTokens !== null || cacheReadTokens !== null || cacheCreationTokens !== null
+      ? (inputTokens ?? 0) +
+        (outputTokens ?? 0) +
+        (inputIncludesCacheRead ? 0 : (cacheReadTokens ?? 0)) +
+        (cacheCreationTokens ?? 0)
+      : null;
+  const totalTokens = tokenNumber(value.total_tokens) ?? inferredTotalTokens;
+  const uncachedInputTokens =
+    inputTokens !== null
+      ? inputIncludesCacheRead
+        ? Math.max(0, inputTokens - (cacheReadTokens ?? 0))
+        : inputTokens
+      : null;
+  if (inputTokens === null && outputTokens === null && totalTokens === null && cacheReadTokens === null && cacheCreationTokens === null) {
     return null;
   }
   return {
     inputTokens,
+    uncachedInputTokens,
     outputTokens,
     totalTokens,
+    cacheCreationTokens,
+    cacheReadTokens,
   };
 }
 
@@ -415,6 +459,42 @@ function imageUsageToTokenUsage(usage: {
     inputTokens: usage.input_tokens,
     outputTokens: usage.output_tokens,
     totalTokens: usage.total_tokens,
+  };
+}
+
+function buildResponsesUsagePayload(usage: UsageTokenUsage | null): Record<string, unknown> | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const inputTokens = tokenNumber(usage.inputTokens) ?? 0;
+  const outputTokens = tokenNumber(usage.outputTokens) ?? 0;
+  const totalTokens = tokenNumber(usage.totalTokens) ?? inputTokens + outputTokens;
+  const cacheReadTokens = tokenNumber(usage.cacheReadTokens);
+  const cacheCreationTokens = tokenNumber(usage.cacheCreationTokens);
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: totalTokens,
+    ...(cacheReadTokens !== null ? { input_tokens_details: { cached_tokens: cacheReadTokens } } : {}),
+    ...(cacheCreationTokens !== null ? { cache_creation_input_tokens: cacheCreationTokens } : {}),
+  };
+}
+
+function buildChatCompletionsUsagePayload(usage: UsageTokenUsage | null): Record<string, unknown> | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const promptTokens = tokenNumber(usage.inputTokens) ?? 0;
+  const completionTokens = tokenNumber(usage.outputTokens) ?? 0;
+  const totalTokens = tokenNumber(usage.totalTokens) ?? promptTokens + completionTokens;
+  const cacheReadTokens = tokenNumber(usage.cacheReadTokens);
+  const cacheCreationTokens = tokenNumber(usage.cacheCreationTokens);
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
+    ...(cacheReadTokens !== null ? { prompt_tokens_details: { cached_tokens: cacheReadTokens } } : {}),
+    ...(cacheCreationTokens !== null ? { cache_creation_input_tokens: cacheCreationTokens } : {}),
   };
 }
 
@@ -1016,6 +1096,7 @@ function summarizeCodexChatBody(body: Record<string, unknown>): Record<string, u
     model: body.model ?? "default",
     stream: body.stream,
     store: body.store,
+    hasPromptCacheKey: typeof body.prompt_cache_key === "string" && body.prompt_cache_key.trim().length > 0,
     inputItems: Array.isArray(body.input) ? body.input.length : undefined,
     tools: Array.isArray(body.tools) ? body.tools.length : undefined,
     toolNames: toolNames.slice(0, 50),
@@ -1177,10 +1258,12 @@ function summarizeImageEditRequestForLog(body: z.infer<typeof imageEditsBodySche
 }
 
 function buildResponseApiBody(result: ChatResult, includeRaw?: boolean): Record<string, unknown> {
+  const usage = buildResponsesUsagePayload(extractTokenUsage(result.raw));
   const responseBody: Record<string, unknown> = {
     object: "response",
     provider: result.provider,
     model: result.model,
+    ...(usage ? { usage } : {}),
     output_text: result.text,
     output: [
       {
@@ -1209,11 +1292,13 @@ function buildResponseApiBody(result: ChatResult, includeRaw?: boolean): Record<
 
 function buildChatCompletionsBody(result: ChatResult): Record<string, unknown> {
   const hasToolCalls = result.toolCalls.length > 0;
+  const usage = buildChatCompletionsUsagePayload(extractTokenUsage(result.raw));
   const body: Record<string, unknown> = {
     id: `chatcmpl_${randomUUID().replace(/-/g, "")}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model: result.model,
+    ...(usage ? { usage } : {}),
     choices: [
       {
         index: 0,
@@ -1260,7 +1345,7 @@ function buildChatCompletionChunk(params: {
   };
 }
 
-function sendChatCompletionsStream(reply: FastifyReply, result: ChatResult): void {
+function sendChatCompletionsStream(reply: FastifyReply, result: ChatResult, includeUsage = false): void {
   const id = `chatcmpl_${randomUUID().replace(/-/g, "")}`;
   const created = Math.floor(Date.now() / 1000);
 
@@ -1315,6 +1400,17 @@ function sendChatCompletionsStream(reply: FastifyReply, result: ChatResult): voi
     delta: {},
     finishReason: result.toolCalls.length > 0 ? "tool_calls" : "stop",
   }));
+  const usage = includeUsage ? buildChatCompletionsUsagePayload(extractTokenUsage(result.raw)) : undefined;
+  if (usage) {
+    writeChatCompletionsSseEvent(reply, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: result.model,
+      choices: [],
+      usage,
+    });
+  }
   reply.raw.write("data: [DONE]\n\n");
   reply.raw.end();
 }
@@ -1527,6 +1623,7 @@ type SseStreamStats = {
   completed: boolean;
   responseIds: Set<string>;
   tokenUsage: UsageTokenUsage | null;
+  parseErrorCount: number;
 };
 
 function createSseStreamStats(): SseStreamStats {
@@ -1536,6 +1633,7 @@ function createSseStreamStats(): SseStreamStats {
     completed: false,
     responseIds: new Set<string>(),
     tokenUsage: null,
+    parseErrorCount: 0,
   };
 }
 
@@ -1555,6 +1653,15 @@ function extractSseResponseId(value: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function isSseTerminalUsageEvent(eventType: string | undefined): boolean {
+  return (
+    eventType === "response.completed" ||
+    eventType === "response.done" ||
+    eventType === "response.failed" ||
+    eventType === "response.incomplete"
+  );
 }
 
 function trackSseChunk(stats: SseStreamStats, chunk: unknown): void {
@@ -1592,16 +1699,17 @@ function trackSseChunk(stats: SseStreamStats, chunk: unknown): void {
         if (responseId) {
           stats.responseIds.add(responseId);
         }
-        const tokenUsage = extractTokenUsage(parsed);
+        const tokenUsage = isSseTerminalUsageEvent(eventType) ? extractTokenUsage(parsed) : null;
         if (tokenUsage) {
           stats.tokenUsage = tokenUsage;
         }
       } catch {
+        stats.parseErrorCount += 1;
         // The tracker is diagnostic only; malformed chunks still pass through.
       }
     }
 
-    if (eventType === "response.completed") {
+    if (eventType === "response.completed" || eventType === "response.done") {
       stats.completed = true;
       stats.terminalEvent = eventType;
     } else if (eventType === "response.failed" || eventType === "response.incomplete") {
@@ -1614,6 +1722,25 @@ function trackSseChunk(stats: SseStreamStats, chunk: unknown): void {
   if (stats.buffer.length > 65536) {
     stats.buffer = stats.buffer.slice(-65536);
   }
+}
+
+function sseTokenUsageStatus(stats: SseStreamStats, statusCode: number): UsageTokenStatus {
+  if (stats.tokenUsage) {
+    return "captured";
+  }
+  if (statusCode < 200 || statusCode >= 400) {
+    return "upstream_error";
+  }
+  if (stats.parseErrorCount > 0 && !stats.terminalEvent) {
+    return "parse_failed";
+  }
+  if (!stats.terminalEvent) {
+    return "missing_terminal";
+  }
+  if (isSseTerminalUsageEvent(stats.terminalEvent)) {
+    return "terminal_without_usage";
+  }
+  return "not_returned";
 }
 
 export function createApp(params?: {
@@ -1695,6 +1822,7 @@ export function createApp(params?: {
       accountLabel: entry.account,
       planType: profile?.quota?.planType,
       tokenUsage: log.usage?.tokenUsage,
+      tokenUsageStatus: log.usage?.tokenUsageStatus,
       imageCount: log.usage?.imageCount,
       imageRoute: log.usage?.imageRoute ?? "none",
       errorType: log.usage?.errorType ?? extractUsageErrorType(log.details, entry.statusCode),
@@ -1739,6 +1867,8 @@ export function createApp(params?: {
   }));
 
   app.get("/_gateway/admin/usage", async () => ctx.usageService.getSummary());
+
+  app.post("/_gateway/admin/usage/reset", async () => ctx.usageService.backupAndReset());
 
   async function buildAdminConfig(request: FastifyRequest) {
     const [status, models, modelCatalog, versionStatus, settings, profile, profiles, codexStatus, usage] = await Promise.all([
@@ -2345,6 +2475,8 @@ export function createApp(params?: {
     const abortController = new AbortController();
     let streamFinished = false;
     let headersCommitted = false;
+    let clientDisconnected = false;
+    let clientDrainTimer: ReturnType<typeof setTimeout> | null = null;
     let profile: OAuthProfile | null = null;
     let retryCount = 0;
     let failureRecorded = false;
@@ -2354,7 +2486,15 @@ export function createApp(params?: {
     let adventureFallbackReason: string | undefined;
     reply.raw.on("close", () => {
       if (!streamFinished) {
-        abortController.abort();
+        clientDisconnected = true;
+        if (!headersCommitted) {
+          abortController.abort();
+          return;
+        }
+        clientDrainTimer = setTimeout(() => {
+          abortController.abort();
+        }, CODEX_STREAM_DRAIN_AFTER_CLIENT_CLOSE_MS);
+        clientDrainTimer.unref?.();
       }
     });
 
@@ -2576,14 +2716,39 @@ export function createApp(params?: {
       reply.raw.flushHeaders?.();
 
       const streamStats = createSseStreamStats();
+      const writeChunkToClient = async (chunk: unknown): Promise<void> => {
+        if (clientDisconnected || reply.raw.destroyed || reply.raw.writableEnded) {
+          clientDisconnected = true;
+          return;
+        }
+        try {
+          if (!reply.raw.write(chunk)) {
+            await new Promise<void>((resolve) => {
+              const cleanup = () => {
+                reply.raw.off("drain", cleanup);
+                reply.raw.off("close", cleanup);
+                resolve();
+              };
+              reply.raw.once("drain", cleanup);
+              reply.raw.once("close", cleanup);
+            });
+          }
+        } catch {
+          clientDisconnected = true;
+        }
+      };
       for await (const chunk of Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0])) {
         trackSseChunk(streamStats, chunk);
-        if (!reply.raw.write(chunk)) {
-          await new Promise((resolve) => reply.raw.once("drain", resolve));
-        }
+        await writeChunkToClient(chunk);
       }
       streamFinished = true;
-      reply.raw.end();
+      if (clientDrainTimer) {
+        clearTimeout(clientDrainTimer);
+        clientDrainTimer = null;
+      }
+      if (!clientDisconnected && !reply.raw.destroyed && !reply.raw.writableEnded) {
+        reply.raw.end();
+      }
       for (const responseId of streamStats.responseIds) {
         rememberCodexResponseProfile(responseId, profile);
       }
@@ -2627,16 +2792,24 @@ export function createApp(params?: {
             terminalEvent: streamStats.terminalEvent,
             bytes: streamStats.bytes,
             usageCaptured: Boolean(streamStats.tokenUsage),
+            tokenUsageStatus: sseTokenUsageStatus(streamStats, upstream.status),
+            parseErrorCount: streamStats.parseErrorCount,
+            clientDisconnected,
           },
         },
         usage: {
           profile,
           tokenUsage: streamStats.tokenUsage,
+          tokenUsageStatus: sseTokenUsageStatus(streamStats, upstream.status),
           imageRoute: codexImageRoute,
         },
       });
       return reply;
     } catch (error) {
+      if (clientDrainTimer) {
+        clearTimeout(clientDrainTimer);
+        clientDrainTimer = null;
+      }
       const quota = (error as { quota?: import("../core/types.js").CodexQuotaSnapshot }).quota;
       if (profile && !failureRecorded) {
         await ctx.authService.recordProfileRequestFailure(profile.profileId, error, quota, "openai-codex", {
@@ -3093,7 +3266,11 @@ export function createApp(params?: {
     });
 
     if (parsed.data.stream) {
-      sendChatCompletionsStream(reply, result);
+      const rawStreamOptions = (parsed.data as Record<string, unknown>).stream_options;
+      const streamOptions = isObjectRecord(rawStreamOptions)
+        ? rawStreamOptions
+        : null;
+      sendChatCompletionsStream(reply, result, streamOptions?.include_usage === true);
       return reply;
     }
 

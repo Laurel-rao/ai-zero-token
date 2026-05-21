@@ -35,8 +35,14 @@
   white-space: nowrap;
 }
 
+.usage-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .usage-summary-grid {
-  grid-template-columns: repeat(6, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .usage-scope-grid,
@@ -91,7 +97,7 @@
 
 .usage-scope-card dl {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
 }
@@ -206,5 +212,10 @@
   .usage-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .usage-action-buttons {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 }

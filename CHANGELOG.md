@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.8 - 2026-05-21
+
+- Added Codex prompt-cache key handling for gatewayed Codex requests so upstream cache-hit behavior is more stable.
+- Improved token usage capture for Codex SSE streams by reading terminal response events, tracking missing-terminal and terminal-without-usage cases, and draining upstream streams briefly after client disconnects.
+- Added cache-read, uncached-input, cache-creation, token-capture-status, and estimated-cost fields to local usage statistics.
+- Added OpenAI-compatible usage payloads for non-stream chat responses and optional `stream_options.include_usage` chat completion streams.
+- Added a Usage page breakdown for token-capture status and a backup-and-reset action for clearing local usage records safely.
+- Backfilled usage cost and diagnostic aggregates from local event logs when older statistics are missing the new fields.
+- Improved Codex history migration by patching legacy rollout session metadata alongside the local history database.
+
 ## 2.0.7 - 2026-05-11
 
 - Added persistent local usage statistics with today, current-process, lifetime, daily trend, account, model, endpoint, error, image-route, and source breakdowns.

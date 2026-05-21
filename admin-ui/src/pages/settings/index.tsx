@@ -496,6 +496,8 @@ export function SettingsPage(props: {
             path: string;
             backupPath?: string;
             migratedCount: number;
+            rolloutPatchedCount?: number;
+            rolloutPatchErrors?: string[];
             skipped?: boolean;
             error?: string;
           };
@@ -510,7 +512,10 @@ export function SettingsPage(props: {
         props.setConfig(result.config);
       }
       const migratedCount = result.codexProvider.historyMigration?.migratedCount || 0;
-      const migrationSuffix = migratedCount > 0 ? `，已迁移 ${migratedCount} 条历史记录` : "";
+      const rolloutPatchedCount = result.codexProvider.historyMigration?.rolloutPatchedCount || 0;
+      const migrationSuffix = migratedCount > 0
+        ? `，已迁移 ${migratedCount} 条历史记录${rolloutPatchedCount > 0 ? `，已修复 ${rolloutPatchedCount} 个会话索引` : ""}`
+        : "";
       await promptCodexRestart({
         config: result.config ?? props.config,
         confirmMessage: selectedProviderMode === "openai"

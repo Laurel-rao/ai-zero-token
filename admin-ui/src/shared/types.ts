@@ -139,9 +139,18 @@ export type UsageAggregate = {
   successCount: number;
   failureCount: number;
   inputTokens: number;
+  uncachedInputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  inputCostUsd: number;
+  outputCostUsd: number;
+  cacheCreationCostUsd: number;
+  cacheReadCostUsd: number;
+  estimatedCostUsd: number;
   unknownTokenCount: number;
+  unknownTokenStatusCounts: Record<string, number>;
   imageCount: number;
   totalDurationMs: number;
   averageDurationMs: number;
@@ -168,8 +177,14 @@ export type UsageSummary = {
   byModel: UsageDimensionRow[];
   byEndpoint: UsageDimensionRow[];
   byError: UsageDimensionRow[];
+  byTokenUsageStatus: UsageDimensionRow[];
   byImageRoute: UsageDimensionRow[];
   bySource: UsageDimensionRow[];
+};
+
+export type UsageResetResult = {
+  backupDir: string;
+  usage: UsageSummary;
 };
 
 export type AdminConfig = {

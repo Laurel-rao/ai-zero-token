@@ -55,6 +55,8 @@ export type CodexHistoryMigrationResult = {
   path: string;
   backupPath?: string;
   migratedCount: number;
+  rolloutPatchedCount?: number;
+  rolloutPatchErrors?: string[];
   skipped?: boolean;
   error?: string;
 };
@@ -120,9 +122,89 @@ function sqliteQuote(value: string): string {
 async function runSqlite(dbPath: string, sql: string): Promise<string> {
   const { stdout } = await execFileAsync("sqlite3", [dbPath, sql], {
     timeout: 15_000,
-    maxBuffer: 1024 * 1024,
+    maxBuffer: 8 * 1024 * 1024,
   });
   return stdout.trim();
+}
+
+function resolveCodexSessionPath(value: string): string {
+  return path.isAbsolute(value) ? value : path.join(getCodexHomeDir(), value);
+}
+
+function parseLegacyHistoryThreadRows(raw: string): Array<{ id: string; rolloutPath: string }> {
+  if (!raw.trim()) {
+    return [];
+  }
+
+  return raw
+    .split(/\r?\n/)
+    .map((line) => {
+      const separator = line.indexOf("\t");
+      if (separator === -1) {
+        return null;
+      }
+
+      const id = line.slice(0, separator).trim();
+      const rolloutPath = line.slice(separator + 1).trim();
+      return id && rolloutPath ? { id, rolloutPath } : null;
+    })
+    .filter((item): item is { id: string; rolloutPath: string } => Boolean(item));
+}
+
+async function patchSessionRolloutProvider(
+  rolloutPath: string,
+  backupSuffix: string,
+  fromProvider: string,
+  toProvider: string,
+): Promise<boolean> {
+  const targetPath = resolveCodexSessionPath(rolloutPath);
+  let raw = "";
+  try {
+    raw = await fs.readFile(targetPath, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && (error as { code?: unknown }).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+
+  const newline = raw.includes("\r\n") ? "\r\n" : "\n";
+  const trailingNewline = raw.endsWith("\n");
+  const lines = raw.replace(/\r?\n$/u, "").split(/\r?\n/u);
+  let changed = false;
+
+  for (let index = 0; index < Math.min(lines.length, 20); index += 1) {
+    try {
+      const parsed = JSON.parse(lines[index] ?? "") as unknown;
+      if (!isRecord(parsed) || parsed.type !== "session_meta" || !isRecord(parsed.payload)) {
+        continue;
+      }
+
+      if (parsed.payload.model_provider !== fromProvider) {
+        return false;
+      }
+
+      parsed.payload.model_provider = toProvider;
+      lines[index] = JSON.stringify(parsed);
+      changed = true;
+      break;
+    } catch {
+      continue;
+    }
+  }
+
+  if (!changed) {
+    return false;
+  }
+
+  await fs.copyFile(targetPath, `${targetPath}.azt-backup-${backupSuffix}`);
+  const tmpPath = `${targetPath}.tmp-${process.pid}`;
+  await fs.writeFile(tmpPath, `${lines.join(newline)}${trailingNewline ? newline : ""}`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await fs.rename(tmpPath, targetPath);
+  return true;
 }
 
 async function migrateLegacyCodexHistoryProvider(): Promise<CodexHistoryMigrationResult> {
@@ -136,12 +218,12 @@ async function migrateLegacyCodexHistoryProvider(): Promise<CodexHistoryMigratio
   }
 
   try {
-    const countRaw = await runSqlite(
+    const rowsRaw = await runSqlite(
       dbPath,
-      `select count(*) from threads where model_provider=${sqliteQuote(LEGACY_CODEX_PROVIDER_ID)};`,
+      `select id || char(9) || rollout_path from threads where model_provider=${sqliteQuote(LEGACY_CODEX_PROVIDER_ID)};`,
     );
-    const migratedCount = Number.parseInt(countRaw, 10);
-    if (!Number.isFinite(migratedCount) || migratedCount <= 0) {
+    const legacyThreads = parseLegacyHistoryThreadRows(rowsRaw);
+    if (legacyThreads.length <= 0) {
       return {
         path: dbPath,
         migratedCount: 0,
@@ -149,8 +231,22 @@ async function migrateLegacyCodexHistoryProvider(): Promise<CodexHistoryMigratio
       };
     }
 
-    const backupPath = `${dbPath}.azt-backup-${createBackupSuffix()}`;
+    const backupSuffix = createBackupSuffix();
+    const backupPath = `${dbPath}.azt-backup-${backupSuffix}`;
     await runSqlite(dbPath, `.backup ${sqliteQuote(backupPath)}`);
+
+    let rolloutPatchedCount = 0;
+    const rolloutPatchErrors: string[] = [];
+    for (const thread of legacyThreads) {
+      try {
+        if (await patchSessionRolloutProvider(thread.rolloutPath, backupSuffix, LEGACY_CODEX_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID)) {
+          rolloutPatchedCount += 1;
+        }
+      } catch (error) {
+        rolloutPatchErrors.push(`${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     await runSqlite(
       dbPath,
       `update threads set model_provider=${sqliteQuote(OPENAI_CODEX_PROVIDER_ID)} where model_provider=${sqliteQuote(LEGACY_CODEX_PROVIDER_ID)};`,
@@ -158,7 +254,9 @@ async function migrateLegacyCodexHistoryProvider(): Promise<CodexHistoryMigratio
     return {
       path: dbPath,
       backupPath,
-      migratedCount,
+      migratedCount: legacyThreads.length,
+      rolloutPatchedCount,
+      rolloutPatchErrors: rolloutPatchErrors.length ? rolloutPatchErrors.slice(0, 20) : undefined,
     };
   } catch (error) {
     return {
