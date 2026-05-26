@@ -116,6 +116,32 @@ export class AuthService {
     };
   }
 
+  private decodeJwtExpiry(token: string): number | undefined {
+    try {
+      const parts = token.split(".");
+      if (parts.length !== 3) {
+        return undefined;
+      }
+
+      const payload = parts[1] ?? "";
+      const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+      const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+      const parsed = JSON.parse(Buffer.from(normalized + padding, "base64").toString("utf8")) as { exp?: unknown };
+      return typeof parsed.exp === "number" && Number.isFinite(parsed.exp) ? parsed.exp * 1000 : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private hasValidIdToken(profile: OAuthProfile): boolean {
+    if (!profile.idToken) {
+      return false;
+    }
+
+    const expiresAt = this.decodeJwtExpiry(profile.idToken);
+    return typeof expiresAt === "number" ? Date.now() < expiresAt : true;
+  }
+
   private buildExportAudit(current: ProfileExportAudit | undefined, kind: ProfileExportAudit["lastExportKind"], exportedAt: number): ProfileExportAudit {
     return {
       exported: true,
@@ -757,13 +783,13 @@ export class AuthService {
       throw new Error(`没有找到账号: ${profileId}`);
     }
 
-    if (profile.idToken && Date.now() < profile.expires) {
+    if (Date.now() < profile.expires && this.hasValidIdToken(profile)) {
       return this.toManagedProfile(profile);
     }
 
     const refreshed = await this.refreshStoredProfile(profile, provider);
-    if (!refreshed.idToken) {
-      throw new Error("刷新 token 成功，但上游没有返回 id_token。");
+    if (!this.hasValidIdToken(refreshed)) {
+      throw new Error("刷新 token 成功，但上游没有返回有效的 id_token。请重新登录或重新导入包含有效 id_token 的账号 JSON。");
     }
 
     return this.toManagedProfile(refreshed);

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.9 - 2026-05-26
+
+- Clarified auto-switch settings so manually excluded accounts are separated from accounts that are runtime-ineligible because login is unavailable or quota is exhausted.
+- Updated account filters and stats labels to distinguish configured rotation participation from the actual automatic rotation candidate pool.
+- Preserved account identity metadata when refreshed Codex tokens omit profile claims.
+- Validated `id_token` expiry before using saved profiles for Codex image and web flows, with clearer recovery guidance when a fresh `id_token` is unavailable.
+
 ## 2.0.8 - 2026-05-21
 
 - Added Codex prompt-cache key handling for gatewayed Codex requests so upstream cache-hit behavior is more stable.

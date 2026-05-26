@@ -389,6 +389,13 @@
   background: #ecfdf5;
 }
 
+.count-pill.is-blocked,
+.auto-switch-state-pill.is-blocked {
+  color: #b91c1c;
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
 .count-pill.is-excluded,
 .auto-switch-state-pill.is-excluded {
   color: #c2410c;

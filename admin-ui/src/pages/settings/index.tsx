@@ -5,7 +5,7 @@ import type { AdminConfig, GatewayShareInfo, ProfileSummary } from "@/shared/typ
 import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
 import { copyText, errorMessage } from "@/shared/lib/app-utils";
 import { formatJson } from "@/shared/lib/format";
-import { getPlanType, isAuthInvalid, isQuotaExhausted, profileHealth, profileLabel } from "@/shared/lib/profiles";
+import { autoSwitchEligibility, getPlanType, profileHealth, profileLabel } from "@/shared/lib/profiles";
 
 type CodexGatewayMode = "local" | "remote";
 type CodexProviderMode = "openai" | "ai-zero-token";
@@ -215,7 +215,10 @@ export function SettingsPage(props: {
   }, [autoSwitchSearch, props.config?.profiles]);
   const autoSwitchTotalCount = props.config?.profiles.length || 0;
   const autoSwitchExcludedCount = (props.config?.profiles || []).filter((profile) => excludedProfileIds.has(profile.profileId)).length;
-  const autoSwitchIncludedCount = Math.max(0, autoSwitchTotalCount - autoSwitchExcludedCount);
+  const autoSwitchRuntimeReadyCount = (props.config?.profiles || []).filter(
+    (profile) => !excludedProfileIds.has(profile.profileId) && autoSwitchEligibility(profile).key === "ready",
+  ).length;
+  const autoSwitchBlockedCount = Math.max(0, autoSwitchTotalCount - autoSwitchExcludedCount - autoSwitchRuntimeReadyCount);
 
   async function saveSettings(options?: { restart?: boolean }) {
     const hasDirtyField = (...fields: Array<keyof SettingDraft>) => fields.some((field) => settingsDirtyFields.has(field));
@@ -796,11 +799,12 @@ export function SettingsPage(props: {
           <div className="auto-switch-exclusion-head">
             <div>
               <h4>不参与自动轮换名单</h4>
-              <p className="hint">这些账号不会被自动切换选中，也不会在自己额度耗尽时触发自动切走；仍可在账号页手动应用到网关或 Codex。</p>
+              <p className="hint">勾选表示手动排除。登录不可用或额度耗尽的账号即使未勾选，也不会被实际自动轮换选中。</p>
             </div>
             <div className="auto-switch-counts" aria-label="自动轮换账号统计">
-              <span className="count-pill is-included">参与 {autoSwitchIncludedCount} 个</span>
-              <span className="count-pill is-excluded">不参与 {autoSwitchExcludedCount} 个</span>
+              <span className="count-pill is-included">可轮换 {autoSwitchRuntimeReadyCount} 个</span>
+              <span className="count-pill is-blocked">不可用 {autoSwitchBlockedCount} 个</span>
+              <span className="count-pill is-excluded">手动排除 {autoSwitchExcludedCount} 个</span>
             </div>
           </div>
 
@@ -815,9 +819,12 @@ export function SettingsPage(props: {
             ) : (
               autoSwitchProfiles.map((profile) => {
                 const excluded = excludedProfileIds.has(profile.profileId);
+                const eligibility = autoSwitchEligibility(profile);
                 const health = profileHealth(profile);
                 const codexActive = Boolean(props.config?.codex.accountId && props.config.codex.accountId === profile.accountId);
-                const disabledReason = isAuthInvalid(profile) ? "登录不可用" : isQuotaExhausted(profile) ? "额度耗尽" : "";
+                const disabledReason = eligibility.key === "ready" ? "" : eligibility.label;
+                const stateClass = excluded ? "is-excluded" : eligibility.key === "ready" ? "is-included" : "is-blocked";
+                const stateLabel = excluded ? "手动排除" : eligibility.label;
                 return (
                   <label className={`auto-switch-profile-row ${excluded ? "is-excluded" : ""}`} key={profile.profileId}>
                     <input type="checkbox" checked={excluded} onChange={(event) => toggleAutoSwitchExcludedProfile(profile.profileId, event.target.checked)} />
@@ -830,9 +837,7 @@ export function SettingsPage(props: {
                         {disabledReason ? ` · ${disabledReason}` : ""}
                       </span>
                     </span>
-                    <span className={`auto-switch-state-pill ${excluded ? "is-excluded" : "is-included"}`}>
-                      {excluded ? "不参与轮换" : "参与轮换"}
-                    </span>
+                    <span className={`auto-switch-state-pill ${stateClass}`}>{stateLabel}</span>
                   </label>
                 );
               })

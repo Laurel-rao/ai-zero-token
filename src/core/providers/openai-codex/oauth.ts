@@ -131,15 +131,21 @@ function parseAuthorizationInput(value: string): AuthorizationResult {
   return { code: trimmed };
 }
 
-function extractProfile(accessToken: string, refreshToken: string, expires: number, idToken?: string): OAuthProfile {
+function extractProfile(
+  accessToken: string,
+  refreshToken: string,
+  expires: number,
+  idToken?: string,
+  fallback?: Pick<OAuthProfile, "accountId" | "email">,
+): OAuthProfile {
   const payload = decodeJwtPayload(accessToken);
   const authClaim = payload?.[JWT_CLAIM_PATH] as Record<string, unknown> | undefined;
-  const accountId = authClaim?.chatgpt_account_id;
+  const accountId = authClaim?.chatgpt_account_id ?? fallback?.accountId;
   if (typeof accountId !== "string" || !accountId.trim()) {
     throw new Error("无法从 access token 中提取 accountId。");
   }
 
-  const email = extractEmailFromPayload(payload);
+  const email = extractEmailFromPayload(payload) ?? fallback?.email;
 
   return {
     provider: "openai-codex",
@@ -238,6 +244,10 @@ export async function refreshOpenAICodexToken(profile: OAuthProfile): Promise<OA
     json.refresh_token,
     Date.now() + json.expires_in * 1000,
     json.id_token ?? profile.idToken,
+    {
+      accountId: profile.accountId,
+      email: profile.email,
+    },
   );
 }
 

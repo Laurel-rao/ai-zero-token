@@ -105,8 +105,8 @@ export function AccountsPanel(props: {
           <option value="free">Free</option>
           <option value="plus">Plus</option>
           <option value="pro-team">Pro/Team</option>
-          <option value="auto-included">参与轮换</option>
-          <option value="auto-excluded">排除轮换</option>
+          <option value="auto-included">配置参与</option>
+          <option value="auto-excluded">手动排除</option>
         </select>
         <select className="control" value={props.filter.sort} onChange={(event) => props.onFilter({ ...props.filter, sort: event.target.value as ProfileFilter["sort"] })}>
           <option value="quota-desc">默认排序</option>

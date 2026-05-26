@@ -2,6 +2,15 @@
 
 This project ships the desktop app with Electron. The desktop main process starts the existing local Fastify gateway and loads the React management UI served by that gateway.
 
+## 2.0.9 Release Notes
+
+Version `2.0.9` clarifies automatic account rotation eligibility and tightens Codex auth refresh handling:
+
+- Settings now separates manually excluded accounts from accounts that are runtime-ineligible because login is unavailable or quota is exhausted.
+- Account filters and stats distinguish configured rotation participation from the actual automatic rotation candidate pool.
+- Refreshed Codex tokens preserve account identity metadata when upstream token payloads omit profile claims.
+- Saved profiles validate `id_token` expiry before Codex image and web flows use them, with clearer recovery messaging when a fresh `id_token` is unavailable.
+
 ## 2.0.6 Release Notes
 
 Version `2.0.6` adds Free-account image routing controls and local usage/account statistics:

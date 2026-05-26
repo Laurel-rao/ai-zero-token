@@ -106,8 +106,8 @@ export function AccountsPage(props: {
       { key: "pro-team", label: "Pro/Team", value: count((profile) => ["pro", "team", "enterprise", "premium"].includes(getPlanKey(profile))), tone: "blue" },
       { key: "api-active", label: "API 使用中", value: count((profile) => profile.isActive), tone: "green" },
       { key: "codex-active", label: "Codex 使用中", value: codexActiveCount, tone: "green" },
-      { key: "auto-included", label: "参与轮换", value: count((profile) => !excludedProfileIds.has(profile.profileId)), tone: "blue" },
-      { key: "auto-excluded", label: "排除轮换", value: count((profile) => excludedProfileIds.has(profile.profileId)), tone: "orange" },
+      { key: "auto-included", label: "配置参与", value: count((profile) => !excludedProfileIds.has(profile.profileId)), tone: "blue" },
+      { key: "auto-excluded", label: "手动排除", value: count((profile) => excludedProfileIds.has(profile.profileId)), tone: "orange" },
     ];
   }, [props.codexAccountId, props.config?.profiles, props.config?.settings.autoSwitch.excludedProfileIds]);
 

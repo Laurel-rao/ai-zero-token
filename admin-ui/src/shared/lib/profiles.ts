@@ -94,6 +94,18 @@ export function isProfileInvalid(profile: ProfileSummary): boolean {
   return isAuthInvalid(profile) || Boolean(profile.expiresAt && profile.expiresAt <= Date.now());
 }
 
+export function autoSwitchEligibility(profile: ProfileSummary): { key: "ready" | "auth-invalid" | "quota-exhausted"; label: string; tone: "green" | "orange" | "red" } {
+  if (isAuthInvalid(profile)) {
+    return { key: "auth-invalid", label: "登录不可用", tone: "red" };
+  }
+
+  if (isQuotaExhausted(profile)) {
+    return { key: "quota-exhausted", label: "额度耗尽", tone: "orange" };
+  }
+
+  return { key: "ready", label: "可自动轮换", tone: "green" };
+}
+
 export function profileSortGroup(profile: ProfileSummary, codexAccountId?: string): number {
   const isActive = profile.isActive || Boolean(codexAccountId && profile.accountId === codexAccountId);
   if (isActive) return 0;
