@@ -38,6 +38,20 @@ type TokenResult = {
   expires: number;
 };
 
+export type OpenAICodexLoginOptions = {
+  allowManualCode?: boolean;
+  callbackTimeoutMs?: number;
+};
+
+export type OpenAICodexLoginSession = {
+  state: string;
+  authorizeUrl: string;
+  waitForCode: (timeoutMs: number) => Promise<string | null>;
+  completeWithCode: (code: string) => Promise<OAuthProfile>;
+  completeWithInput: (input: string) => Promise<OAuthProfile>;
+  close: () => void;
+};
+
 type UpstreamErrorBody = {
   message?: string;
   type?: string;
@@ -282,14 +296,31 @@ async function promptLine(message: string): Promise<string> {
   }
 }
 
+async function listen(server: http.Server, host: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(1455, host);
+  });
+}
+
 async function startLocalCallbackServer(expectedState: string): Promise<{
   close: () => void;
-  waitForCode: () => Promise<string | null>;
+  waitForCode: (timeoutMs: number) => Promise<string | null>;
 }> {
   let lastCode: string | null = null;
   let closed = false;
 
-  const server = http.createServer((req, res) => {
+  const handleRequest: http.RequestListener = (req, res) => {
     try {
       const url = new URL(req.url || "", "http://127.0.0.1");
       if (url.pathname !== "/auth/callback") {
@@ -320,12 +351,24 @@ async function startLocalCallbackServer(expectedState: string): Promise<{
       res.statusCode = 500;
       res.end("Internal error");
     }
-  });
+  };
 
-  await new Promise<void>((resolve) => {
-    server.listen(1455, "127.0.0.1", () => resolve());
-    server.on("error", () => resolve());
-  });
+  const servers = [http.createServer(handleRequest), http.createServer(handleRequest)];
+  const errors: string[] = [];
+
+  await Promise.all([
+    listen(servers[0] as http.Server, "127.0.0.1").catch((error) => {
+      errors.push(`127.0.0.1: ${error instanceof Error ? error.message : String(error)}`);
+    }),
+    listen(servers[1] as http.Server, "::1").catch((error) => {
+      errors.push(`::1: ${error instanceof Error ? error.message : String(error)}`);
+    }),
+  ]);
+
+  const listeningServers = servers.filter((server) => server.listening);
+  if (listeningServers.length === 0) {
+    throw new Error(`无法启动 OAuth 回调服务: ${errors.join("; ") || "未知错误"}`);
+  }
 
   return {
     close: () => {
@@ -333,10 +376,13 @@ async function startLocalCallbackServer(expectedState: string): Promise<{
         return;
       }
       closed = true;
-      server.close();
+      for (const server of listeningServers) {
+        server.close();
+      }
     },
-    waitForCode: async () => {
-      for (let index = 0; index < 600; index += 1) {
+    waitForCode: async (timeoutMs: number) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
         if (lastCode) {
           return lastCode;
         }
@@ -347,9 +393,8 @@ async function startLocalCallbackServer(expectedState: string): Promise<{
   };
 }
 
-async function requestManualCode(expectedState: string): Promise<string> {
-  const manual = await promptLine("没有自动回调，请粘贴完整回调 URL 或 code: ");
-  const parsed = parseAuthorizationInput(manual);
+function parseManualAuthorizationCode(input: string, expectedState: string): string {
+  const parsed = parseAuthorizationInput(input);
   if (parsed.state && parsed.state !== expectedState) {
     throw new Error("state 不匹配，已拒绝本次授权结果。");
   }
@@ -359,7 +404,12 @@ async function requestManualCode(expectedState: string): Promise<string> {
   return parsed.code;
 }
 
-export async function loginOpenAICodex(): Promise<OAuthProfile> {
+async function requestManualCode(expectedState: string): Promise<string> {
+  const manual = await promptLine("没有自动回调，请粘贴完整回调 URL 或 code: ");
+  return parseManualAuthorizationCode(manual, expectedState);
+}
+
+export async function startOpenAICodexLogin(): Promise<OpenAICodexLoginSession> {
   const { verifier, challenge } = await generatePKCE();
   const state = createState();
   const authorizeUrl = new URL(AUTHORIZE_URL);
@@ -397,13 +447,38 @@ export async function loginOpenAICodex(): Promise<OAuthProfile> {
     console.log("未能自动打开浏览器，请手动打开上面的授权地址。");
   }
 
+  return {
+    state,
+    authorizeUrl: url,
+    waitForCode: (timeoutMs: number) => callbackServer.waitForCode(timeoutMs),
+    completeWithCode: async (code: string) => {
+      console.log("已收到授权回调，正在交换 access token...");
+      const token = await exchangeAuthorizationCode(code, verifier);
+      console.log("token 交换成功，正在解析账号信息...");
+      return extractProfile(token.access, token.refresh, token.expires, token.idToken);
+    },
+    completeWithInput: async (inputValue: string) => {
+      const code = parseManualAuthorizationCode(inputValue, state);
+      console.log("已收到手动授权结果，正在交换 access token...");
+      const token = await exchangeAuthorizationCode(code, verifier);
+      console.log("token 交换成功，正在解析账号信息...");
+      return extractProfile(token.access, token.refresh, token.expires, token.idToken);
+    },
+    close: callbackServer.close,
+  };
+}
+
+export async function loginOpenAICodex(options?: OpenAICodexLoginOptions): Promise<OAuthProfile> {
+  const session = await startOpenAICodexLogin();
+  const callbackTimeoutMs = options?.callbackTimeoutMs ?? 60_000;
   try {
-    const code = (await callbackServer.waitForCode()) ?? (await requestManualCode(state));
-    console.log("已收到授权回调，正在交换 access token...");
-    const token = await exchangeAuthorizationCode(code, verifier);
-    console.log("token 交换成功，正在解析账号信息...");
-    return extractProfile(token.access, token.refresh, token.expires, token.idToken);
+    const code = await session.waitForCode(callbackTimeoutMs);
+    if (!code && options?.allowManualCode === false) {
+      throw new Error("OAuth 回调超时，请重新点击登录并在授权完成后保持管理页打开。");
+    }
+    const resolvedCode = code ?? (await requestManualCode(session.state));
+    return session.completeWithCode(resolvedCode);
   } finally {
-    callbackServer.close();
+    session.close();
   }
 }

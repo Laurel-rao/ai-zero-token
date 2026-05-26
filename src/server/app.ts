@@ -19,6 +19,10 @@ import type { ChatResult, OAuthProfile, ProfileSummary } from "../core/types.js"
 import { isTransientHttpError, requestText } from "../core/providers/http-client.js";
 import { streamOpenAICodex } from "../core/providers/openai-codex/chat.js";
 import { generateChatGPTWebImage, type ChatGPTWebImageResult } from "../core/providers/openai-codex/chatgpt-web-image.js";
+import {
+  startOpenAICodexLogin,
+  type OpenAICodexLoginSession,
+} from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
@@ -272,6 +276,15 @@ const profileImportSchema = z.object({
 
 const runtimeRefreshSchema = z.object({
   staleOnly: z.boolean().optional(),
+});
+
+const oauthManualSchema = z.object({
+  loginId: z.string().min(1),
+  input: z.string().min(1),
+});
+
+const oauthCancelSchema = z.object({
+  loginId: z.string().min(1),
 });
 
 const profileExportSchema = z.object({
@@ -1768,6 +1781,23 @@ export function createApp(params?: {
   const ctx = createGatewayContext();
   const gatewayRequestLogs: GatewayRequestLog[] = [];
   const codexResponseProfileBindings = new Map<string, { profileId: string; accountId: string; seenAt: number }>();
+  let pendingOAuthLogin: { id: string; session: OpenAICodexLoginSession; createdAt: number } | null = null;
+
+  function clearPendingOAuthLogin(loginId?: string): void {
+    if (!pendingOAuthLogin || (loginId && pendingOAuthLogin.id !== loginId)) {
+      return;
+    }
+
+    pendingOAuthLogin.session.close();
+    pendingOAuthLogin = null;
+  }
+
+  async function saveCompletedOAuthLogin(profile: OAuthProfile): Promise<void> {
+    await ctx.authService.saveLoggedInProfile(profile);
+    await ctx.authService.syncActiveProfileQuota("openai-codex", {
+      suppressErrors: true,
+    });
+  }
 
   function rememberCodexResponseProfile(responseId: string, profile: OAuthProfile): void {
     codexResponseProfileBindings.set(responseId, {
@@ -2047,10 +2077,72 @@ export function createApp(params?: {
   });
 
   app.post("/_gateway/admin/login", async (request) => {
-    await ctx.authService.login("openai-codex");
-    await ctx.authService.syncActiveProfileQuota("openai-codex", {
-      suppressErrors: true,
-    });
+    clearPendingOAuthLogin();
+    const session = await startOpenAICodexLogin();
+    const loginId = randomUUID();
+    pendingOAuthLogin = {
+      id: loginId,
+      session,
+      createdAt: Date.now(),
+    };
+
+    const code = await session.waitForCode(60_000);
+    if (!code) {
+      return {
+        login: {
+          status: "manual_required",
+          loginId,
+          message: "60 秒内没有收到 OAuth 自动回调。可以粘贴浏览器地址栏里的完整回调 URL 或 authorization code 继续登录。",
+        },
+        config: await buildAdminConfig(request),
+      };
+    }
+
+    try {
+      const profile = await session.completeWithCode(code);
+      await saveCompletedOAuthLogin(profile);
+      return buildAdminConfig(request);
+    } finally {
+      clearPendingOAuthLogin(loginId);
+    }
+  });
+
+  app.post("/_gateway/admin/login/manual", async (request, reply) => {
+    const parsed = oauthManualSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: parsed.error.issues[0]?.message ?? "请求体格式错误",
+        },
+      };
+    }
+
+    if (!pendingOAuthLogin || pendingOAuthLogin.id !== parsed.data.loginId) {
+      reply.code(404);
+      return {
+        error: {
+          type: "oauth_login_not_found",
+          message: "没有找到等待中的 OAuth 登录，请重新点击登录。",
+        },
+      };
+    }
+
+    try {
+      const profile = await pendingOAuthLogin.session.completeWithInput(parsed.data.input);
+      await saveCompletedOAuthLogin(profile);
+      return buildAdminConfig(request);
+    } finally {
+      clearPendingOAuthLogin(parsed.data.loginId);
+    }
+  });
+
+  app.post("/_gateway/admin/login/cancel", async (request) => {
+    const parsed = oauthCancelSchema.safeParse(request.body);
+    if (parsed.success) {
+      clearPendingOAuthLogin(parsed.data.loginId);
+    }
     return buildAdminConfig(request);
   });
 

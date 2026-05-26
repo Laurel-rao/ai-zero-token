@@ -45,6 +45,7 @@ import {
 } from "../store/profile-transfer.js";
 
 const DEFAULT_QUOTA_SYNC_CONCURRENCY = 3;
+const AUTH_CLAIM_PATH = "https://api.openai.com/auth";
 
 type ProfileRotationResult<T> = {
   profile: OAuthProfile;
@@ -116,7 +117,7 @@ export class AuthService {
     };
   }
 
-  private decodeJwtExpiry(token: string): number | undefined {
+  private decodeJwtPayload(token: string): Record<string, unknown> | undefined {
     try {
       const parts = token.split(".");
       if (parts.length !== 3) {
@@ -126,11 +127,25 @@ export class AuthService {
       const payload = parts[1] ?? "";
       const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
       const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
-      const parsed = JSON.parse(Buffer.from(normalized + padding, "base64").toString("utf8")) as { exp?: unknown };
-      return typeof parsed.exp === "number" && Number.isFinite(parsed.exp) ? parsed.exp * 1000 : undefined;
+      const parsed = JSON.parse(Buffer.from(normalized + padding, "base64").toString("utf8")) as unknown;
+      return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
     } catch {
       return undefined;
     }
+  }
+
+  private getJwtExpiry(payload: Record<string, unknown>): number | undefined {
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp) ? payload.exp * 1000 : undefined;
+  }
+
+  private getJwtAccountId(payload: Record<string, unknown>): string | undefined {
+    const authClaim = payload[AUTH_CLAIM_PATH];
+    if (!authClaim || typeof authClaim !== "object") {
+      return undefined;
+    }
+
+    const accountId = (authClaim as Record<string, unknown>).chatgpt_account_id;
+    return typeof accountId === "string" && accountId.trim() ? accountId.trim() : undefined;
   }
 
   private hasValidIdToken(profile: OAuthProfile): boolean {
@@ -138,8 +153,18 @@ export class AuthService {
       return false;
     }
 
-    const expiresAt = this.decodeJwtExpiry(profile.idToken);
-    return typeof expiresAt === "number" ? Date.now() < expiresAt : true;
+    const payload = this.decodeJwtPayload(profile.idToken);
+    if (!payload) {
+      return false;
+    }
+
+    const expiresAt = this.getJwtExpiry(payload);
+    if (typeof expiresAt !== "number" || Date.now() >= expiresAt) {
+      return false;
+    }
+
+    const tokenAccountId = this.getJwtAccountId(payload);
+    return !tokenAccountId || tokenAccountId === profile.accountId;
   }
 
   private buildExportAudit(current: ProfileExportAudit | undefined, kind: ProfileExportAudit["lastExportKind"], exportedAt: number): ProfileExportAudit {
@@ -502,12 +527,20 @@ export class AuthService {
     return this.toManagedProfile(activated);
   }
 
-  async login(provider: ProviderId): Promise<OAuthProfile> {
+  async login(
+    provider: ProviderId,
+    options?: { allowManualCode?: boolean; callbackTimeoutMs?: number },
+  ): Promise<OAuthProfile> {
     if (provider !== "openai-codex") {
       throw new Error(`暂不支持 provider: ${provider}`);
     }
 
-    const profile = await loginOpenAICodex();
+    const profile = await loginOpenAICodex(options);
+    await saveProfile(profile);
+    return this.toManagedProfile(profile);
+  }
+
+  async saveLoggedInProfile(profile: OAuthProfile): Promise<OAuthProfile> {
     await saveProfile(profile);
     return this.toManagedProfile(profile);
   }
@@ -783,10 +816,9 @@ export class AuthService {
       throw new Error(`没有找到账号: ${profileId}`);
     }
 
-    if (Date.now() < profile.expires && this.hasValidIdToken(profile)) {
-      return this.toManagedProfile(profile);
-    }
-
+    // Applying an account to Codex writes a short-lived id_token to auth.json.
+    // Always refresh first so Codex does not start from a stale or legacy token
+    // that the gateway itself might not need for normal API forwarding.
     const refreshed = await this.refreshStoredProfile(profile, provider);
     if (!this.hasValidIdToken(refreshed)) {
       throw new Error("刷新 token 成功，但上游没有返回有效的 id_token。请重新登录或重新导入包含有效 id_token 的账号 JSON。");

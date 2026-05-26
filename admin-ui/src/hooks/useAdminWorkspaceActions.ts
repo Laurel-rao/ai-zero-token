@@ -12,12 +12,63 @@ export type WorkspaceActions = {
   copyBaseUrl: () => void;
 };
 
+type ManualLoginResult = {
+  login: {
+    status: "manual_required";
+    loginId: string;
+    message: string;
+  };
+  config: AdminConfig;
+};
+
+function isManualLoginResult(value: AdminConfig | ManualLoginResult): value is ManualLoginResult {
+  return "login" in value && value.login.status === "manual_required";
+}
+
 export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceActions {
   const login = useCallback(async () => {
     state.setBusy("login");
     state.setStatus("正在打开 OAuth 登录...");
     try {
-      const next = await fetchJson<AdminConfig>("/_gateway/admin/login", { method: "POST" });
+      const result = await fetchJson<AdminConfig | ManualLoginResult>("/_gateway/admin/login", { method: "POST" });
+      if (isManualLoginResult(result)) {
+        state.setConfig(result.config);
+        state.setStatus(result.login.message);
+        const shouldFillManually = window.confirm(`${result.login.message}\n\n是否现在手动填写？`);
+        if (!shouldFillManually) {
+          await fetchJson<AdminConfig>("/_gateway/admin/login/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ loginId: result.login.loginId }),
+          });
+          state.setStatus("已取消 OAuth 登录。");
+          return;
+        }
+
+        const manualInput = window.prompt("请粘贴完整回调 URL 或 authorization code：");
+        if (!manualInput?.trim()) {
+          await fetchJson<AdminConfig>("/_gateway/admin/login/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ loginId: result.login.loginId }),
+          });
+          state.setStatus("未填写授权结果，已取消 OAuth 登录。");
+          return;
+        }
+
+        state.setStatus("正在提交手动授权结果...");
+        const next = await fetchJson<AdminConfig>("/_gateway/admin/login/manual", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ loginId: result.login.loginId, input: manualInput }),
+        });
+        state.setConfig(next);
+        state.setAccountModalOpen(false);
+        state.setStatus("登录完成，账号状态已同步。");
+        return;
+      }
+
+      const next = result;
       state.setConfig(next);
       state.setAccountModalOpen(false);
       state.setStatus("登录完成，账号状态已同步。");

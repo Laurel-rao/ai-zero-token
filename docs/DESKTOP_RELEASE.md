@@ -2,6 +2,15 @@
 
 This project ships the desktop app with Electron. The desktop main process starts the existing local Fastify gateway and loads the React management UI served by that gateway.
 
+## 2.0.10 Release Notes
+
+Version `2.0.10` improves OAuth login recovery and Codex auth freshness:
+
+- Desktop OAuth login can continue with a pasted callback URL or authorization code when automatic callback capture times out.
+- The local OAuth callback listener binds both IPv4 and IPv6 loopback addresses for browser redirect compatibility.
+- Applying an account to local Codex refreshes the profile first so the written `auth.json` includes a current `id_token`.
+- Saved `id_token` values are checked for expiry and account identity before use.
+
 ## 2.0.9 Release Notes
 
 Version `2.0.9` clarifies automatic account rotation eligibility and tightens Codex auth refresh handling:

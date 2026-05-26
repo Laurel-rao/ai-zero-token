@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.10 - 2026-05-26
+
+- Added a manual OAuth fallback in the desktop UI so login can continue by pasting the callback URL or authorization code when the local callback is not received.
+- Started the OAuth callback listener on both IPv4 and IPv6 loopback addresses for better compatibility with browser redirects.
+- Refreshed accounts before applying them to local Codex so `auth.json` receives a current `id_token`.
+- Tightened `id_token` validation by checking expiry and matching embedded account identity when available.
+
 ## 2.0.9 - 2026-05-26
 
 - Clarified auto-switch settings so manually excluded accounts are separated from accounts that are runtime-ineligible because login is unavailable or quota is exhausted.
