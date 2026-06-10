@@ -1,4 +1,5 @@
-import type { OAuthProfile } from "../types.js";
+import { createHash } from "node:crypto";
+import type { AccountIdSource, OAuthProfile } from "../types.js";
 
 const AUTH_CLAIM_PATH = "https://api.openai.com/auth";
 const PROFILE_CLAIM_PATH = "https://api.openai.com/profile";
@@ -13,6 +14,10 @@ export type ExportedProfile = {
   expired: string;
   email?: string;
   account_id: string;
+  codex_account_id?: string;
+  account_identity?: string;
+  account_id_source?: AccountIdSource;
+  codex_apply_supported?: boolean;
   profile_id: string;
   exported_at: string;
 };
@@ -51,15 +56,131 @@ function getNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function extractAccountId(payload: JwtPayload | null, fallback: unknown): string {
-  const authClaim = payload?.[AUTH_CLAIM_PATH];
-  const accountId = isRecord(authClaim) ? getString(authClaim.chatgpt_account_id) : undefined;
-  const fallbackAccountId = getString(fallback);
-  const resolved = accountId ?? fallbackAccountId;
-  if (!resolved) {
-    throw new Error("导入失败: 无法从 access_token 中提取 accountId。");
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const text = getString(value);
+    if (text) {
+      return text;
+    }
   }
-  return resolved;
+  return undefined;
+}
+
+function getNestedString(input: Record<string, unknown>, path: string[]): string | undefined {
+  let current: unknown = input;
+  for (const segment of path) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[segment];
+  }
+  return getString(current);
+}
+
+function hashAccessToken(access: string): string {
+  return createHash("sha256").update(access).digest("hex");
+}
+
+type ImportIdentity = {
+  accountId: string;
+  codexAccountId?: string;
+  source: AccountIdSource;
+};
+
+function extractAuthClaim(payload: JwtPayload | null): Record<string, unknown> | undefined {
+  const authClaim = payload?.[AUTH_CLAIM_PATH];
+  return isRecord(authClaim) ? authClaim : undefined;
+}
+
+function extractImportIdentity(input: Record<string, unknown>, payload: JwtPayload | null, access: string): ImportIdentity {
+  const authClaim = extractAuthClaim(payload);
+  const tokenAccountId = getString(authClaim?.chatgpt_account_id);
+  if (tokenAccountId) {
+    return {
+      accountId: tokenAccountId,
+      codexAccountId: tokenAccountId,
+      source: "chatgpt_account_id",
+    };
+  }
+
+  const explicitChatGptAccountId = firstString(
+    input.chatgpt_account_id,
+    input.chatgptAccountId,
+    getNestedString(input, ["account", "chatgpt_account_id"]),
+    getNestedString(input, ["account", "chatgptAccountId"]),
+  );
+  if (explicitChatGptAccountId) {
+    return {
+      accountId: explicitChatGptAccountId,
+      codexAccountId: explicitChatGptAccountId,
+      source: "chatgpt_account_id",
+    };
+  }
+
+  const explicitAccountId = firstString(
+    input.account_id,
+    input.accountId,
+    getNestedString(input, ["account", "account_id"]),
+    getNestedString(input, ["account", "accountId"]),
+    getNestedString(input, ["account", "id"]),
+  );
+  if (explicitAccountId) {
+    return {
+      accountId: explicitAccountId,
+      codexAccountId: explicitAccountId,
+      source: "account_id",
+    };
+  }
+
+  const chatGptUserId = firstString(
+    authClaim?.chatgpt_user_id,
+    input.chatgpt_user_id,
+    input.chatgptUserId,
+    getNestedString(input, ["user", "chatgpt_user_id"]),
+    getNestedString(input, ["user", "chatgptUserId"]),
+  );
+  if (chatGptUserId) {
+    return {
+      accountId: chatGptUserId,
+      source: "chatgpt_user_id",
+    };
+  }
+
+  const userId = firstString(
+    authClaim?.user_id,
+    input.user_id,
+    input.userId,
+    getNestedString(input, ["user", "user_id"]),
+    getNestedString(input, ["user", "userId"]),
+    getNestedString(input, ["user", "id"]),
+  );
+  if (userId) {
+    return {
+      accountId: userId,
+      source: "user_id",
+    };
+  }
+
+  const subject = getString(payload?.sub);
+  if (subject) {
+    return {
+      accountId: subject,
+      source: "sub",
+    };
+  }
+
+  const email = extractEmail(payload, input.email);
+  if (email) {
+    return {
+      accountId: `email:${email.toLowerCase()}`,
+      source: "email",
+    };
+  }
+
+  return {
+    accountId: `access:${hashAccessToken(access).slice(0, 32)}`,
+    source: "access_token_sha256",
+  };
 }
 
 function extractEmail(payload: JwtPayload | null, fallback: unknown): string | undefined {
@@ -108,19 +229,21 @@ export function importProfileFromJson(value: unknown): OAuthProfile {
   }
 
   const payload = decodeJwtPayload(access);
-  const accountId = extractAccountId(payload, value.account_id ?? value.accountId);
+  const identity = extractImportIdentity(value, payload, access);
   const email = extractEmail(payload, value.email);
   const expires = parseExpiry(value, payload);
 
   return {
     provider: "openai-codex",
-    profileId: `openai-codex:${accountId}`,
+    profileId: `openai-codex:${identity.accountId}`,
     mode: "oauth_account",
     access,
     refresh,
     idToken,
     expires,
-    accountId,
+    accountId: identity.accountId,
+    codexAccountId: identity.codexAccountId,
+    accountIdSource: identity.source,
     email,
   };
 }
@@ -143,6 +266,8 @@ export function importProfilesFromJson(value: unknown): OAuthProfile[] {
 }
 
 export function exportProfileToJson(profile: OAuthProfile): ExportedProfile {
+  const codexAccountId = profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+
   return {
     type: "codex",
     access_token: profile.access,
@@ -150,7 +275,11 @@ export function exportProfileToJson(profile: OAuthProfile): ExportedProfile {
     id_token: profile.idToken,
     expired: new Date(profile.expires).toISOString(),
     email: profile.email,
-    account_id: profile.accountId,
+    account_id: codexAccountId ?? "",
+    codex_account_id: codexAccountId,
+    account_identity: profile.accountId,
+    account_id_source: profile.accountIdSource ?? (codexAccountId ? "chatgpt_account_id" : undefined),
+    codex_apply_supported: Boolean(codexAccountId),
     profile_id: profile.profileId,
     exported_at: new Date().toISOString(),
   };
@@ -176,7 +305,10 @@ export function getProfileImportTemplate(): ExportedProfileBundle {
         id_token: "eyJ...id_token",
         expired: "2026-05-04T22:13:00.000Z",
         email: "user@example.com",
-        account_id: "可选，通常会从 access_token 自动解析",
+        account_id: "可选；有真实 chatgpt_account_id/account_id 时可应用到 Codex",
+        account_identity: "缺少 account_id 时会自动使用 user_id/sub/email/hash 作为网关身份",
+        account_id_source: "chatgpt_account_id",
+        codex_apply_supported: true,
         profile_id: "可选，导入时会按 account_id 自动生成",
         exported_at: new Date(0).toISOString(),
       },

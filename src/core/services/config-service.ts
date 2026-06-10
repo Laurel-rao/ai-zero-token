@@ -3,6 +3,7 @@ import { getPreferredCodexModel, hasCodexModel } from "../models/openai-codex-mo
 import {
   createDefaultSettings,
   loadSettings,
+  normalizeMilliseconds,
   normalizeQuotaSyncConcurrency,
   saveSettings,
 } from "../store/settings-store.js";
@@ -120,13 +121,21 @@ export class ConfigService {
     return next;
   }
 
-  async setRuntimeConfig(params: { quotaSyncConcurrency?: number }): Promise<GatewaySettings> {
+  async setRuntimeConfig(params: {
+    quotaSyncConcurrency?: number;
+    codexRequestSerializationEnabled?: boolean;
+    codexRequestMinDelayMs?: number;
+    codexRequestJitterMs?: number;
+  }): Promise<GatewaySettings> {
     const settings = await this.getSettings();
     const next = {
       ...settings,
       runtime: {
         ...settings.runtime,
         quotaSyncConcurrency: normalizeQuotaSyncConcurrency(params.quotaSyncConcurrency, settings.runtime.quotaSyncConcurrency),
+        codexRequestSerializationEnabled: params.codexRequestSerializationEnabled ?? settings.runtime.codexRequestSerializationEnabled,
+        codexRequestMinDelayMs: normalizeMilliseconds(params.codexRequestMinDelayMs, settings.runtime.codexRequestMinDelayMs, 0, 60_000),
+        codexRequestJitterMs: normalizeMilliseconds(params.codexRequestJitterMs, settings.runtime.codexRequestJitterMs, 0, 60_000),
       },
     };
     await saveSettings(next);
@@ -155,7 +164,12 @@ export class ConfigService {
     defaultModel?: string;
     networkProxy?: NetworkProxyParams;
     autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
-    runtime?: { quotaSyncConcurrency?: number };
+    runtime?: {
+      quotaSyncConcurrency?: number;
+      codexRequestSerializationEnabled?: boolean;
+      codexRequestMinDelayMs?: number;
+      codexRequestJitterMs?: number;
+    };
     image?: { freeAccountWebGenerationEnabled?: boolean };
     server?: { port: number };
   }): Promise<GatewaySettings> {
@@ -196,6 +210,9 @@ export class ConfigService {
         runtime: {
           ...next.runtime,
           quotaSyncConcurrency: normalizeQuotaSyncConcurrency(params.runtime.quotaSyncConcurrency, next.runtime.quotaSyncConcurrency),
+          codexRequestSerializationEnabled: params.runtime.codexRequestSerializationEnabled ?? next.runtime.codexRequestSerializationEnabled,
+          codexRequestMinDelayMs: normalizeMilliseconds(params.runtime.codexRequestMinDelayMs, next.runtime.codexRequestMinDelayMs, 0, 60_000),
+          codexRequestJitterMs: normalizeMilliseconds(params.runtime.codexRequestJitterMs, next.runtime.codexRequestJitterMs, 0, 60_000),
         },
       };
     }

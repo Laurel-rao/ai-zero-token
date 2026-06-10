@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { ProfileSummary } from "@/shared/types";
-import { getPlanType, imageCapability, profileLabel } from "@/shared/lib/profiles";
+import { getPlanType, imageCapability, isCodexActiveProfile, profileLabel } from "@/shared/lib/profiles";
 import { routes, type AppRoute } from "@/routes/routes";
 import type { WorkspaceState } from "./useAdminWorkspaceState";
 
@@ -22,7 +22,7 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
   const capability = imageCapability(activeProfile);
   const codexAccountId = state.config?.codex?.accountId;
   const codexProfile = useMemo(
-    () => state.config?.profiles.find((profile) => codexAccountId && profile.accountId === codexAccountId) || null,
+    () => state.config?.profiles.find((profile) => isCodexActiveProfile(profile, codexAccountId)) || null,
     [codexAccountId, state.config?.profiles],
   );
 

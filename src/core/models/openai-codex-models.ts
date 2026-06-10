@@ -94,6 +94,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function getCodexAccountId(profile: OAuthProfile): string | undefined {
+  return profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+}
+
 function normalizeNetworkModelsBody(
   value: unknown,
   headers: Record<string, string>,
@@ -155,14 +159,18 @@ function buildCodexModelsUrl(clientVersion: string): string {
 }
 
 function buildCodexModelsRequestHeaders(profile: OAuthProfile): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     Accept: "application/json",
     Authorization: `Bearer ${profile.access}`,
-    "ChatGPT-Account-Id": profile.accountId,
     "OpenAI-Beta": "responses=experimental",
     Originator: "pi",
     "User-Agent": "pi (bun demo)",
   };
+  const codexAccountId = getCodexAccountId(profile);
+  if (codexAccountId) {
+    headers["ChatGPT-Account-Id"] = codexAccountId;
+  }
+  return headers;
 }
 
 function createCodexModelsError(status: number, transport: "fetch" | "curl", body: string): Error {

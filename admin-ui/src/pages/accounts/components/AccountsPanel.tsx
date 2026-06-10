@@ -1,6 +1,6 @@
-import { Code2, Globe2, Loader2, RefreshCw, Search } from "lucide-react";
+import { Code2, Globe2, Info, Loader2, RefreshCw, Search } from "lucide-react";
 import type { AdminConfig, ProfileSummary } from "@/shared/types";
-import { profileHealth, profileInitial, profileLabel, getPlanKey, isAuthInvalid, primaryUsage, quotaBarTone, resetLabel, resetTime, secondaryUsage, usageCorner, authStatusText, imageCapability, getPlanType } from "@/shared/lib/profiles";
+import { profileHealth, profileInitial, profileLabel, getPlanKey, isAuthInvalid, isCodexActiveProfile, primaryUsage, quotaBarTone, resetLabel, resetTime, secondaryUsage, usageCorner, authStatusText, imageCapability, getPlanType } from "@/shared/lib/profiles";
 import type { AccountStatItem, BusyAction, ProfileFilter } from "@/shared/lib/app-types";
 import { InfoRow } from "@/shared/components/InfoRow";
 import { formatFullTime } from "@/shared/lib/format";
@@ -129,15 +129,19 @@ export function AccountsPanel(props: {
             const primary = primaryUsage(profile);
             const secondary = secondaryUsage(profile);
             const expanded = Boolean(props.expandedProfiles[profile.profileId]);
-            const codexActive = Boolean(codexAccountId && profile.accountId === codexAccountId);
+            const codexActive = isCodexActiveProfile(profile, codexAccountId);
             const corner = usageCorner(profile, codexActive);
             const authInvalid = isAuthInvalid(profile);
-            const imageAbility = imageCapability(profile);
-            const exportAudit = profile.exportAudit;
-            const exportAuditLabel = exportAudit?.exported ? `已导出 ${exportAudit.count} 次` : "未导出";
             const busyPrefix = `profile:` as const;
             const isBusy = typeof props.busy === "string" && props.busy.startsWith(`${busyPrefix}`) && props.busy.endsWith(profile.profileId);
             const refreshBusy = props.busy === `profile:sync-quota:${profile.profileId}`;
+            const codexApplyUnsupported = profile.codexApplySupported === false;
+            const codexApplyReason = profile.codexApplyReason || "该账号缺少真实 chatgpt_account_id，不能应用到本机 Codex。";
+            const codexButtonDisabled = codexActive || isBusy || authInvalid || codexApplyUnsupported;
+            const codexButtonLabel = authInvalid ? "Codex 不可用" : codexActive ? "Codex 使用中" : codexApplyUnsupported ? "仅网关可用" : "应用 Codex";
+            const imageAbility = imageCapability(profile);
+            const exportAudit = profile.exportAudit;
+            const exportAuditLabel = exportAudit?.exported ? `已导出 ${exportAudit.count} 次` : "未导出";
             return (
               <article className={`account-card plan-${getPlanKey(profile)} ${authInvalid ? "is-auth-invalid" : ""}`} data-profile-card={profile.profileId} key={profile.profileId} title={authInvalid ? authStatusText(profile) : undefined}>
                 {corner && (
@@ -210,6 +214,7 @@ export function AccountsPanel(props: {
                   <div className="meta-grid">
                     <InfoRow label="套餐" value={getPlanType(profile)} />
                     <InfoRow label="Account ID" value={props.showEmails ? profile.accountId : profile.accountId} code />
+                    <InfoRow label="Codex 应用" value={codexApplyUnsupported ? codexApplyReason : "可应用到本机 Codex"} />
                     <InfoRow label="Profile ID" value={props.showEmails ? profile.profileId : profile.profileId} code />
                     <InfoRow label="认证状态" value={authStatusText(profile)} />
                     <InfoRow label="生图能力" value={imageAbility.ok ? "gpt-image-2 可用" : imageAbility.detail} />
@@ -223,9 +228,12 @@ export function AccountsPanel(props: {
                   <button className={`btn-secondary ${profile.isActive ? "is-current" : ""}`} type="button" onClick={() => props.onAction("activate", profile)} disabled={profile.isActive || isBusy || authInvalid}>
                     {authInvalid ? "网关不可用" : profile.isActive ? "网关使用中" : "应用网关"}
                   </button>
-                  <button className={`btn-secondary ${codexActive ? "is-current codex" : ""}`} type="button" onClick={() => props.onAction("apply-codex", profile)} disabled={codexActive || isBusy || authInvalid}>
-                    {authInvalid ? "Codex 不可用" : codexActive ? "Codex 使用中" : "应用 Codex"}
-                  </button>
+                  <span className={`codex-action-wrap ${codexApplyUnsupported ? "is-unsupported" : ""}`} title={codexApplyUnsupported ? codexApplyReason : undefined}>
+                    <button className={`btn-secondary ${codexActive ? "is-current codex" : ""}`} type="button" onClick={() => props.onAction("apply-codex", profile)} disabled={codexButtonDisabled}>
+                      <span>{codexButtonLabel}</span>
+                      {codexApplyUnsupported && <Info className="codex-disabled-icon" size={13} aria-hidden="true" />}
+                    </button>
+                  </span>
                   <button className="btn-secondary" type="button" onClick={() => props.onAction("export", profile)} disabled={isBusy}>
                     导出
                   </button>

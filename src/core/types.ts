@@ -39,6 +39,15 @@ export type ProfileExportAudit = {
   lastExportKind?: "single" | "batch" | "all";
 };
 
+export type AccountIdSource =
+  | "chatgpt_account_id"
+  | "account_id"
+  | "chatgpt_user_id"
+  | "user_id"
+  | "sub"
+  | "email"
+  | "access_token_sha256";
+
 export type OAuthProfile = {
   provider: ProviderId;
   profileId: string;
@@ -48,6 +57,8 @@ export type OAuthProfile = {
   idToken?: string;
   expires: number;
   accountId: string;
+  codexAccountId?: string;
+  accountIdSource?: AccountIdSource;
   email?: string;
   quota?: CodexQuotaSnapshot;
   authStatus?: ProfileAuthStatus;
@@ -58,6 +69,10 @@ export type ProfileSummary = {
   provider: ProviderId;
   profileId: string;
   accountId: string;
+  codexAccountId?: string;
+  accountIdSource?: AccountIdSource;
+  codexApplySupported: boolean;
+  codexApplyReason?: string;
   email?: string;
   expiresAt: number;
   accessTokenPreview: string;
@@ -150,6 +165,9 @@ export type GatewaySettings = {
   };
   runtime: {
     quotaSyncConcurrency: number;
+    codexRequestSerializationEnabled: boolean;
+    codexRequestMinDelayMs: number;
+    codexRequestJitterMs: number;
   };
   image: {
     freeAccountWebGenerationEnabled: boolean;

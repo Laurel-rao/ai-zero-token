@@ -527,6 +527,10 @@ async function readCodexAuth(): Promise<Record<string, unknown> | null> {
   }
 }
 
+function getCodexAccountId(profile: OAuthProfile): string | undefined {
+  return profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+}
+
 export async function getCodexGatewayProviderStatus(params?: {
   providerId?: string;
 }): Promise<CodexGatewayProviderStatus> {
@@ -612,6 +616,11 @@ export async function getCodexAuthStatus(): Promise<CodexAuthStatus> {
 }
 
 export async function applyProfileToCodexAuth(profile: OAuthProfile): Promise<ApplyCodexAuthResult> {
+  const codexAccountId = getCodexAccountId(profile);
+  if (!codexAccountId) {
+    throw new Error("当前账号缺少真实 chatgpt_account_id，只能用于网关/API 转发，不能应用到本机 Codex。");
+  }
+
   if (!profile.idToken) {
     throw new Error("当前账号缺少 id_token。请先刷新账号 token 或重新导入包含 id_token 的账号 JSON。");
   }
@@ -636,7 +645,7 @@ export async function applyProfileToCodexAuth(profile: OAuthProfile): Promise<Ap
       id_token: profile.idToken,
       access_token: profile.access,
       refresh_token: profile.refresh,
-      account_id: profile.accountId,
+      account_id: codexAccountId,
     },
     last_refresh: new Date().toISOString(),
   };
@@ -651,7 +660,7 @@ export async function applyProfileToCodexAuth(profile: OAuthProfile): Promise<Ap
   return {
     path: authPath,
     exists: true,
-    accountId: profile.accountId,
+    accountId: codexAccountId,
     hasIdToken: true,
     lastRefresh: authFile.last_refresh,
     gatewayProvider: await getCodexGatewayProviderStatus(),

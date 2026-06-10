@@ -46,12 +46,20 @@ import {
 
 const DEFAULT_QUOTA_SYNC_CONCURRENCY = 3;
 const AUTH_CLAIM_PATH = "https://api.openai.com/auth";
+const CODEX_APPLY_UNSUPPORTED_REASON = "该账号缺少真实 chatgpt_account_id，只能用于网关/API 转发，不能应用到本机 Codex。";
 
 type ProfileRotationResult<T> = {
   profile: OAuthProfile;
   result: T;
   retryCount: number;
 };
+
+const REFRESH_TOKEN_INVALID_CODES = new Set([
+  "app_session_terminated",
+  "invalid_refresh_token",
+  "refresh_token_invalidated",
+  "refresh_token_reused",
+]);
 
 function getQuotaSyncConcurrency(configured?: number): number {
   const raw = process.env.AZT_QUOTA_SYNC_CONCURRENCY;
@@ -101,11 +109,22 @@ export class AuthService {
     };
   }
 
+  private resolveCodexAccountId(profile: OAuthProfile): string | undefined {
+    return profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+  }
+
   private toProfileSummary(profile: OAuthProfile, activeProfileId?: string): ProfileSummary {
+    const codexAccountId = this.resolveCodexAccountId(profile);
+    const codexApplySupported = Boolean(codexAccountId);
+
     return {
       provider: profile.provider,
       profileId: profile.profileId,
       accountId: profile.accountId,
+      codexAccountId,
+      accountIdSource: profile.accountIdSource ?? (codexAccountId ? "chatgpt_account_id" : undefined),
+      codexApplySupported,
+      codexApplyReason: codexApplySupported ? undefined : CODEX_APPLY_UNSUPPORTED_REASON,
       email: profile.email,
       quota: profile.quota,
       expiresAt: profile.expires,
@@ -164,7 +183,7 @@ export class AuthService {
     }
 
     const tokenAccountId = this.getJwtAccountId(payload);
-    return !tokenAccountId || tokenAccountId === profile.accountId;
+    return !tokenAccountId || tokenAccountId === this.resolveCodexAccountId(profile);
   }
 
   private buildExportAudit(current: ProfileExportAudit | undefined, kind: ProfileExportAudit["lastExportKind"], exportedAt: number): ProfileExportAudit {
@@ -217,8 +236,13 @@ export class AuthService {
 
     if (
       code === "token_invalidated" ||
+      (code ? REFRESH_TOKEN_INVALID_CODES.has(code) : false) ||
       fingerprint.includes("token_invalidated") ||
-      fingerprint.includes("authentication token has been invalidated")
+      fingerprint.includes("authentication token has been invalidated") ||
+      fingerprint.includes("app_session_terminated") ||
+      fingerprint.includes("invalid_refresh_token") ||
+      fingerprint.includes("refresh_token_invalidated") ||
+      fingerprint.includes("refresh_token_reused")
     ) {
       return {
         state: "token_invalidated",
@@ -384,6 +408,10 @@ export class AuthService {
       marker.includes("usage_limit_reached") ||
       marker.includes("token_invalidated") ||
       marker.includes("authentication token has been invalidated") ||
+      marker.includes("app_session_terminated") ||
+      marker.includes("invalid_refresh_token") ||
+      marker.includes("refresh_token_invalidated") ||
+      marker.includes("refresh_token_reused") ||
       marker.includes("刷新 token 失败")
     );
   }
@@ -437,6 +465,7 @@ export class AuthService {
         provider,
         (current) => ({
           ...refreshed,
+          profileId: current.profileId,
           email: refreshed.email ?? current.email,
           quota: current.quota,
           authStatus: this.createOkAuthStatus(),
@@ -444,6 +473,7 @@ export class AuthService {
       );
       return this.toManagedProfile(merged ?? {
         ...refreshed,
+        profileId: profile.profileId,
         quota: profile.quota,
         authStatus: this.createOkAuthStatus(),
       });
@@ -480,8 +510,8 @@ export class AuthService {
       .filter((item) => !excludedProfileIds.has(item.profile.profileId))
       .filter((item) => this.canEnterAutoSwitchPool(item.profile))
       .sort((left, right) => {
-        const leftCodexConflict = codexAccountId && left.profile.accountId === codexAccountId ? 1 : 0;
-        const rightCodexConflict = codexAccountId && right.profile.accountId === codexAccountId ? 1 : 0;
+        const leftCodexConflict = codexAccountId && this.resolveCodexAccountId(left.profile) === codexAccountId ? 1 : 0;
+        const rightCodexConflict = codexAccountId && this.resolveCodexAccountId(right.profile) === codexAccountId ? 1 : 0;
         const codexDiff = leftCodexConflict - rightCodexConflict;
         if (codexDiff !== 0) {
           return codexDiff;
@@ -522,7 +552,7 @@ export class AuthService {
       reason: this.hasInvalidAuthStatus(profile) ? "auth_error" : "quota_exhausted",
       fromProfileId: profile.profileId,
       toProfileId: activated.profileId,
-      avoidedCodexAccount: Boolean(codexAccountId && activated.accountId !== codexAccountId),
+      avoidedCodexAccount: Boolean(codexAccountId && this.resolveCodexAccountId(activated) !== codexAccountId),
     });
     return this.toManagedProfile(activated);
   }

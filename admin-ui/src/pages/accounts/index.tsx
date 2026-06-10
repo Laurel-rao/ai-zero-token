@@ -8,6 +8,7 @@ import {
   getPlanKey,
   getPlanRank,
   isAuthInvalid,
+  isCodexActiveProfile,
   isQuotaExhausted,
   profileHealth,
   profileLabel,
@@ -44,9 +45,9 @@ export function AccountsPage(props: {
     const search = filter.search.trim().toLowerCase();
     const filtered = profiles.filter((profile) => {
       const label = profileLabel(profile, true).toLowerCase();
-      const haystack = [label, profile.accountId, profile.profileId, profile.email || ""].join(" ").toLowerCase();
+      const haystack = [label, profile.accountId, profile.codexAccountId || "", profile.profileId, profile.email || ""].join(" ").toLowerCase();
       const health = profileHealth(profile);
-      const codexActive = Boolean(props.codexAccountId && profile.accountId === props.codexAccountId);
+      const codexActive = isCodexActiveProfile(profile, props.codexAccountId);
       const planKey = getPlanKey(profile);
       if (search && !haystack.includes(search)) return false;
       if (filter.status === "active") return profile.isActive || codexActive;
@@ -92,7 +93,7 @@ export function AccountsPage(props: {
     const profiles = props.config?.profiles || [];
     const excludedProfileIds = new Set(props.config?.settings.autoSwitch.excludedProfileIds || []);
     const count = (predicate: (profile: ProfileSummary) => boolean) => profiles.filter(predicate).length;
-    const codexActiveCount = count((profile) => Boolean(props.codexAccountId && profile.accountId === props.codexAccountId));
+    const codexActiveCount = count((profile) => isCodexActiveProfile(profile, props.codexAccountId));
     return [
       { key: "all", label: "总账号", value: profiles.length, tone: "blue" },
       { key: "available", label: "可用", value: count((profile) => ["healthy", "warning", "unknown"].includes(profileHealth(profile).key)), tone: "green" },
@@ -136,6 +137,10 @@ export function AccountsPage(props: {
     if (action === "remove" && !window.confirm(`确认删除 ${profileLabel(profile, props.showEmails)}？`)) return;
     if ((action === "activate" || action === "apply-codex") && isAuthInvalid(profile)) {
       props.setStatus(`${profileLabel(profile, props.showEmails)} 登录已失效，不能应用到${action === "activate" ? "网关" : "Codex"}。`);
+      return;
+    }
+    if (action === "apply-codex" && !profile.codexApplySupported) {
+      props.setStatus(profile.codexApplyReason || "该账号缺少真实 chatgpt_account_id，不能应用到本机 Codex。");
       return;
     }
     if ((action === "activate" || action === "apply-codex") && isQuotaExhausted(profile)) {

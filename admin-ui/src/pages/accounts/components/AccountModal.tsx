@@ -1,5 +1,5 @@
-import { useState, type ChangeEvent, type Dispatch, type SetStateAction } from "react";
-import { FileArchive, Loader2, LogIn } from "lucide-react";
+import { useEffect, useState, type ChangeEvent, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import { FileArchive, Loader2, LogIn, Send } from "lucide-react";
 import { unzipSync, strFromU8 } from "fflate";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
@@ -7,6 +7,7 @@ import type { BusyAction } from "@/shared/lib/app-types";
 import { errorMessage } from "@/shared/lib/app-utils";
 import { formatJson } from "@/shared/lib/format";
 import { Modal } from "@/shared/components/Modal";
+import type { ManualLoginState } from "@/hooks/useAdminWorkspaceState";
 
 type ZipImportPreview = {
   fileName: string;
@@ -58,13 +59,35 @@ async function readZipProfiles(file: File): Promise<ZipImportPreview> {
 export function AccountModal(props: {
   busy: BusyAction;
   login: () => Promise<void>;
+  manualLogin: ManualLoginState;
+  submitManualLogin: (input: string) => Promise<void>;
+  cancelManualLogin: () => Promise<void>;
   setBusy: Dispatch<SetStateAction<BusyAction>>;
   setConfig: Dispatch<SetStateAction<AdminConfig | null>>;
   setStatus: Dispatch<SetStateAction<string>>;
   setAccountModalOpen: Dispatch<SetStateAction<boolean>>;
 }) {
   const [importText, setImportText] = useState("");
+  const [manualInput, setManualInput] = useState("");
   const [zipPreview, setZipPreview] = useState<ZipImportPreview | null>(null);
+
+  useEffect(() => {
+    if (!props.manualLogin) {
+      setManualInput("");
+    }
+  }, [props.manualLogin]);
+
+  function closeModal() {
+    if (props.manualLogin) {
+      props.cancelManualLogin().catch((error) => props.setStatus(errorMessage(error)));
+    }
+    props.setAccountModalOpen(false);
+  }
+
+  function handleManualSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    props.submitManualLogin(manualInput).catch((error) => props.setStatus(errorMessage(error)));
+  }
 
   async function importProfile(profileInput?: unknown, successMessage?: (count: number) => string) {
     props.setBusy("import");
@@ -155,7 +178,7 @@ export function AccountModal(props: {
   }
 
   return (
-    <Modal title="新增账号" onClose={() => props.setAccountModalOpen(false)}>
+    <Modal title="新增账号" onClose={closeModal}>
       <div className="modal-grid">
         <section className="modal-section">
           <h4>OAuth 登录</h4>
@@ -164,6 +187,31 @@ export function AccountModal(props: {
             {props.busy === "login" ? <Loader2 className="spin" size={16} /> : <LogIn size={16} />}
             登录
           </button>
+          {props.manualLogin ? (
+            <form className="manual-login-panel" onSubmit={handleManualSubmit}>
+              <div>
+                <strong>需要手动完成授权</strong>
+                <p>{props.manualLogin.message}</p>
+              </div>
+              <textarea
+                className="textarea manual-login-textarea"
+                value={manualInput}
+                onChange={(event) => setManualInput(event.target.value)}
+                placeholder="粘贴完整回调 URL 或 authorization code"
+                autoFocus
+                spellCheck={false}
+              />
+              <div className="button-row">
+                <button className="btn-secondary" type="button" onClick={props.cancelManualLogin} disabled={props.busy === "login-manual"}>
+                  取消本次登录
+                </button>
+                <button className="btn-primary" type="submit" disabled={props.busy === "login-manual" || !manualInput.trim()}>
+                  {props.busy === "login-manual" ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+                  提交授权结果
+                </button>
+              </div>
+            </form>
+          ) : null}
         </section>
         <section className="modal-section">
           <h4>导入账号 JSON</h4>

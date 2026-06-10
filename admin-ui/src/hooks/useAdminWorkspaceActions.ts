@@ -7,6 +7,8 @@ import type { WorkspaceState } from "./useAdminWorkspaceState";
 
 export type WorkspaceActions = {
   login: () => Promise<void>;
+  submitManualLogin: (input: string) => Promise<void>;
+  cancelManualLogin: () => Promise<void>;
   logout: () => Promise<void>;
   goRoute: (route: AppRoute) => void;
   copyBaseUrl: () => void;
@@ -33,38 +35,12 @@ export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceAction
       const result = await fetchJson<AdminConfig | ManualLoginResult>("/_gateway/admin/login", { method: "POST" });
       if (isManualLoginResult(result)) {
         state.setConfig(result.config);
-        state.setStatus(result.login.message);
-        const shouldFillManually = window.confirm(`${result.login.message}\n\n是否现在手动填写？`);
-        if (!shouldFillManually) {
-          await fetchJson<AdminConfig>("/_gateway/admin/login/cancel", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ loginId: result.login.loginId }),
-          });
-          state.setStatus("已取消 OAuth 登录。");
-          return;
-        }
-
-        const manualInput = window.prompt("请粘贴完整回调 URL 或 authorization code：");
-        if (!manualInput?.trim()) {
-          await fetchJson<AdminConfig>("/_gateway/admin/login/cancel", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ loginId: result.login.loginId }),
-          });
-          state.setStatus("未填写授权结果，已取消 OAuth 登录。");
-          return;
-        }
-
-        state.setStatus("正在提交手动授权结果...");
-        const next = await fetchJson<AdminConfig>("/_gateway/admin/login/manual", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ loginId: result.login.loginId, input: manualInput }),
+        state.setManualLogin({
+          loginId: result.login.loginId,
+          message: result.login.message,
         });
-        state.setConfig(next);
-        state.setAccountModalOpen(false);
-        state.setStatus("登录完成，账号状态已同步。");
+        state.setAccountModalOpen(true);
+        state.setStatus(result.login.message);
         return;
       }
 
@@ -72,6 +48,61 @@ export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceAction
       state.setConfig(next);
       state.setAccountModalOpen(false);
       state.setStatus("登录完成，账号状态已同步。");
+    } catch (error) {
+      state.setStatus(errorMessage(error));
+    } finally {
+      state.setBusy(null);
+    }
+  }, [state]);
+
+  const submitManualLogin = useCallback(async (input: string) => {
+    const pending = state.manualLogin;
+    const manualInput = input.trim();
+    if (!pending) {
+      state.setStatus("没有等待中的 OAuth 登录，请重新点击登录。");
+      return;
+    }
+    if (!manualInput) {
+      state.setStatus("请粘贴完整回调 URL 或 authorization code。");
+      return;
+    }
+
+    state.setBusy("login-manual");
+    state.setStatus("正在提交手动授权结果...");
+    try {
+      const next = await fetchJson<AdminConfig>("/_gateway/admin/login/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ loginId: pending.loginId, input: manualInput }),
+      });
+      state.setConfig(next);
+      state.setManualLogin(null);
+      state.setAccountModalOpen(false);
+      state.setStatus("登录完成，账号状态已同步。");
+    } catch (error) {
+      state.setStatus(errorMessage(error));
+    } finally {
+      state.setBusy(null);
+    }
+  }, [state]);
+
+  const cancelManualLogin = useCallback(async () => {
+    const pending = state.manualLogin;
+    if (!pending) {
+      state.setManualLogin(null);
+      return;
+    }
+
+    state.setBusy("login-manual");
+    try {
+      const next = await fetchJson<AdminConfig>("/_gateway/admin/login/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ loginId: pending.loginId }),
+      });
+      state.setConfig(next);
+      state.setManualLogin(null);
+      state.setStatus("已取消 OAuth 登录。");
     } catch (error) {
       state.setStatus(errorMessage(error));
     } finally {
@@ -117,6 +148,8 @@ export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceAction
 
   return {
     login,
+    submitManualLogin,
+    cancelManualLogin,
     logout,
     goRoute,
     copyBaseUrl,

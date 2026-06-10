@@ -18,6 +18,9 @@ export function AppOverlays({ workspace }: { workspace: UseAdminWorkspaceResult 
         <AccountModal
           busy={workspace.busy}
           login={workspace.login}
+          manualLogin={workspace.manualLogin}
+          submitManualLogin={workspace.submitManualLogin}
+          cancelManualLogin={workspace.cancelManualLogin}
           setBusy={workspace.setBusy}
           setConfig={workspace.setConfig}
           setStatus={workspace.setStatus}

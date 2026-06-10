@@ -242,16 +242,23 @@ function requestBodyString(body: Record<string, unknown> | undefined, key: strin
   return typeof value === "string" ? value.trim() : "";
 }
 
+function getCodexAccountId(profile: OAuthProfile): string | undefined {
+  return profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+}
+
 function buildCodexRequestHeaders(profile: OAuthProfile, requestBody?: Record<string, unknown>): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "text/event-stream",
     "Content-Type": "application/json",
     Authorization: `Bearer ${profile.access}`,
-    "ChatGPT-Account-Id": profile.accountId,
     "OpenAI-Beta": "responses=experimental",
     Originator: "pi",
     "User-Agent": "pi (bun demo)",
   };
+  const codexAccountId = getCodexAccountId(profile);
+  if (codexAccountId) {
+    headers["ChatGPT-Account-Id"] = codexAccountId;
+  }
   const explicitSessionId = requestBodyString(requestBody, "session_id");
   const conversationId = requestBodyString(requestBody, "conversation_id");
   const promptCacheKey = requestBodyString(requestBody, "prompt_cache_key");

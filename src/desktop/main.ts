@@ -304,6 +304,13 @@ function profileLabel(profile: ProfileSummary | null | undefined): string {
   return normalizeLabel(profile.email, profile.accountId);
 }
 
+function profileCodexAccountId(profile: ProfileSummary | null | undefined): string | undefined {
+  if (!profile) {
+    return undefined;
+  }
+  return profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+}
+
 function maskedProfileLabel(profile: ProfileSummary | null | undefined): string {
   return maskAccountLabel(profileLabel(profile));
 }
@@ -313,7 +320,7 @@ function codexLabel(config: AdminConfig | null): string {
     return "未应用";
   }
 
-  const codexProfile = config.profiles.find((profile) => profile.accountId === config.codex.accountId);
+  const codexProfile = config.profiles.find((profile) => profileCodexAccountId(profile) === config.codex.accountId);
   return maskedProfileLabel(codexProfile) || maskAccountLabel(normalizeLabel(config.codex.email, config.codex.accountId ?? "未知账号"));
 }
 
@@ -663,7 +670,7 @@ function buildAccountPanelPage(config: AdminConfig | null, message: string): str
       const health = profileHealth(profile);
       const quotaRemaining = Math.max(0, Math.round(100 - primaryUsage(profile)));
       const isGateway = profile.isActive;
-      const isCodex = codexAccountId === profile.accountId;
+      const isCodex = codexAccountId === profileCodexAccountId(profile);
       return {
         profileId: profile.profileId,
         accountId: profile.accountId,

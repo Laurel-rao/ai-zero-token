@@ -82,6 +82,15 @@ export function usageCorner(profile: ProfileSummary, codexActive: boolean): { cl
   return null;
 }
 
+export function profileCodexAccountId(profile: ProfileSummary | null | undefined): string | undefined {
+  if (!profile) return undefined;
+  return profile.codexAccountId || (!profile.accountIdSource ? profile.accountId : undefined);
+}
+
+export function isCodexActiveProfile(profile: ProfileSummary, codexAccountId?: string): boolean {
+  return Boolean(codexAccountId && profileCodexAccountId(profile) === codexAccountId);
+}
+
 export function isQuotaExhausted(profile: ProfileSummary): boolean {
   return primaryUsage(profile) >= 100 || secondaryUsage(profile) >= 100;
 }
@@ -107,7 +116,7 @@ export function autoSwitchEligibility(profile: ProfileSummary): { key: "ready" |
 }
 
 export function profileSortGroup(profile: ProfileSummary, codexAccountId?: string): number {
-  const isActive = profile.isActive || Boolean(codexAccountId && profile.accountId === codexAccountId);
+  const isActive = profile.isActive || isCodexActiveProfile(profile, codexAccountId);
   if (isActive) return 0;
   if (isProfileInvalid(profile)) return 2;
   return 1;

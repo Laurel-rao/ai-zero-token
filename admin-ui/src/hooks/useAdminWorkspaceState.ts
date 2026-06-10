@@ -6,6 +6,10 @@ import { errorMessage } from "@/shared/lib/app-utils";
 import { readRouteFromHash, type AppRoute } from "@/routes/routes";
 
 export type ModalImage = { src: string; meta: string; filename?: string };
+export type ManualLoginState = {
+  loginId: string;
+  message: string;
+} | null;
 
 export type WorkspaceState = {
   config: AdminConfig | null;
@@ -20,6 +24,8 @@ export type WorkspaceState = {
   setAccountModalOpen: Dispatch<SetStateAction<boolean>>;
   contactOpen: boolean;
   setContactOpen: Dispatch<SetStateAction<boolean>>;
+  manualLogin: ManualLoginState;
+  setManualLogin: Dispatch<SetStateAction<ManualLoginState>>;
   previewImage: ModalImage | null;
   setPreviewImage: Dispatch<SetStateAction<ModalImage | null>>;
   activeRoute: AppRoute;
@@ -48,6 +54,7 @@ export function useAdminWorkspaceState(): WorkspaceState {
   const [showEmails, setShowEmails] = useState(readStoredShowEmails);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [contactOpen, setContactOpen] = useState(false);
+  const [manualLogin, setManualLogin] = useState<ManualLoginState>(null);
   const [previewImage, setPreviewImage] = useState<ModalImage | null>(null);
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => readRouteFromHash());
   const [requestLogs, setRequestLogs] = useState<RequestLog[]>([]);
@@ -168,6 +175,8 @@ export function useAdminWorkspaceState(): WorkspaceState {
     setAccountModalOpen,
     contactOpen,
     setContactOpen,
+    manualLogin,
+    setManualLogin,
     previewImage,
     setPreviewImage,
     activeRoute,

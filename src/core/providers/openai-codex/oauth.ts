@@ -1,9 +1,9 @@
 import http from "node:http";
-import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import type { OAuthProfile } from "../../types.js";
+import type { AccountIdSource, OAuthProfile } from "../../types.js";
 import { requestText } from "../http-client.js";
 import { generatePKCE } from "./pkce.js";
 
@@ -14,6 +14,7 @@ const REDIRECT_URI = "http://localhost:1455/auth/callback";
 const SCOPE = "openid profile email offline_access";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const PROFILE_CLAIM_PATH = "https://api.openai.com/profile";
+const DEFAULT_CALLBACK_TIMEOUT_MS = 180_000;
 const SUCCESS_HTML = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -79,6 +80,10 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
+function getString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function extractEmailFromPayload(payload: Record<string, unknown> | null): string | undefined {
   const profileClaim = payload?.[PROFILE_CLAIM_PATH] as Record<string, unknown> | undefined;
   const nestedEmail = profileClaim?.email;
@@ -92,6 +97,84 @@ function extractEmailFromPayload(payload: Record<string, unknown> | null): strin
   }
 
   return undefined;
+}
+
+function hashAccessToken(access: string): string {
+  return createHash("sha256").update(access).digest("hex");
+}
+
+function resolveCodexAccountId(profile?: Pick<OAuthProfile, "accountId" | "codexAccountId" | "accountIdSource">): string | undefined {
+  if (!profile) {
+    return undefined;
+  }
+  return profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+}
+
+type ExtractedIdentity = {
+  accountId: string;
+  codexAccountId?: string;
+  source: AccountIdSource;
+};
+
+function extractIdentity(
+  accessToken: string,
+  payload: Record<string, unknown> | null,
+  fallback?: Pick<OAuthProfile, "accountId" | "codexAccountId" | "accountIdSource">,
+): ExtractedIdentity {
+  const authClaim = payload?.[JWT_CLAIM_PATH] as Record<string, unknown> | undefined;
+  const tokenAccountId = getString(authClaim?.chatgpt_account_id);
+  if (tokenAccountId) {
+    return {
+      accountId: tokenAccountId,
+      codexAccountId: tokenAccountId,
+      source: "chatgpt_account_id",
+    };
+  }
+
+  if (fallback?.accountId) {
+    return {
+      accountId: fallback.accountId,
+      codexAccountId: resolveCodexAccountId(fallback),
+      source: fallback.accountIdSource ?? "chatgpt_account_id",
+    };
+  }
+
+  const chatGptUserId = getString(authClaim?.chatgpt_user_id);
+  if (chatGptUserId) {
+    return {
+      accountId: chatGptUserId,
+      source: "chatgpt_user_id",
+    };
+  }
+
+  const userId = getString(authClaim?.user_id);
+  if (userId) {
+    return {
+      accountId: userId,
+      source: "user_id",
+    };
+  }
+
+  const subject = getString(payload?.sub);
+  if (subject) {
+    return {
+      accountId: subject,
+      source: "sub",
+    };
+  }
+
+  const email = extractEmailFromPayload(payload);
+  if (email) {
+    return {
+      accountId: `email:${email.toLowerCase()}`,
+      source: "email",
+    };
+  }
+
+  return {
+    accountId: `access:${hashAccessToken(accessToken).slice(0, 32)}`,
+    source: "access_token_sha256",
+  };
 }
 
 function parseUpstreamErrorBody(body: string): UpstreamErrorBody | undefined {
@@ -150,26 +233,23 @@ function extractProfile(
   refreshToken: string,
   expires: number,
   idToken?: string,
-  fallback?: Pick<OAuthProfile, "accountId" | "email">,
+  fallback?: Pick<OAuthProfile, "accountId" | "codexAccountId" | "accountIdSource" | "email">,
 ): OAuthProfile {
   const payload = decodeJwtPayload(accessToken);
-  const authClaim = payload?.[JWT_CLAIM_PATH] as Record<string, unknown> | undefined;
-  const accountId = authClaim?.chatgpt_account_id ?? fallback?.accountId;
-  if (typeof accountId !== "string" || !accountId.trim()) {
-    throw new Error("无法从 access token 中提取 accountId。");
-  }
-
+  const identity = extractIdentity(accessToken, payload, fallback);
   const email = extractEmailFromPayload(payload) ?? fallback?.email;
 
   return {
     provider: "openai-codex",
-    profileId: `openai-codex:${accountId}`,
+    profileId: `openai-codex:${identity.accountId}`,
     mode: "oauth_account",
     access: accessToken,
     refresh: refreshToken,
     idToken,
     expires,
-    accountId,
+    accountId: identity.accountId,
+    codexAccountId: identity.codexAccountId,
+    accountIdSource: identity.source,
     email,
   };
 }
@@ -260,31 +340,95 @@ export async function refreshOpenAICodexToken(profile: OAuthProfile): Promise<OA
     json.id_token ?? profile.idToken,
     {
       accountId: profile.accountId,
+      codexAccountId: profile.codexAccountId,
+      accountIdSource: profile.accountIdSource,
       email: profile.email,
     },
   );
 }
 
-function tryOpenBrowser(url: string): boolean {
+function commandExists(command: string): boolean {
   try {
-    if (process.platform === "darwin") {
-      const child = spawn("open", [url], { stdio: "ignore", detached: true });
-      child.unref();
-      return true;
-    }
+    const result = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
+      stdio: "ignore",
+      timeout: 2_000,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
 
-    if (process.platform === "win32") {
-      const child = spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true });
-      child.unref();
-      return true;
-    }
-
-    const child = spawn("xdg-open", [url], { stdio: "ignore", detached: true });
+function spawnDetached(command: string, args: string[]): boolean {
+  try {
+    const child = spawn(command, args, { stdio: "ignore", detached: true });
+    child.on("error", () => undefined);
     child.unref();
     return true;
   } catch {
     return false;
   }
+}
+
+function tryOpenPrivateBrowser(url: string): boolean {
+  if (process.platform === "darwin") {
+    const browsers = [
+      { app: "Google Chrome", args: ["--incognito", url] },
+      { app: "Chromium", args: ["--incognito", url] },
+      { app: "Microsoft Edge", args: ["--inprivate", url] },
+      { app: "Brave Browser", args: ["--incognito", url] },
+      { app: "Firefox", args: ["-private-window", url] },
+    ];
+
+    for (const browser of browsers) {
+      try {
+        const result = spawnSync("open", ["-na", browser.app, "--args", ...browser.args], {
+          stdio: "ignore",
+          timeout: 2_000,
+        });
+        if (result.status === 0) {
+          return true;
+        }
+      } catch {
+        // Try the next browser candidate.
+      }
+    }
+    return false;
+  }
+
+  if (process.platform === "win32") {
+    const browsers = [
+      { command: "chrome", args: ["--incognito", url] },
+      { command: "msedge", args: ["--inprivate", url] },
+      { command: "brave", args: ["--incognito", url] },
+      { command: "firefox", args: ["-private-window", url] },
+    ];
+
+    for (const browser of browsers) {
+      if (commandExists(browser.command)) {
+        return spawnDetached("cmd", ["/c", "start", "", browser.command, ...browser.args]);
+      }
+    }
+    return false;
+  }
+
+  const browsers = [
+    { command: "google-chrome", args: ["--incognito", url] },
+    { command: "google-chrome-stable", args: ["--incognito", url] },
+    { command: "chromium", args: ["--incognito", url] },
+    { command: "chromium-browser", args: ["--incognito", url] },
+    { command: "microsoft-edge", args: ["--inprivate", url] },
+    { command: "brave-browser", args: ["--incognito", url] },
+    { command: "firefox", args: ["--private-window", url] },
+  ];
+
+  for (const browser of browsers) {
+    if (commandExists(browser.command)) {
+      return spawnDetached(browser.command, browser.args);
+    }
+  }
+
+  return false;
 }
 
 async function promptLine(message: string): Promise<string> {
@@ -440,11 +584,11 @@ export async function startOpenAICodexLogin(): Promise<OpenAICodexLoginSession> 
     console.log("已启用 curl-only 模式进行 token 请求。");
   }
 
-  const opened = tryOpenBrowser(url);
+  const opened = tryOpenPrivateBrowser(url);
   if (opened) {
-    console.log("已尝试打开浏览器。");
+    console.log("已尝试打开无痕浏览器窗口。");
   } else {
-    console.log("未能自动打开浏览器，请手动打开上面的授权地址。");
+    console.log("未能自动打开无痕浏览器窗口，请手动用无痕/隐私窗口打开上面的授权地址。");
   }
 
   return {
@@ -470,7 +614,7 @@ export async function startOpenAICodexLogin(): Promise<OpenAICodexLoginSession> 
 
 export async function loginOpenAICodex(options?: OpenAICodexLoginOptions): Promise<OAuthProfile> {
   const session = await startOpenAICodexLogin();
-  const callbackTimeoutMs = options?.callbackTimeoutMs ?? 60_000;
+  const callbackTimeoutMs = options?.callbackTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS;
   try {
     const code = await session.waitForCode(callbackTimeoutMs);
     if (!code && options?.allowManualCode === false) {

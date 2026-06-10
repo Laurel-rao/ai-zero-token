@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.11 - 2026-06-10
+
+- Accepted sub2api-style Codex account JSON imports that do not include a real `chatgpt_account_id`, using user id, JWT subject, email, or token hash as gateway-only identities.
+- Marked gateway-only imported accounts as not applicable to local Codex, disabled the account card Codex action, and added a hover reason so users can see why the account is API-only.
+- Stopped sending fallback identities as `ChatGPT-Account-Id` headers and guarded local Codex `auth.json` writes so only real Codex account ids are applied.
+- Added configurable per-account Codex request serialization with minimum delay and jitter to smooth bursty native Codex traffic.
+- Improved the manual OAuth fallback flow by keeping the pasted callback URL/code form inside the account modal and extending the automatic callback wait window to three minutes.
+
 ## 2.0.10 - 2026-05-26
 
 - Added a manual OAuth fallback in the desktop UI so login can continue by pasting the callback URL or authorization code when the local callback is not received.

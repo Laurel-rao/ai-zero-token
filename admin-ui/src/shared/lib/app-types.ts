@@ -5,6 +5,7 @@ export type BusyAction =
   | "refresh"
   | "runtime-refresh"
   | "login"
+  | "login-manual"
   | "logout"
   | "import"
   | "template"

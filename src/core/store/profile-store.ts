@@ -55,6 +55,22 @@ function extractEmailFromAccessToken(token: string): string | undefined {
   return undefined;
 }
 
+function normalizeProfile(profile: OAuthProfile): OAuthProfile {
+  const recoveredEmail =
+    typeof profile.email === "string" && profile.email.trim()
+      ? profile.email.trim()
+      : extractEmailFromAccessToken(profile.access);
+  const codexAccountId = profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+
+  return {
+    ...profile,
+    mode: "oauth_account" as const,
+    email: recoveredEmail,
+    codexAccountId,
+    accountIdSource: profile.accountIdSource ?? (codexAccountId ? "chatgpt_account_id" : undefined),
+  };
+}
+
 export async function loadStore(): Promise<DemoStore> {
   try {
     await ensureStateMigrated();
@@ -63,18 +79,7 @@ export async function loadStore(): Promise<DemoStore> {
     const normalizedProfiles = Object.fromEntries(
       Object.entries(parsed.profiles ?? {}).map(([profileId, profile]) => [
         profileId,
-        (() => {
-          const recoveredEmail =
-            typeof profile.email === "string" && profile.email.trim()
-              ? profile.email.trim()
-              : extractEmailFromAccessToken(profile.access);
-
-          return {
-            ...profile,
-            mode: "oauth_account" as const,
-            email: recoveredEmail,
-          };
-        })(),
+        normalizeProfile(profile),
       ]),
     );
     return {

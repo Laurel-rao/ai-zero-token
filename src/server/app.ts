@@ -240,6 +240,9 @@ const settingsUpdateSchema = z.object({
   runtime: z
     .object({
       quotaSyncConcurrency: z.number().int().min(1).max(32).optional(),
+      codexRequestSerializationEnabled: z.boolean().optional(),
+      codexRequestMinDelayMs: z.number().int().min(0).max(60_000).optional(),
+      codexRequestJitterMs: z.number().int().min(0).max(60_000).optional(),
     })
     .optional(),
   image: z
@@ -1485,15 +1488,27 @@ function maskSecret(value: string): string {
   return `${value.slice(0, 8)}...${value.slice(-6)}`;
 }
 
+const CODEX_APPLY_UNSUPPORTED_REASON = "该账号缺少真实 chatgpt_account_id，只能用于网关/API 转发，不能应用到本机 Codex。";
+
+function resolveCodexAccountId(profile: Pick<OAuthProfile, "accountId" | "codexAccountId" | "accountIdSource">): string | undefined {
+  return profile.codexAccountId ?? (!profile.accountIdSource ? profile.accountId : undefined);
+}
+
 function serializeProfile(profile: OAuthProfile | null): Record<string, unknown> | null {
   if (!profile) {
     return null;
   }
 
+  const codexAccountId = resolveCodexAccountId(profile);
+  const codexApplySupported = Boolean(codexAccountId);
   return {
     provider: profile.provider,
     profileId: profile.profileId,
     accountId: profile.accountId,
+    codexAccountId,
+    accountIdSource: profile.accountIdSource ?? (codexAccountId ? "chatgpt_account_id" : undefined),
+    codexApplySupported,
+    codexApplyReason: codexApplySupported ? undefined : CODEX_APPLY_UNSUPPORTED_REASON,
     email: profile.email,
     quota: profile.quota,
     authStatus: profile.authStatus,
@@ -1509,6 +1524,10 @@ function serializeManagedProfile(profile: ProfileSummary): Record<string, unknow
     provider: profile.provider,
     profileId: profile.profileId,
     accountId: profile.accountId,
+    codexAccountId: profile.codexAccountId,
+    accountIdSource: profile.accountIdSource,
+    codexApplySupported: profile.codexApplySupported,
+    codexApplyReason: profile.codexApplyReason,
     email: profile.email,
     quota: profile.quota,
     authStatus: profile.authStatus,
@@ -2086,13 +2105,13 @@ export function createApp(params?: {
       createdAt: Date.now(),
     };
 
-    const code = await session.waitForCode(60_000);
+    const code = await session.waitForCode(180_000);
     if (!code) {
       return {
         login: {
           status: "manual_required",
           loginId,
-          message: "60 秒内没有收到 OAuth 自动回调。可以粘贴浏览器地址栏里的完整回调 URL 或 authorization code 继续登录。",
+          message: "3 分钟内没有收到 OAuth 自动回调。可以粘贴浏览器地址栏里的完整回调 URL 或 authorization code 继续登录。",
         },
         config: await buildAdminConfig(request),
       };
@@ -2719,14 +2738,23 @@ export function createApp(params?: {
             : await ctx.authService.requireUsableProfile("openai-codex", {
                 skipAutoSwitch: keepProfileSticky,
               });
-          upstream = await streamOpenAICodex({
-            profile,
-            model,
-            bodyOverride: codexBody,
-            endpoint: upstreamEndpoint,
-            passthroughBody: true,
-            signal: abortController.signal,
-          });
+          const selectedProfile = profile;
+          upstream = await ctx.requestThrottleService.runForProfile(
+            selectedProfile,
+            () => streamOpenAICodex({
+              profile: selectedProfile,
+              model,
+              bodyOverride: codexBody,
+              endpoint: upstreamEndpoint,
+              passthroughBody: true,
+              signal: abortController.signal,
+            }),
+            {
+              requestId: request.id,
+              route: `codex/${upstreamEndpoint}`,
+              model,
+            },
+          );
           break;
         } catch (error) {
           const quota = (error as { quota?: import("../core/types.js").CodexQuotaSnapshot }).quota;

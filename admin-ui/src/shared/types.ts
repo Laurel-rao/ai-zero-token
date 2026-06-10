@@ -37,6 +37,10 @@ export type ProfileSummary = {
   provider: string;
   profileId: string;
   accountId: string;
+  codexAccountId?: string;
+  accountIdSource?: "chatgpt_account_id" | "account_id" | "chatgpt_user_id" | "user_id" | "sub" | "email" | "access_token_sha256";
+  codexApplySupported: boolean;
+  codexApplyReason?: string;
   email?: string;
   quota?: QuotaSnapshot;
   authStatus?: AuthStatus;
@@ -62,6 +66,9 @@ export type GatewaySettings = {
   };
   runtime: {
     quotaSyncConcurrency: number;
+    codexRequestSerializationEnabled: boolean;
+    codexRequestMinDelayMs: number;
+    codexRequestJitterMs: number;
   };
   image: {
     freeAccountWebGenerationEnabled: boolean;

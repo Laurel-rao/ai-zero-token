@@ -23,6 +23,9 @@ export function createDefaultSettings(): GatewaySettings {
     },
     runtime: {
       quotaSyncConcurrency: 3,
+      codexRequestSerializationEnabled: true,
+      codexRequestMinDelayMs: 2500,
+      codexRequestJitterMs: 1500,
     },
     image: {
       freeAccountWebGenerationEnabled: false,
@@ -51,6 +54,9 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
     },
     runtime: {
       quotaSyncConcurrency: normalizeQuotaSyncConcurrency(parsed.runtime?.quotaSyncConcurrency, defaults.runtime.quotaSyncConcurrency),
+      codexRequestSerializationEnabled: parsed.runtime?.codexRequestSerializationEnabled ?? defaults.runtime.codexRequestSerializationEnabled,
+      codexRequestMinDelayMs: normalizeMilliseconds(parsed.runtime?.codexRequestMinDelayMs, defaults.runtime.codexRequestMinDelayMs, 0, 60_000),
+      codexRequestJitterMs: normalizeMilliseconds(parsed.runtime?.codexRequestJitterMs, defaults.runtime.codexRequestJitterMs, 0, 60_000),
     },
     image: {
       freeAccountWebGenerationEnabled: parsed.image?.freeAccountWebGenerationEnabled ?? defaults.image.freeAccountWebGenerationEnabled,
@@ -80,6 +86,15 @@ export function normalizeQuotaSyncConcurrency(value: unknown, fallback = 3): num
   }
 
   return Math.min(32, Math.max(1, Math.trunc(parsed)));
+}
+
+export function normalizeMilliseconds(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : fallback;
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }
 
 function normalizeStringList(value: unknown): string[] {

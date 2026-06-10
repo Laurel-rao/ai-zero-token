@@ -637,6 +637,31 @@
   font-size: 12px;
 }
 
+.account-actions .codex-action-wrap {
+  flex: 1 1 120px;
+  display: flex;
+  min-width: 0;
+}
+
+.account-actions .codex-action-wrap .btn-secondary {
+  width: 100%;
+  flex: 1 1 auto;
+  gap: 6px;
+}
+
+.account-actions .codex-action-wrap.is-unsupported .btn-secondary:disabled {
+  pointer-events: none;
+  opacity: 0.92;
+  color: #92400e;
+  border-color: rgba(245, 158, 11, 0.28);
+  background: #fffbeb;
+}
+
+.codex-disabled-icon {
+  flex: 0 0 auto;
+  color: #b45309;
+}
+
 .account-actions .btn-secondary.is-current {
   position: relative;
   opacity: 1;

@@ -5,7 +5,7 @@ import type { AdminConfig, GatewayShareInfo, ProfileSummary } from "@/shared/typ
 import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
 import { copyText, errorMessage } from "@/shared/lib/app-utils";
 import { formatJson } from "@/shared/lib/format";
-import { autoSwitchEligibility, getPlanType, profileHealth, profileLabel } from "@/shared/lib/profiles";
+import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
 
 type CodexGatewayMode = "local" | "remote";
 type CodexProviderMode = "openai" | "ai-zero-token";
@@ -97,7 +97,7 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
 }
 
 function profileSearchText(profile: ProfileSummary): string {
-  return [profileLabel(profile, true), profile.email || "", profile.accountId, profile.profileId, getPlanType(profile)].join(" ").toLowerCase();
+  return [profileLabel(profile, true), profile.email || "", profile.accountId, profile.codexAccountId || "", profile.profileId, getPlanType(profile)].join(" ").toLowerCase();
 }
 
 export function SettingsPage(props: {
@@ -821,7 +821,7 @@ export function SettingsPage(props: {
                 const excluded = excludedProfileIds.has(profile.profileId);
                 const eligibility = autoSwitchEligibility(profile);
                 const health = profileHealth(profile);
-                const codexActive = Boolean(props.config?.codex.accountId && props.config.codex.accountId === profile.accountId);
+                const codexActive = isCodexActiveProfile(profile, props.config?.codex.accountId);
                 const disabledReason = eligibility.key === "ready" ? "" : eligibility.label;
                 const stateClass = excluded ? "is-excluded" : eligibility.key === "ready" ? "is-included" : "is-blocked";
                 const stateLabel = excluded ? "手动排除" : eligibility.label;

@@ -2,10 +2,12 @@ import type { ChatRequest, ChatResult } from "../types.js";
 import { askOpenAICodex } from "../providers/openai-codex/chat.js";
 import { AuthService } from "./auth-service.js";
 import { ModelService } from "./model-service.js";
+import { RequestThrottleService } from "./request-throttle-service.js";
 
 type ChatServiceDeps = {
   authService: AuthService;
   modelService: ModelService;
+  requestThrottleService: RequestThrottleService;
 };
 
 export class ChatService {
@@ -17,13 +19,20 @@ export class ChatService {
       allowUnknown: request.experimental?.allowUnknownModel,
     });
     const rotation = await this.deps.authService.withProfileRotation(provider, (profile) =>
-      askOpenAICodex({
+      this.deps.requestThrottleService.runForProfile(
         profile,
-        prompt: request.input,
-        model,
-        system: request.system,
-        bodyOverride: request.experimental?.codexBody,
-      }),
+        () => askOpenAICodex({
+          profile,
+          prompt: request.input,
+          model,
+          system: request.system,
+          bodyOverride: request.experimental?.codexBody,
+        }),
+        {
+          route: "chat",
+          model,
+        },
+      ),
     );
     const result = rotation.result;
 

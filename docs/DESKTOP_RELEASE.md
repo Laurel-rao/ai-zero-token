@@ -2,6 +2,16 @@
 
 This project ships the desktop app with Electron. The desktop main process starts the existing local Fastify gateway and loads the React management UI served by that gateway.
 
+## 2.0.11 Release Notes
+
+Version `2.0.11` improves Codex account import compatibility and native Codex traffic stability:
+
+- Account JSON import now accepts sub2api-style records without a real `chatgpt_account_id` by creating gateway-only identities from user id, JWT subject, email, or token hash.
+- Gateway-only imported accounts are blocked from local Codex application, with an account-card info icon explaining the reason on hover.
+- Local Codex `auth.json` writes and `ChatGPT-Account-Id` headers now use only real Codex account ids, preventing fallback identities from being misapplied.
+- Codex request serialization can be configured with a minimum delay and jitter to reduce bursty per-account upstream traffic.
+- Manual OAuth fallback stays inside the account modal and waits up to three minutes for the automatic callback before asking for a pasted URL or code.
+
 ## 2.0.10 Release Notes
 
 Version `2.0.10` improves OAuth login recovery and Codex auth freshness:
