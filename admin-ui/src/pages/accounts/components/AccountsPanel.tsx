@@ -1,9 +1,27 @@
-import { Code2, Globe2, Info, Loader2, RefreshCw, Search } from "lucide-react";
+import { Code2, Globe2, Info, Loader2, RefreshCw, Search, SlidersHorizontal } from "lucide-react";
 import type { AdminConfig, ProfileSummary } from "@/shared/types";
-import { profileHealth, profileInitial, profileLabel, getPlanKey, isAuthInvalid, isCodexActiveProfile, primaryUsage, quotaBarTone, resetLabel, resetTime, secondaryUsage, usageCorner, authStatusText, imageCapability, getPlanType } from "@/shared/lib/profiles";
+import {
+  authStatusText,
+  getPlanKey,
+  getPlanType,
+  imageCapability,
+  isAuthInvalid,
+  isCodexActiveProfile,
+  primaryUsage,
+  profileHealth,
+  profileInitial,
+  profileLabel,
+  quotaBarTone,
+  resetLabel,
+  resetTime,
+  secondaryUsage,
+  usageCorner,
+} from "@/shared/lib/profiles";
 import type { AccountStatItem, BusyAction, ProfileFilter } from "@/shared/lib/app-types";
 import { InfoRow } from "@/shared/components/InfoRow";
 import { formatFullTime } from "@/shared/lib/format";
+
+type ProfileAction = "activate" | "apply-codex" | "sync-quota" | "remove" | "export";
 
 export function AccountsPanel(props: {
   config: AdminConfig | null;
@@ -12,7 +30,7 @@ export function AccountsPanel(props: {
   showEmails: boolean;
   filter: ProfileFilter;
   selectedProfiles: Record<string, boolean>;
-  expandedProfiles: Record<string, boolean>;
+  detailProfileId: string | null;
   selectedCount: number;
   visibleCount: number;
   busy: BusyAction;
@@ -20,9 +38,10 @@ export function AccountsPanel(props: {
   onSelect: (profileId: string, checked: boolean) => void;
   onSelectVisible: () => void;
   onClearSelected: () => void;
-  onToggle: (profileId: string) => void;
-  onAction: (action: "activate" | "apply-codex" | "sync-quota" | "remove" | "export", profile: ProfileSummary) => void;
+  onOpenDetail: (profileId: string) => void;
+  onAction: (action: ProfileAction, profile: ProfileSummary) => void;
   onLocate: () => void;
+  onEditImageLimits: () => void;
   onExportSelected: () => void;
   onRemoveSelected: () => void;
   onAddAccount: () => void;
@@ -30,19 +49,22 @@ export function AccountsPanel(props: {
   onClearAccounts: () => void;
 }) {
   const codexAccountId = props.config?.codex?.accountId;
-  const gridCountClass =
-    props.profiles.length <= 0 ? "" : props.profiles.length === 1 ? "profile-count-1" : props.profiles.length === 2 ? "profile-count-2" : props.profiles.length === 3 ? "profile-count-3" : "profile-count-many";
+  const detailProfile = props.profiles.find((profile) => profile.profileId === props.detailProfileId) ?? null;
 
   return (
-    <section className="card" id="accounts">
+    <section className="card accounts-card" id="accounts">
       <div className="section-head">
         <div>
-          <h2>账号额度预览</h2>
-          <p>账号信息采用卡片式布局展示，支持搜索、状态筛选和额度排序。</p>
+          <h2>账号管理</h2>
+          <p>表格展示账号池，点击账号行查看详情和操作。</p>
         </div>
         <div className="section-actions">
           <button className="btn-secondary" type="button" onClick={props.onLocate}>
             定位当前账号
+          </button>
+          <button className="btn-secondary" type="button" onClick={props.onEditImageLimits}>
+            <SlidersHorizontal size={16} />
+            编辑生图限额
           </button>
           <button className="btn-secondary" type="button" onClick={props.onExportSelected}>
             导出所选
@@ -120,134 +142,214 @@ export function AccountsPanel(props: {
         <span className="account-selected-count">已选择 {props.selectedCount} 个</span>
       </div>
 
-      <div className={`account-grid ${gridCountClass}`}>
+      <div className="accounts-table-wrap">
         {props.profiles.length === 0 ? (
           <div className="empty-state">还没有匹配的账号。可以导入 ChatGPT session JSON 或调整筛选条件。</div>
         ) : (
-          props.profiles.map((profile) => {
-            const health = profileHealth(profile);
-            const primary = primaryUsage(profile);
-            const secondary = secondaryUsage(profile);
-            const expanded = Boolean(props.expandedProfiles[profile.profileId]);
-            const codexActive = isCodexActiveProfile(profile, codexAccountId);
-            const corner = usageCorner(profile, codexActive);
-            const authInvalid = isAuthInvalid(profile);
-            const busyPrefix = `profile:` as const;
-            const isBusy = typeof props.busy === "string" && props.busy.startsWith(`${busyPrefix}`) && props.busy.endsWith(profile.profileId);
-            const refreshBusy = props.busy === `profile:sync-quota:${profile.profileId}`;
-            const codexApplyUnsupported = profile.codexApplySupported === false;
-            const codexApplyReason = profile.codexApplyReason || "该账号缺少真实 chatgpt_account_id，不能应用到本机 Codex。";
-            const codexButtonDisabled = codexActive || isBusy || authInvalid || codexApplyUnsupported;
-            const codexButtonLabel = authInvalid ? "Codex 不可用" : codexActive ? "Codex 使用中" : codexApplyUnsupported ? "仅网关可用" : "应用 Codex";
-            const imageAbility = imageCapability(profile);
-            const exportAudit = profile.exportAudit;
-            const exportAuditLabel = exportAudit?.exported ? `已导出 ${exportAudit.count} 次` : "未导出";
-            return (
-              <article className={`account-card plan-${getPlanKey(profile)} ${authInvalid ? "is-auth-invalid" : ""}`} data-profile-card={profile.profileId} key={profile.profileId} title={authInvalid ? authStatusText(profile) : undefined}>
-                {corner && (
-                  <span className={`usage-corner ${corner.className}`}>
-                    <span>{corner.label}</span>
-                  </span>
-                )}
-                <div className="account-head">
-                  <div className="account-title">
-                    <div className="account-name">
-                      <span className="avatar">{profileInitial(profile)}</span>
-                      <strong>{profileLabel(profile, props.showEmails)}</strong>
-                      <button aria-label="刷新额度" className="account-icon-btn" disabled={isBusy} onClick={() => props.onAction("sync-quota", profile)} title="刷新额度" type="button">
-                        {refreshBusy ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
+          <table className="accounts-table">
+            <thead>
+              <tr>
+                <th className="select-col">选择</th>
+                <th>账号</th>
+                <th>状态</th>
+                <th>额度</th>
+                <th>使用中</th>
+                <th>重置时间</th>
+                <th>生图</th>
+                <th className="action-col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {props.profiles.map((profile) => {
+                const row = buildProfileRowState(profile, props, codexAccountId);
+                return (
+                  <tr
+                    className={`${props.detailProfileId === profile.profileId ? "is-selected" : ""} ${row.authInvalid ? "is-auth-invalid" : ""}`}
+                    data-profile-row={profile.profileId}
+                    key={profile.profileId}
+                    onClick={() => props.onOpenDetail(profile.profileId)}
+                  >
+                    <td className="select-col" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        aria-label={`选择 ${row.label}`}
+                        checked={Boolean(props.selectedProfiles[profile.profileId])}
+                        onChange={(event) => props.onSelect(profile.profileId, event.target.checked)}
+                        type="checkbox"
+                      />
+                    </td>
+                    <td>
+                      <div className="account-cell">
+                        <span className={`avatar plan-${getPlanKey(profile)}`}>{profileInitial(profile)}</span>
+                        <div>
+                          <strong>{row.label}</strong>
+                          <span>{props.showEmails ? profile.profileId : maskProfileId(profile.profileId)}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="table-badge-stack">
+                        <span className="badge brand">{getPlanType(profile)}</span>
+                        <span className={`badge ${row.health.tone}`}>{row.health.label}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="quota-mini-stack">
+                        <QuotaMini label={resetLabel(profile, "primary")} value={row.primary} tone={quotaBarTone(row.primary)} />
+                        <QuotaMini label={resetLabel(profile, "secondary")} value={row.secondary} tone={quotaBarTone(row.secondary)} />
+                      </div>
+                    </td>
+                    <td>
+                      <UsagePills apiActive={profile.isActive} codexActive={row.codexActive} />
+                    </td>
+                    <td>
+                      <div className="reset-cell">
+                        <span>{resetTime(profile, "primary")}</span>
+                        <span>{resetTime(profile, "secondary")}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`badge ${row.imageAbility.ok ? "green" : "orange"}`}>gpt-image-2</span>
+                    </td>
+                    <td className="action-col" onClick={(event) => event.stopPropagation()}>
+                      <button aria-label="刷新额度" className="account-icon-btn" disabled={row.isBusy} onClick={() => props.onAction("sync-quota", profile)} title="刷新额度" type="button">
+                        {row.refreshBusy ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
                       </button>
-                    </div>
-                    <div className="badge-row">
-                      <span className="badge brand">{getPlanType(profile)}</span>
-                      <span className={`badge ${health.tone}`}>{health.label}</span>
-                      <span className={`badge ${imageAbility.ok ? "green" : "orange"}`}>gpt-image-2</span>
-                      <span className={`badge ${exportAudit?.exported ? "orange" : "muted"}`}>{exportAuditLabel}</span>
-                    </div>
-                  </div>
-                  <label className="account-select">
-                    <input type="checkbox" checked={Boolean(props.selectedProfiles[profile.profileId])} onChange={(event) => props.onSelect(profile.profileId, event.target.checked)} />
-                    <span>选择</span>
-                  </label>
-                </div>
-
-                <div className="account-metrics">
-                  <QuotaBar label={resetLabel(profile, "primary")} value={primary} tone={quotaBarTone(primary)} />
-                  <QuotaBar label={resetLabel(profile, "secondary")} value={secondary} tone={quotaBarTone(secondary)} />
-                </div>
-
-                <div className="usage-status-row">
-                  <span className={`usage-status ${profile.isActive ? "is-active" : ""}`}>
-                    <Globe2 size={14} />
-                    <span>API</span>
-                    <span className={`usage-dot ${profile.isActive ? "active" : ""}`} />
-                    <span className="usage-state-text">{profile.isActive ? "使用中" : "未使用"}</span>
-                  </span>
-                  <span className={`usage-status ${codexActive ? "is-active" : ""}`}>
-                    <Code2 size={14} />
-                    <span>Codex</span>
-                    <span className={`usage-dot ${codexActive ? "active" : ""}`} />
-                    <span className="usage-state-text">{codexActive ? "使用中" : "未使用"}</span>
-                  </span>
-                </div>
-
-                <div className="compact-meta-row">
-                  <div className="compact-reset-list">
-                    <div className="compact-meta-item">
-                      <label>{resetLabel(profile, "primary")}</label>
-                      <strong>{resetTime(profile, "primary")}</strong>
-                    </div>
-                    <div className="compact-meta-item">
-                      <label>{resetLabel(profile, "secondary")}</label>
-                      <strong>{resetTime(profile, "secondary")}</strong>
-                    </div>
-                  </div>
-                  <div className="compact-meta-actions">
-                    <button className={`details-toggle ${expanded ? "is-expanded" : ""}`} type="button" onClick={() => props.onToggle(profile.profileId)}>
-                      <span>{expanded ? "收起详情" : "查看详情"}</span>
-                      <ChevronIcon />
-                    </button>
-                  </div>
-                </div>
-
-                {expanded && (
-                  <div className="meta-grid">
-                    <InfoRow label="套餐" value={getPlanType(profile)} />
-                    <InfoRow label="Account ID" value={props.showEmails ? profile.accountId : profile.accountId} code />
-                    <InfoRow label="Codex 应用" value={codexApplyUnsupported ? codexApplyReason : "可应用到本机 Codex"} />
-                    <InfoRow label="Profile ID" value={props.showEmails ? profile.profileId : profile.profileId} code />
-                    <InfoRow label="认证状态" value={authStatusText(profile)} />
-                    <InfoRow label="生图能力" value={imageAbility.ok ? "gpt-image-2 可用" : imageAbility.detail} />
-                    <InfoRow label="导出记录" value={formatExportAudit(exportAudit)} />
-                    <InfoRow label="过期时间" value={profile.expiresAt ? new Date(profile.expiresAt).toLocaleString("zh-CN") : "-"} />
-                    <InfoRow label="额度快照" value={profile.quota?.capturedAt ? new Date(profile.quota.capturedAt).toLocaleString("zh-CN") : "-"} />
-                  </div>
-                )}
-
-                <div className="account-actions">
-                  <button className={`btn-secondary ${profile.isActive ? "is-current" : ""}`} type="button" onClick={() => props.onAction("activate", profile)} disabled={profile.isActive || isBusy || authInvalid}>
-                    {authInvalid ? "网关不可用" : profile.isActive ? "网关使用中" : "应用网关"}
-                  </button>
-                  <span className={`codex-action-wrap ${codexApplyUnsupported ? "is-unsupported" : ""}`} title={codexApplyUnsupported ? codexApplyReason : undefined}>
-                    <button className={`btn-secondary ${codexActive ? "is-current codex" : ""}`} type="button" onClick={() => props.onAction("apply-codex", profile)} disabled={codexButtonDisabled}>
-                      <span>{codexButtonLabel}</span>
-                      {codexApplyUnsupported && <Info className="codex-disabled-icon" size={13} aria-hidden="true" />}
-                    </button>
-                  </span>
-                  <button className="btn-secondary" type="button" onClick={() => props.onAction("export", profile)} disabled={isBusy}>
-                    导出
-                  </button>
-                  <button className="btn-danger" type="button" onClick={() => props.onAction("remove", profile)} disabled={isBusy}>
-                    删除
-                  </button>
-                </div>
-              </article>
-            );
-          })
+                      <button className="btn-secondary compact-action" type="button" onClick={() => props.onOpenDetail(profile.profileId)}>
+                        {props.detailProfileId === profile.profileId ? "收起" : "详情"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
+      </div>
+
+      {detailProfile ? <AccountDetailPanel profile={detailProfile} props={props} codexAccountId={codexAccountId} /> : null}
+    </section>
+  );
+}
+
+function AccountDetailPanel({ profile, props, codexAccountId }: { profile: ProfileSummary; props: Parameters<typeof AccountsPanel>[0]; codexAccountId?: string }) {
+  const row = buildProfileRowState(profile, props, codexAccountId);
+  const corner = usageCorner(profile, row.codexActive);
+  const exportAudit = profile.exportAudit;
+  const exportAuditLabel = exportAudit?.exported ? `已导出 ${exportAudit.count} 次` : "未导出";
+
+  return (
+    <section className={`account-detail-panel plan-${getPlanKey(profile)} ${row.authInvalid ? "is-auth-invalid" : ""}`}>
+      {corner && (
+        <span className={`usage-corner ${corner.className}`}>
+          <span>{corner.label}</span>
+        </span>
+      )}
+      <div className="account-detail-head">
+        <div className="account-cell">
+          <span className={`avatar plan-${getPlanKey(profile)}`}>{profileInitial(profile)}</span>
+          <div>
+            <strong>{row.label}</strong>
+            <span>{authStatusText(profile)}</span>
+          </div>
+        </div>
+        <div className="table-badge-stack is-inline">
+          <span className="badge brand">{getPlanType(profile)}</span>
+          <span className={`badge ${row.health.tone}`}>{row.health.label}</span>
+          <span className={`badge ${row.imageAbility.ok ? "green" : "orange"}`}>gpt-image-2</span>
+          <span className={`badge ${exportAudit?.exported ? "orange" : "muted"}`}>{exportAuditLabel}</span>
+        </div>
+      </div>
+
+      <div className="account-detail-metrics">
+        <QuotaBar label={resetLabel(profile, "primary")} value={row.primary} tone={quotaBarTone(row.primary)} />
+        <QuotaBar label={resetLabel(profile, "secondary")} value={row.secondary} tone={quotaBarTone(row.secondary)} />
+      </div>
+
+      <div className="usage-status-row detail-usage-row">
+        <span className={`usage-status ${profile.isActive ? "is-active" : ""}`}>
+          <Globe2 size={14} />
+          <span>API</span>
+          <span className={`usage-dot ${profile.isActive ? "active" : ""}`} />
+          <span className="usage-state-text">{profile.isActive ? "使用中" : "未使用"}</span>
+        </span>
+        <span className={`usage-status ${row.codexActive ? "is-active" : ""}`}>
+          <Code2 size={14} />
+          <span>Codex</span>
+          <span className={`usage-dot ${row.codexActive ? "active" : ""}`} />
+          <span className="usage-state-text">{row.codexActive ? "使用中" : "未使用"}</span>
+        </span>
+      </div>
+
+      <div className="meta-grid">
+        <InfoRow label="套餐" value={getPlanType(profile)} />
+        <InfoRow label="Account ID" value={profile.accountId} code />
+        <InfoRow label="Codex 应用" value={row.codexApplyUnsupported ? row.codexApplyReason : "可应用到本机 Codex"} />
+        <InfoRow label="Profile ID" value={profile.profileId} code />
+        <InfoRow label="认证状态" value={authStatusText(profile)} />
+        <InfoRow label="生图能力" value={row.imageAbility.ok ? "gpt-image-2 可用" : row.imageAbility.detail} />
+        <InfoRow label="导出记录" value={formatExportAudit(exportAudit)} />
+        <InfoRow label="5 小时重置" value={resetTime(profile, "primary")} />
+        <InfoRow label="7 天重置" value={resetTime(profile, "secondary")} />
+        <InfoRow label="过期时间" value={profile.expiresAt ? new Date(profile.expiresAt).toLocaleString("zh-CN") : "-"} />
+        <InfoRow label="额度快照" value={profile.quota?.capturedAt ? new Date(profile.quota.capturedAt).toLocaleString("zh-CN") : "-"} />
+      </div>
+
+      <div className="account-actions">
+        <button className={`btn-secondary ${profile.isActive ? "is-current" : ""}`} type="button" onClick={() => props.onAction("activate", profile)} disabled={profile.isActive || row.isBusy || row.authInvalid}>
+          {row.authInvalid ? "网关不可用" : profile.isActive ? "网关使用中" : "应用网关"}
+        </button>
+        <span className={`codex-action-wrap ${row.codexApplyUnsupported ? "is-unsupported" : ""}`} title={row.codexApplyUnsupported ? row.codexApplyReason : undefined}>
+          <button className={`btn-secondary ${row.codexActive ? "is-current codex" : ""}`} type="button" onClick={() => props.onAction("apply-codex", profile)} disabled={row.codexButtonDisabled}>
+            <span>{row.codexButtonLabel}</span>
+            {row.codexApplyUnsupported && <Info className="codex-disabled-icon" size={13} aria-hidden="true" />}
+          </button>
+        </span>
+        <button className="btn-secondary" type="button" onClick={() => props.onAction("export", profile)} disabled={row.isBusy}>
+          导出
+        </button>
+        <button className="btn-danger" type="button" onClick={() => props.onAction("remove", profile)} disabled={row.isBusy}>
+          删除
+        </button>
       </div>
     </section>
   );
+}
+
+function buildProfileRowState(profile: ProfileSummary, props: Pick<Parameters<typeof AccountsPanel>[0], "busy" | "showEmails">, codexAccountId?: string) {
+  const health = profileHealth(profile);
+  const primary = primaryUsage(profile);
+  const secondary = secondaryUsage(profile);
+  const codexActive = isCodexActiveProfile(profile, codexAccountId);
+  const authInvalid = isAuthInvalid(profile);
+  const isBusy = typeof props.busy === "string" && props.busy.startsWith("profile:") && props.busy.endsWith(profile.profileId);
+  const refreshBusy = props.busy === `profile:sync-quota:${profile.profileId}`;
+  const codexApplyUnsupported = profile.codexApplySupported === false;
+  const codexApplyReason = profile.codexApplyReason || "该账号缺少真实 chatgpt_account_id，不能应用到本机 Codex。";
+  const codexButtonDisabled = codexActive || isBusy || authInvalid || codexApplyUnsupported;
+  const codexButtonLabel = authInvalid ? "Codex 不可用" : codexActive ? "Codex 使用中" : codexApplyUnsupported ? "仅网关可用" : "应用 Codex";
+  const imageAbility = imageCapability(profile);
+  return {
+    label: profileLabel(profile, props.showEmails),
+    health,
+    primary,
+    secondary,
+    codexActive,
+    authInvalid,
+    isBusy,
+    refreshBusy,
+    codexApplyUnsupported,
+    codexApplyReason,
+    codexButtonDisabled,
+    codexButtonLabel,
+    imageAbility,
+  };
+}
+
+function maskProfileId(value: string): string {
+  if (value.length <= 18) {
+    return value;
+  }
+  return `${value.slice(0, 12)}...${value.slice(-6)}`;
 }
 
 function formatExportAudit(audit: ProfileSummary["exportAudit"]): string {
@@ -259,11 +361,34 @@ function formatExportAudit(audit: ProfileSummary["exportAudit"]): string {
   return `${audit.count} 次，最近 ${formatFullTime(audit.lastExportedAt)}，方式 ${kindLabel}`;
 }
 
-function ChevronIcon() {
+function UsagePills(props: { apiActive: boolean; codexActive: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-      <path d="m6 9 6 6 6-6" />
-    </svg>
+    <div className="usage-pill-stack">
+      <span className={`usage-status ${props.apiActive ? "is-active" : ""}`}>
+        <Globe2 size={14} />
+        <span>API</span>
+        <span className={`usage-dot ${props.apiActive ? "active" : ""}`} />
+      </span>
+      <span className={`usage-status ${props.codexActive ? "is-active" : ""}`}>
+        <Code2 size={14} />
+        <span>Codex</span>
+        <span className={`usage-dot ${props.codexActive ? "active" : ""}`} />
+      </span>
+    </div>
+  );
+}
+
+function QuotaMini(props: { label: string; value: number; tone: "blue" | "orange" | "red" }) {
+  return (
+    <div className="quota-mini">
+      <div className="quota-mini-line">
+        <span>{props.label}</span>
+        <strong>{100 - props.value}%</strong>
+      </div>
+      <div className="progress-track">
+        <div className={`progress-bar ${props.tone}`} style={{ width: `${props.value}%` }} />
+      </div>
+    </div>
   );
 }
 

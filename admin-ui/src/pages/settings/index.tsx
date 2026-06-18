@@ -94,6 +94,16 @@ export function SettingsPage(props: {
     setSettingsDraft(createSettingsDraft(props.config));
   }, [props.config, settingsDirty]);
 
+  useEffect(() => {
+    if (sessionStorage.getItem("azt:settings-scroll-target") !== "image-limits") {
+      return;
+    }
+    sessionStorage.removeItem("azt:settings-scroll-target");
+    window.setTimeout(() => {
+      document.getElementById("image-limits")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  }, []);
+
   function markSettingsDirty(next: Partial<SettingDraft>) {
     setSettingsDraft((draft) => ({ ...draft, ...next }));
     setSettingsDirtyFields((current) => {
@@ -113,34 +123,6 @@ export function SettingsPage(props: {
       nextSet.delete(profileId);
     }
     markSettingsDirty({ autoSwitchExcludedProfileIds: Array.from(nextSet) });
-  }
-
-  function addImageLimitOverride() {
-    markSettingsDirty({
-      imageLimitUserOverrides: [
-        ...settingsDraft.imageLimitUserOverrides,
-        {
-          username: "",
-          perUserDaily: "",
-          perUserHourly: "",
-          minIntervalSeconds: "",
-        },
-      ],
-    });
-  }
-
-  function updateImageLimitOverride(index: number, next: Partial<SettingDraft["imageLimitUserOverrides"][number]>) {
-    markSettingsDirty({
-      imageLimitUserOverrides: settingsDraft.imageLimitUserOverrides.map((item, itemIndex) => (
-        itemIndex === index ? { ...item, ...next } : item
-      )),
-    });
-  }
-
-  function removeImageLimitOverride(index: number) {
-    markSettingsDirty({
-      imageLimitUserOverrides: settingsDraft.imageLimitUserOverrides.filter((_, itemIndex) => itemIndex !== index),
-    });
   }
 
   const excludedProfileIds = useMemo(() => new Set(settingsDraft.autoSwitchExcludedProfileIds), [settingsDraft.autoSwitchExcludedProfileIds]);
@@ -503,7 +485,7 @@ export function SettingsPage(props: {
           <p className="hint">{props.status}</p>
         </section>
 
-        <section className="settings-section image-limit-section">
+        <section className="settings-section image-limit-section" id="image-limits">
           <div className="image-limit-head">
             <div>
               <h4>生图限额</h4>
@@ -530,43 +512,7 @@ export function SettingsPage(props: {
             </label>
           </div>
 
-          <div className="image-limit-overrides">
-            <div className="image-limit-overrides-head">
-              <strong>用户覆盖</strong>
-              <button className="btn-secondary" type="button" onClick={addImageLimitOverride}>
-                新增用户覆盖
-              </button>
-            </div>
-            {settingsDraft.imageLimitUserOverrides.length === 0 ? (
-              <div className="image-limit-empty">暂无用户覆盖，所有登录用户使用全局限额。</div>
-            ) : (
-              <div className="image-limit-override-list">
-                {settingsDraft.imageLimitUserOverrides.map((item, index) => (
-                  <div className="image-limit-override-row" key={`${item.username}:${index}`}>
-                    <label className="field">
-                      <span>用户名</span>
-                      <input className="input" value={item.username} onChange={(event) => updateImageLimitOverride(index, { username: event.target.value })} placeholder="alice 或 wxwork:UserId" />
-                    </label>
-                    <label className="field">
-                      <span>24 小时上限</span>
-                      <input className="input" inputMode="numeric" min={0} type="number" value={item.perUserDaily} onChange={(event) => updateImageLimitOverride(index, { perUserDaily: event.target.value })} placeholder="继承" />
-                    </label>
-                    <label className="field">
-                      <span>1 小时上限</span>
-                      <input className="input" inputMode="numeric" min={0} type="number" value={item.perUserHourly} onChange={(event) => updateImageLimitOverride(index, { perUserHourly: event.target.value })} placeholder="继承" />
-                    </label>
-                    <label className="field">
-                      <span>间隔秒数</span>
-                      <input className="input" inputMode="numeric" min={0} max={86400} type="number" value={item.minIntervalSeconds} onChange={(event) => updateImageLimitOverride(index, { minIntervalSeconds: event.target.value })} placeholder="继承" />
-                    </label>
-                    <button className="btn-secondary danger-action image-limit-remove" type="button" onClick={() => removeImageLimitOverride(index)}>
-                      删除
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <p className="hint">单个数据库用户的覆盖值可在下方“数据库用户”表格里直接编辑；留空表示继承这里的全局限额。</p>
         </section>
 
         <section className="settings-section auto-switch-exclusion-section">
@@ -628,7 +574,19 @@ export function SettingsPage(props: {
           <p className="hint">开启后账号邮箱将以脱敏形式展示。</p>
         </section>
 
-        {props.role === "admin" ? <DatabaseUsersPanel currentUser={props.currentUser} setStatus={props.setStatus} /> : null}
+        {props.role === "admin" ? (
+          <DatabaseUsersPanel
+            currentUser={props.currentUser}
+            imageLimitDefaults={{
+              perUserDaily: settingsDraft.imageLimitDaily,
+              perUserHourly: settingsDraft.imageLimitHourly,
+              minIntervalSeconds: settingsDraft.imageLimitMinIntervalSeconds,
+            }}
+            imageLimitOverrides={settingsDraft.imageLimitUserOverrides}
+            onImageLimitOverridesChange={(imageLimitUserOverrides) => markSettingsDirty({ imageLimitUserOverrides })}
+            setStatus={props.setStatus}
+          />
+        ) : null}
       </div>
 
       <div className="settings-page-actions settings-page-footer-actions">

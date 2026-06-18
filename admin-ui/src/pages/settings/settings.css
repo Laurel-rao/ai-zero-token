@@ -70,8 +70,7 @@
   grid-column: span 2;
 }
 
-.image-limit-head,
-.image-limit-overrides-head {
+.image-limit-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -93,52 +92,6 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(140px, 1fr));
   gap: 12px;
-}
-
-.image-limit-overrides {
-  display: grid;
-  gap: 10px;
-  padding-top: 4px;
-}
-
-.image-limit-overrides-head strong {
-  color: var(--text);
-  font-size: 14px;
-}
-
-.image-limit-empty {
-  display: grid;
-  place-items: center;
-  min-height: 72px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 12px;
-  color: var(--text-muted);
-  background: #f8fafc;
-  font-size: 13px;
-}
-
-.image-limit-override-list {
-  display: grid;
-  gap: 10px;
-  max-height: 320px;
-  overflow: auto;
-  padding-right: 4px;
-}
-
-.image-limit-override-row {
-  display: grid;
-  grid-template-columns: minmax(180px, 1.2fr) repeat(3, minmax(118px, 0.8fr)) auto;
-  gap: 10px;
-  align-items: end;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: #fbfcff;
-}
-
-.image-limit-remove {
-  min-height: 40px;
-  white-space: nowrap;
 }
 
 .auto-switch-exclusion-section {
@@ -333,7 +286,7 @@
 
 .database-users-table {
   width: 100%;
-  min-width: 900px;
+  min-width: 1160px;
   border-collapse: collapse;
 }
 
@@ -416,6 +369,31 @@
   gap: 8px;
 }
 
+.database-user-image-limits {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(90px, 1fr));
+  gap: 8px;
+  min-width: 300px;
+}
+
+.database-user-image-limits label {
+  display: grid;
+  gap: 5px;
+}
+
+.database-user-image-limits label span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.database-user-image-limits .input {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
 .database-user-password .input {
   width: 160px;
 }
@@ -447,7 +425,6 @@
 @media (max-width: 860px) {
   .database-users-head,
   .image-limit-head,
-  .image-limit-overrides-head,
   .auto-switch-exclusion-head,
   .auto-switch-profile-row {
     grid-template-columns: 1fr;
@@ -455,7 +432,6 @@
 
   .database-users-head,
   .image-limit-head,
-  .image-limit-overrides-head,
   .auto-switch-exclusion-head {
     display: grid;
   }
@@ -476,16 +452,16 @@
     grid-template-columns: 1fr;
   }
 
+  .database-user-image-limits {
+    grid-template-columns: 1fr;
+    min-width: 180px;
+  }
+
   .image-limit-section {
     grid-column: 1 / -1;
   }
 
-  .image-limit-grid,
-  .image-limit-override-row {
+  .image-limit-grid {
     grid-template-columns: 1fr;
-  }
-
-  .image-limit-remove {
-    justify-self: flex-start;
   }
 }

@@ -20,6 +20,19 @@ type UserDraft = {
   role: DatabaseUserRole;
 };
 
+type ImageLimitOverrideDraft = {
+  username: string;
+  perUserDaily: string;
+  perUserHourly: string;
+  minIntervalSeconds: string;
+};
+
+type ImageLimitDefaults = {
+  perUserDaily: string;
+  perUserHourly: string;
+  minIntervalSeconds: string;
+};
+
 type ActionState =
   | "load"
   | "create"
@@ -56,7 +69,23 @@ function isUserEnabled(user: DatabaseUser): boolean {
   return !user.disabled;
 }
 
-export function DatabaseUsersPanel({ currentUser, setStatus }: { currentUser: string | null; setStatus: (message: string) => void }) {
+function inheritedLimitLabel(value: string): string {
+  return value === "0" || !value ? "继承：不限" : `继承：${value}`;
+}
+
+export function DatabaseUsersPanel({
+  currentUser,
+  imageLimitDefaults,
+  imageLimitOverrides,
+  onImageLimitOverridesChange,
+  setStatus,
+}: {
+  currentUser: string | null;
+  imageLimitDefaults: ImageLimitDefaults;
+  imageLimitOverrides: ImageLimitOverrideDraft[];
+  onImageLimitOverridesChange: (overrides: ImageLimitOverrideDraft[]) => void;
+  setStatus: (message: string) => void;
+}) {
   const [users, setUsers] = useState<DatabaseUser[]>([]);
   const [draft, setDraft] = useState<UserDraft>({ username: "", password: "", role: "user" });
   const [newPasswordByUserId, setNewPasswordByUserId] = useState<Record<string, string>>({});
@@ -214,12 +243,44 @@ export function DatabaseUsersPanel({ currentUser, setStatus }: { currentUser: st
 
   const loading = action === "load";
 
+  function imageLimitOverrideFor(username: string): ImageLimitOverrideDraft | undefined {
+    return imageLimitOverrides.find((item) => item.username === username);
+  }
+
+  function updateUserImageLimit(username: string, field: keyof Omit<ImageLimitOverrideDraft, "username">, value: string) {
+    const normalizedValue = value.trim();
+    const nextOverrides = [...imageLimitOverrides];
+    const index = nextOverrides.findIndex((item) => item.username === username);
+    const current = index >= 0
+      ? nextOverrides[index] as ImageLimitOverrideDraft
+      : {
+          username,
+          perUserDaily: "",
+          perUserHourly: "",
+          minIntervalSeconds: "",
+        };
+    const next = {
+      ...current,
+      [field]: normalizedValue,
+    };
+    if (!next.perUserDaily && !next.perUserHourly && !next.minIntervalSeconds) {
+      if (index >= 0) {
+        nextOverrides.splice(index, 1);
+      }
+    } else if (index >= 0) {
+      nextOverrides.splice(index, 1, next);
+    } else {
+      nextOverrides.push(next);
+    }
+    onImageLimitOverridesChange(nextOverrides);
+  }
+
   return (
     <section className="settings-section database-users-section">
       <div className="database-users-head">
         <div>
           <h4>数据库用户</h4>
-          <p className="hint">管理员可新增普通用户，或禁用、启用、重置密码和删除已有数据库用户。</p>
+          <p className="hint">管理员可新增普通用户，或禁用、启用、重置密码、删除用户，并直接配置该用户的生图限额覆盖。</p>
         </div>
         <button className="btn-secondary" type="button" onClick={() => void loadUsers()} disabled={loading}>
           {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
@@ -258,6 +319,7 @@ export function DatabaseUsersPanel({ currentUser, setStatus }: { currentUser: st
               <th>用户</th>
               <th>角色</th>
               <th>状态</th>
+              <th>生图限额</th>
               <th>创建时间</th>
               <th>重置密码</th>
               <th>操作</th>
@@ -266,7 +328,7 @@ export function DatabaseUsersPanel({ currentUser, setStatus }: { currentUser: st
           <tbody>
             {sortedUsers.length === 0 ? (
               <tr>
-                <td className="database-users-empty" colSpan={6}>
+                <td className="database-users-empty" colSpan={7}>
                   {loading ? "正在读取数据库用户..." : "暂无数据库用户。"}
                 </td>
               </tr>
@@ -278,6 +340,7 @@ export function DatabaseUsersPanel({ currentUser, setStatus }: { currentUser: st
                 const resetBusy = action === `reset:${user.id}`;
                 const deleteBusy = action === `delete:${user.id}`;
                 const enabled = isUserEnabled(user);
+                const imageLimit = imageLimitOverrideFor(user.username);
                 return (
                   <tr key={user.id}>
                     <td>
@@ -301,6 +364,47 @@ export function DatabaseUsersPanel({ currentUser, setStatus }: { currentUser: st
                     </td>
                     <td>
                       <span className={`database-user-status ${enabled ? "is-enabled" : "is-disabled"}`}>{enabled ? "启用" : "禁用"}</span>
+                    </td>
+                    <td>
+                      <div className="database-user-image-limits">
+                        <label>
+                          <span>24h</span>
+                          <input
+                            className="input"
+                            inputMode="numeric"
+                            min={0}
+                            type="number"
+                            value={imageLimit?.perUserDaily || ""}
+                            onChange={(event) => updateUserImageLimit(user.username, "perUserDaily", event.target.value)}
+                            placeholder={inheritedLimitLabel(imageLimitDefaults.perUserDaily)}
+                          />
+                        </label>
+                        <label>
+                          <span>1h</span>
+                          <input
+                            className="input"
+                            inputMode="numeric"
+                            min={0}
+                            type="number"
+                            value={imageLimit?.perUserHourly || ""}
+                            onChange={(event) => updateUserImageLimit(user.username, "perUserHourly", event.target.value)}
+                            placeholder={inheritedLimitLabel(imageLimitDefaults.perUserHourly)}
+                          />
+                        </label>
+                        <label>
+                          <span>间隔</span>
+                          <input
+                            className="input"
+                            inputMode="numeric"
+                            max={86400}
+                            min={0}
+                            type="number"
+                            value={imageLimit?.minIntervalSeconds || ""}
+                            onChange={(event) => updateUserImageLimit(user.username, "minIntervalSeconds", event.target.value)}
+                            placeholder={inheritedLimitLabel(imageLimitDefaults.minIntervalSeconds)}
+                          />
+                        </label>
+                      </div>
                     </td>
                     <td>{formatDate(user.createdAt)}</td>
                     <td>

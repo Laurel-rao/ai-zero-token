@@ -32,7 +32,7 @@ export function AccountsPage(props: {
   logout: () => Promise<void>;
 }) {
   const [selectedProfiles, setSelectedProfiles] = useState<Record<string, boolean>>({});
-  const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({});
+  const [detailProfileId, setDetailProfileId] = useState<string | null>(null);
   const [filter, setFilter] = useState<ProfileFilter>({
     search: "",
     status: "all",
@@ -247,7 +247,7 @@ export function AccountsPage(props: {
       showEmails={props.showEmails}
       filter={filter}
       selectedProfiles={selectedProfiles}
-      expandedProfiles={expandedProfiles}
+      detailProfileId={detailProfileId}
       selectedCount={selectedCount}
       visibleCount={visibleProfileIds.length}
       busy={props.busy}
@@ -258,9 +258,19 @@ export function AccountsPage(props: {
         setSelectedProfiles({});
         props.setStatus("已取消选择。");
       }}
-      onToggle={(profileId) => setExpandedProfiles((items) => ({ ...items, [profileId]: !items[profileId] }))}
+      onOpenDetail={(profileId) => setDetailProfileId((current) => (current === profileId ? null : profileId))}
       onAction={runProfileAction}
-      onLocate={() => props.activeProfile && document.querySelector(`[data-profile-card="${props.activeProfile.profileId}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+      onLocate={() => {
+        if (!props.activeProfile) return;
+        setDetailProfileId(props.activeProfile.profileId);
+        requestAnimationFrame(() => {
+          document.querySelector(`[data-profile-row="${props.activeProfile?.profileId}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }}
+      onEditImageLimits={() => {
+        sessionStorage.setItem("azt:settings-scroll-target", "image-limits");
+        window.location.hash = "settings";
+      }}
       onExportSelected={() => {
         const ids = selectedProfileIds;
         if (ids.length === 0) {
