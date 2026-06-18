@@ -91,6 +91,31 @@ function safeConsole(method: "info" | "warn", message: string, meta: Record<stri
   }
 }
 
+function redactUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    const sensitiveParams = new Set([
+      "access_token",
+      "authorization",
+      "client_secret",
+      "code",
+      "corpsecret",
+      "key",
+      "refresh_token",
+      "secret",
+      "token",
+    ]);
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (sensitiveParams.has(key.toLowerCase())) {
+        url.searchParams.set(key, "***");
+      }
+    }
+    return url.toString();
+  } catch {
+    return value.replace(/([?&](?:access_token|authorization|client_secret|code|corpsecret|key|refresh_token|secret|token)=)[^&\s]+/gi, "$1***");
+  }
+}
+
 function getCurlStreamHeaderTimeoutMs(timeoutMs?: number): number {
   if (typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0) {
     return Math.max(1000, timeoutMs);
@@ -118,7 +143,7 @@ function logHttpTiming(params: {
   safeConsole("info", "[http] request timing", {
     requestId: params.requestId,
     method: params.method,
-    url: params.url,
+    url: redactUrl(params.url),
     transport: params.transport,
     status: params.status,
     bodyLength: params.bodyLength,

@@ -17,6 +17,7 @@ export type BusyAction =
   | "codex-provider"
   | "codex-share"
   | "test"
+  | "prompt-optimize"
   | "image-bed-save"
   | "image-bed-test"
   | "image-bed-delete"
@@ -60,9 +61,9 @@ export type AccountStatItem = {
 
 export type TrendWindow = 60 | 180 | 720;
 
-export type PreviewImage = { src: string; filename: string; meta: string };
+export type PreviewImage = { src: string; fullSrc?: string; filename: string; meta: string; fullMeta?: string; width?: number; height?: number };
 
-export type ModalImage = { src: string; meta: string; filename?: string };
+export type ModalImage = { src: string; meta: string; filename?: string; ratio?: string };
 
 export type SettingDraft = {
   defaultModel: string;
@@ -73,6 +74,10 @@ export type SettingDraft = {
   autoSwitchExcludedProfileIds: string[];
   quotaSyncConcurrency: string;
   freeAccountWebGenerationEnabled: boolean;
+  wecomEnabled: boolean;
+  wecomCorpId: string;
+  wecomAgentId: string;
+  wecomSecret: string;
   serverPort: string;
 };
 

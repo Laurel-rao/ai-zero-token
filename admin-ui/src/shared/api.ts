@@ -1,5 +1,8 @@
 export async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options);
+  const response = await fetch(url, {
+    ...options,
+    credentials: options?.credentials ?? "include",
+  });
   const text = await response.text();
   let body: unknown = null;
 

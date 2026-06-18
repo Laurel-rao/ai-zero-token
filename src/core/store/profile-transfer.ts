@@ -9,7 +9,7 @@ type JwtPayload = Record<string, unknown>;
 export type ExportedProfile = {
   type: "codex";
   access_token: string;
-  refresh_token: string;
+  refresh_token?: string;
   id_token?: string;
   expired: string;
   email?: string;
@@ -64,6 +64,17 @@ function firstString(...values: unknown[]): string | undefined {
     }
   }
   return undefined;
+}
+
+function getNestedNumber(input: Record<string, unknown>, path: string[]): number | undefined {
+  let current: unknown = input;
+  for (const segment of path) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[segment];
+  }
+  return getNumber(current);
 }
 
 function getNestedString(input: Record<string, unknown>, path: string[]): string | undefined {
@@ -195,17 +206,31 @@ function parseExpiry(input: Record<string, unknown>, payload: JwtPayload | null)
     return jwtExp * 1000;
   }
 
-  const directExpires = getNumber(input.expires);
+  const directExpires = getNumber(input.expires)
+    ?? getNestedNumber(input, ["session", "expires"])
+    ?? getNestedNumber(input, ["tokens", "expires"]);
   if (directExpires) {
     return directExpires > 10_000_000_000 ? directExpires : directExpires * 1000;
   }
 
-  const expiresAt = getNumber(input.expires_at);
+  const expiresAt = getNumber(input.expires_at)
+    ?? getNumber(input.expiresAt)
+    ?? getNumber(input.exp)
+    ?? getNestedNumber(input, ["session", "expires_at"])
+    ?? getNestedNumber(input, ["session", "expiresAt"])
+    ?? getNestedNumber(input, ["tokens", "expires_at"])
+    ?? getNestedNumber(input, ["tokens", "expiresAt"]);
   if (expiresAt) {
     return expiresAt > 10_000_000_000 ? expiresAt : expiresAt * 1000;
   }
 
-  const expired = getString(input.expired) ?? getString(input.expiresAt);
+  const expired = getString(input.expired)
+    ?? getString(input.expiresAt)
+    ?? getString(input.expires_at)
+    ?? getNestedString(input, ["session", "expired"])
+    ?? getNestedString(input, ["session", "expiresAt"])
+    ?? getNestedString(input, ["tokens", "expired"])
+    ?? getNestedString(input, ["tokens", "expiresAt"]);
   if (expired) {
     const parsed = Date.parse(expired);
     if (Number.isFinite(parsed)) {
@@ -221,16 +246,33 @@ export function importProfileFromJson(value: unknown): OAuthProfile {
     throw new Error("导入失败: JSON 根节点必须是对象。");
   }
 
-  const access = getString(value.access_token) ?? getString(value.access);
-  const refresh = getString(value.refresh_token) ?? getString(value.refresh);
-  const idToken = getString(value.id_token) ?? getString(value.idToken);
-  if (!access || !refresh) {
-    throw new Error("导入失败: 缺少 access_token/access 或 refresh_token/refresh。");
+  const access = getString(value.access_token)
+    ?? getString(value.accessToken)
+    ?? getString(value.access)
+    ?? getNestedString(value, ["session", "accessToken"])
+    ?? getNestedString(value, ["session", "access_token"])
+    ?? getNestedString(value, ["tokens", "accessToken"])
+    ?? getNestedString(value, ["tokens", "access_token"]);
+  const refresh = getString(value.refresh_token)
+    ?? getString(value.refreshToken)
+    ?? getString(value.refresh)
+    ?? getNestedString(value, ["session", "refreshToken"])
+    ?? getNestedString(value, ["session", "refresh_token"])
+    ?? getNestedString(value, ["tokens", "refreshToken"])
+    ?? getNestedString(value, ["tokens", "refresh_token"]);
+  const idToken = getString(value.id_token)
+    ?? getString(value.idToken)
+    ?? getNestedString(value, ["session", "idToken"])
+    ?? getNestedString(value, ["session", "id_token"])
+    ?? getNestedString(value, ["tokens", "idToken"])
+    ?? getNestedString(value, ["tokens", "id_token"]);
+  if (!access) {
+    throw new Error("导入失败: 缺少 access_token/accessToken/access。");
   }
 
   const payload = decodeJwtPayload(access);
   const identity = extractImportIdentity(value, payload, access);
-  const email = extractEmail(payload, value.email);
+  const email = extractEmail(payload, value.email ?? getNestedString(value, ["user", "email"]) ?? getNestedString(value, ["account", "email"]));
   const expires = parseExpiry(value, payload);
 
   return {
@@ -238,7 +280,7 @@ export function importProfileFromJson(value: unknown): OAuthProfile {
     profileId: `openai-codex:${identity.accountId}`,
     mode: "oauth_account",
     access,
-    refresh,
+    ...(refresh ? { refresh } : {}),
     idToken,
     expires,
     accountId: identity.accountId,
@@ -301,7 +343,7 @@ export function getProfileImportTemplate(): ExportedProfileBundle {
       {
         type: "codex",
         access_token: "eyJ...access_token",
-        refresh_token: "rt_...",
+        refresh_token: "rt_...（可选；只有 ChatGPT session accessToken 时可不填，但过期后需要重新导入）",
         id_token: "eyJ...id_token",
         expired: "2026-05-04T22:13:00.000Z",
         email: "user@example.com",
@@ -311,6 +353,17 @@ export function getProfileImportTemplate(): ExportedProfileBundle {
         codex_apply_supported: true,
         profile_id: "可选，导入时会按 account_id 自动生成",
         exported_at: new Date(0).toISOString(),
+      },
+      {
+        type: "chatgpt_session",
+        accessToken: "eyJ...accessToken",
+        expires: Math.floor((Date.now() + 60 * 60 * 1000) / 1000),
+        user: {
+          email: "user@example.com",
+        },
+        account: {
+          chatgpt_account_id: "可选；有真实 chatgpt_account_id 时会随请求发送 ChatGPT-Account-Id",
+        },
       },
     ],
   };

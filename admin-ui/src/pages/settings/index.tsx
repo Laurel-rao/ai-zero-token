@@ -1,86 +1,13 @@
-import { Globe2, Loader2, MonitorCog, PlugZap, RefreshCw, Search, Share2, Unplug } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { Loader2, RefreshCw, Search } from "lucide-react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
-import type { AdminConfig, GatewayShareInfo, ProfileSummary } from "@/shared/types";
+import type { AdminConfig, ProfileSummary } from "@/shared/types";
 import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
-import { copyText, errorMessage } from "@/shared/lib/app-utils";
+import { errorMessage } from "@/shared/lib/app-utils";
 import { formatJson } from "@/shared/lib/format";
 import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
-
-type CodexGatewayMode = "local" | "remote";
-type CodexProviderMode = "openai" | "ai-zero-token";
-type ShareGatewayFeedback = {
-  tone: "success" | "warning";
-  title: string;
-  detail: string;
-  codexUrl?: string;
-  baseUrl?: string;
-  apiKey?: string;
-};
-
-function normalizeCodexProviderMode(value?: string | null): CodexProviderMode {
-  return value === "ai-zero-token" ? "ai-zero-token" : "openai";
-}
-
-function codexProviderModeLabel(mode: CodexProviderMode): string {
-  return mode === "openai" ? "openai" : "AI Zero Token";
-}
-
-function codexProviderModeDescription(mode: CodexProviderMode): string {
-  return mode === "openai" ? "保留 Codex 原生历史" : "新的 provider 历史";
-}
-
-function codexProviderWriteTarget(mode: CodexProviderMode): string {
-  return mode === "openai" ? "openai_base_url" : "[model_providers.ai-zero-token]";
-}
-
-function normalizeCodexGatewayUrl(value: string): string {
-  let normalized = value.trim();
-  if (!normalized) {
-    throw new Error("请填写 Codex 网关 URL。");
-  }
-
-  if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(normalized)) {
-    normalized = `http://${normalized}`;
-  }
-
-  let url: URL;
-  try {
-    url = new URL(normalized);
-  } catch {
-    throw new Error("Codex 网关 URL 格式错误，请填写 http(s) 地址或 IP:端口。");
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Codex 网关 URL 只支持 http 或 https。");
-  }
-
-  url.hash = "";
-  url.search = "";
-  const path = url.pathname.replace(/\/+$/g, "");
-  if (!path || path === "/") {
-    url.pathname = "/codex/v1";
-  } else if (path === "/v1") {
-    url.pathname = "/codex/v1";
-  } else if (path.endsWith("/codex")) {
-    url.pathname = `${path}/v1`;
-  } else {
-    url.pathname = path;
-  }
-
-  return url.toString().replace(/\/+$/g, "");
-}
-
-function normalizeCodexGatewayUrlSafe(value: string): string {
-  try {
-    return normalizeCodexGatewayUrl(value);
-  } catch {
-    return value.trim().replace(/\/+$/g, "");
-  }
-}
-
-function getLocalCodexGatewayUrl(config: AdminConfig | null): string {
-  return config?.codexBaseUrl || "http://127.0.0.1:8787/codex/v1";
-}
+import { DatabaseUsersPanel } from "./components/DatabaseUsersPanel";
+import type { UserRole } from "@/routes/routes";
 
 function createSettingsDraft(config: AdminConfig): SettingDraft {
   return {
@@ -92,6 +19,10 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     autoSwitchExcludedProfileIds: config.settings.autoSwitch.excludedProfileIds || [],
     quotaSyncConcurrency: String(config.settings.runtime?.quotaSyncConcurrency || 3),
     freeAccountWebGenerationEnabled: Boolean(config.settings.image?.freeAccountWebGenerationEnabled),
+    wecomEnabled: Boolean(config.settings.wecom?.enabled),
+    wecomCorpId: config.settings.wecom?.corpId || "",
+    wecomAgentId: config.settings.wecom?.agentId || "",
+    wecomSecret: config.settings.wecom?.secret || "",
     serverPort: String(config.settings.server.port || 8787),
   };
 }
@@ -103,6 +34,8 @@ function profileSearchText(profile: ProfileSummary): string {
 export function SettingsPage(props: {
   showEmails: boolean;
   setShowEmails: Dispatch<SetStateAction<boolean>>;
+  currentUser: string | null;
+  role: UserRole;
   config: AdminConfig | null;
   busy: BusyAction;
   status: string;
@@ -120,25 +53,15 @@ export function SettingsPage(props: {
     autoSwitchExcludedProfileIds: [],
     quotaSyncConcurrency: "3",
     freeAccountWebGenerationEnabled: false,
+    wecomEnabled: false,
+    wecomCorpId: "",
+    wecomAgentId: "",
+    wecomSecret: "",
     serverPort: "8787",
   });
-  const [codexGatewayMode, setCodexGatewayMode] = useState<CodexGatewayMode>("local");
-  const [codexGatewayUrl, setCodexGatewayUrl] = useState("http://127.0.0.1:8787/codex/v1");
-  const [codexGatewayTouched, setCodexGatewayTouched] = useState(false);
   const [settingsDirtyFields, setSettingsDirtyFields] = useState<Set<keyof SettingDraft>>(() => new Set());
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
-  const [codexProviderMode, setCodexProviderMode] = useState<CodexProviderMode>("openai");
-  const [codexProviderModeTouched, setCodexProviderModeTouched] = useState(false);
-  const [shareGatewayFeedback, setShareGatewayFeedback] = useState<ShareGatewayFeedback | null>(null);
-  const [shareGatewayCopied, setShareGatewayCopied] = useState(false);
-  const shareGatewayCopiedTimer = useRef<number | null>(null);
   const settingsDirty = settingsDirtyFields.size > 0;
-
-  useEffect(() => () => {
-    if (shareGatewayCopiedTimer.current) {
-      window.clearTimeout(shareGatewayCopiedTimer.current);
-    }
-  }, []);
 
   useEffect(() => {
     if (!props.config || settingsDirty) {
@@ -146,26 +69,6 @@ export function SettingsPage(props: {
     }
     setSettingsDraft(createSettingsDraft(props.config));
   }, [props.config, settingsDirty]);
-
-  useEffect(() => {
-    if (!props.config || codexGatewayTouched) {
-      return;
-    }
-
-    const localUrl = getLocalCodexGatewayUrl(props.config);
-    const activeUrl = props.config.codex.gatewayProvider?.baseUrl;
-    const nextUrl = activeUrl || localUrl;
-    setCodexGatewayUrl(nextUrl);
-    setCodexGatewayMode(activeUrl && normalizeCodexGatewayUrlSafe(activeUrl) !== normalizeCodexGatewayUrlSafe(localUrl) ? "remote" : "local");
-  }, [props.config, codexGatewayTouched]);
-
-  useEffect(() => {
-    if (!props.config || codexProviderModeTouched) {
-      return;
-    }
-
-    setCodexProviderMode(normalizeCodexProviderMode(props.config.codex.gatewayProvider?.providerId));
-  }, [props.config, codexProviderModeTouched]);
 
   function markSettingsDirty(next: Partial<SettingDraft>) {
     setSettingsDraft((draft) => ({ ...draft, ...next }));
@@ -186,26 +89,6 @@ export function SettingsPage(props: {
       nextSet.delete(profileId);
     }
     markSettingsDirty({ autoSwitchExcludedProfileIds: Array.from(nextSet) });
-  }
-
-  function selectCodexGatewayMode(mode: CodexGatewayMode) {
-    const localUrl = getLocalCodexGatewayUrl(props.config);
-    setCodexGatewayTouched(true);
-    setCodexGatewayMode(mode);
-    if (mode === "local") {
-      setCodexGatewayUrl(localUrl);
-    } else if (!codexGatewayUrl.trim()) {
-      setCodexGatewayUrl(localUrl);
-    }
-  }
-
-  function getSelectedCodexGatewayUrl(): string {
-    return codexGatewayMode === "local" ? getLocalCodexGatewayUrl(props.config) : codexGatewayUrl;
-  }
-
-  function selectCodexProviderMode(mode: CodexProviderMode) {
-    setCodexProviderModeTouched(true);
-    setCodexProviderMode(mode);
   }
 
   const excludedProfileIds = useMemo(() => new Set(settingsDraft.autoSwitchExcludedProfileIds), [settingsDraft.autoSwitchExcludedProfileIds]);
@@ -239,6 +122,7 @@ export function SettingsPage(props: {
       autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
       runtime?: { quotaSyncConcurrency: number };
       image?: { freeAccountWebGenerationEnabled: boolean };
+      wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
       server?: { port: number };
     } = {};
 
@@ -269,6 +153,14 @@ export function SettingsPage(props: {
     if (hasDirtyField("freeAccountWebGenerationEnabled")) {
       payload.image = {
         freeAccountWebGenerationEnabled: settingsDraft.freeAccountWebGenerationEnabled,
+      };
+    }
+    if (hasDirtyField("wecomEnabled", "wecomCorpId", "wecomAgentId", "wecomSecret")) {
+      payload.wecom = {
+        enabled: settingsDraft.wecomEnabled,
+        ...(hasDirtyField("wecomCorpId") ? { corpId: settingsDraft.wecomCorpId } : {}),
+        ...(hasDirtyField("wecomAgentId") ? { agentId: settingsDraft.wecomAgentId } : {}),
+        ...(hasDirtyField("wecomSecret") ? { secret: settingsDraft.wecomSecret } : {}),
       };
     }
     if (hasDirtyField("serverPort")) {
@@ -339,241 +231,6 @@ export function SettingsPage(props: {
     }
   }
 
-  async function shareGateway() {
-    props.setBusy("codex-share");
-    setShareGatewayCopied(false);
-    setShareGatewayFeedback(null);
-    if (shareGatewayCopiedTimer.current) {
-      window.clearTimeout(shareGatewayCopiedTimer.current);
-      shareGatewayCopiedTimer.current = null;
-    }
-    try {
-      const share = await fetchJson<GatewayShareInfo>("/_gateway/admin/share");
-      if (!share.primary) {
-        const message = share.lanReachable
-          ? "没有检测到可分享的局域网地址。请确认设备已连接 Wi-Fi 或局域网。"
-          : `当前网关只允许本机访问，不能分享给局域网设备。请把网关监听地址从 ${share.serverHost} 改为 0.0.0.0 后重启。`;
-        setShareGatewayFeedback({
-          tone: "warning",
-          title: "不能分享代理配置",
-          detail: message,
-        });
-        props.setStatus(message);
-        return;
-      }
-
-      const alternatives = share.addresses
-        .slice(1)
-        .map((item) => `备用 Codex 远程网关 URL:\n${item.codexBaseUrl}`)
-        .join("\n\n");
-      const shareText = [
-        "AI Zero Token 代理配置",
-        "",
-        "Codex 远程网关 URL:",
-        share.primary.codexBaseUrl,
-        "",
-        "OpenAI 兼容 Base URL:",
-        share.primary.baseUrl,
-        "",
-        "API Key:",
-        "任意值，例如 local",
-        "",
-        "说明:",
-        "远程请求会消耗这台网关机器上保存的账号额度。",
-        "请确认两台设备在同一局域网，且防火墙允许访问该端口。",
-        ...(alternatives ? ["", alternatives] : []),
-      ].join("\n");
-
-      const copied = await copyText(shareText);
-      if (copied) {
-        setShareGatewayCopied(true);
-        shareGatewayCopiedTimer.current = window.setTimeout(() => {
-          setShareGatewayCopied(false);
-          shareGatewayCopiedTimer.current = null;
-        }, 2000);
-      }
-      setShareGatewayFeedback({
-        tone: copied ? "success" : "warning",
-        title: copied ? "代理配置已复制" : "复制失败，请手动复制",
-        detail: copied
-          ? "把这段配置发给对方。对方在 AI Zero Token 的「远程网关」里填 Codex 地址，OpenAI 兼容客户端填 Base URL。"
-          : "浏览器未允许写入剪贴板，请手动复制下面的代理配置。",
-        codexUrl: share.primary.codexBaseUrl,
-        baseUrl: share.primary.baseUrl,
-        apiKey: "任意值，例如 local",
-      });
-      props.setStatus(copied ? `代理配置已复制：${share.primary.codexBaseUrl}` : shareText);
-    } catch (error) {
-      const message = errorMessage(error);
-      setShareGatewayFeedback({
-        tone: "warning",
-        title: "代理配置生成失败",
-        detail: message,
-      });
-      props.setStatus(message);
-    } finally {
-      props.setBusy(null);
-    }
-  }
-
-  async function promptCodexRestart(options: {
-    config?: AdminConfig | null;
-    confirmMessage: string;
-    deferStatus: string;
-    restartingStatus: string;
-    restartedStatus: string;
-    failedStatusPrefix: string;
-  }) {
-    if (options.config?.codexRestartSupported && window.confirm(options.confirmMessage)) {
-      props.setStatus(options.restartingStatus);
-      try {
-        await fetchJson<{ ok: boolean; restarted?: boolean }>("/_gateway/admin/desktop/restart-codex", { method: "POST" });
-        props.setStatus(options.restartedStatus);
-      } catch (error) {
-        props.setStatus(`${options.failedStatusPrefix}: ${errorMessage(error)}`);
-      }
-      return;
-    }
-
-    props.setStatus(options.deferStatus);
-  }
-
-  async function toggleCodexProvider() {
-    props.setBusy("codex-provider");
-    try {
-      const selectedProviderMode = codexProviderMode;
-      const selectedProviderLabel = codexProviderModeLabel(selectedProviderMode);
-      const selectedBaseUrl = normalizeCodexGatewayUrl(getSelectedCodexGatewayUrl());
-      const activeBaseUrl = props.config?.codex.gatewayProvider?.baseUrl;
-      const currentProviderMode = normalizeCodexProviderMode(props.config?.codex.gatewayProvider?.providerId);
-      const providerChanged = Boolean(
-        props.config?.codex.gatewayProvider?.active &&
-        currentProviderMode !== selectedProviderMode,
-      );
-      const activeBaseUrlChanged = Boolean(
-        props.config?.codex.gatewayProvider?.active &&
-        activeBaseUrl &&
-        normalizeCodexGatewayUrlSafe(activeBaseUrl) !== selectedBaseUrl,
-      );
-
-      if (props.config?.codex.gatewayProvider?.active && !activeBaseUrlChanged && !providerChanged) {
-        const result = await fetchJson<{
-          codexProvider: {
-            path: string;
-            backupPath?: string;
-            providerId: string;
-            removed: boolean;
-          };
-          config?: AdminConfig;
-        }>("/_gateway/admin/codex/remove-provider", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: formatJson({ providerId: selectedProviderMode }),
-        });
-        if (result.config) {
-          props.setConfig(result.config);
-        }
-        if (result.codexProvider.removed) {
-          await promptCodexRestart({
-            config: result.config ?? props.config,
-            confirmMessage: `Codex ${selectedProviderLabel} 接管已解除，是否现在重启 Codex 客户端？\n\nCodex 通常在启动时读取本机 config.toml，重启后会回到原本的 Codex 配置。`,
-            deferStatus: `已解除 ${selectedProviderLabel} 接管。重启 Codex 后会回到原本的 Codex 配置。`,
-            restartingStatus: "正在重启 Codex 客户端...",
-            restartedStatus: `已解除 ${selectedProviderLabel} 接管，并已重启 Codex 客户端。`,
-            failedStatusPrefix: `已解除 ${selectedProviderLabel} 接管，但重启 Codex 失败`,
-          });
-        } else {
-          props.setStatus("未发现当前受管的 Codex provider 配置。");
-        }
-        return;
-      }
-
-      const wasUpdating = Boolean(props.config?.codex.gatewayProvider?.active);
-      const result = await fetchJson<{
-        codexProvider: {
-          path: string;
-          backupPath?: string;
-          providerId: string;
-          baseUrl: string;
-          historyMigration?: {
-            path: string;
-            backupPath?: string;
-            migratedCount: number;
-            rolloutPatchedCount?: number;
-            rolloutPatchErrors?: string[];
-            skipped?: boolean;
-            error?: string;
-          };
-        };
-        config?: AdminConfig;
-      }>("/_gateway/admin/codex/configure-provider", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: formatJson({ baseUrl: selectedBaseUrl, providerId: selectedProviderMode }),
-      });
-      if (result.config) {
-        props.setConfig(result.config);
-      }
-      const migratedCount = result.codexProvider.historyMigration?.migratedCount || 0;
-      const rolloutPatchedCount = result.codexProvider.historyMigration?.rolloutPatchedCount || 0;
-      const migrationSuffix = migratedCount > 0
-        ? `，已迁移 ${migratedCount} 条历史记录${rolloutPatchedCount > 0 ? `，已修复 ${rolloutPatchedCount} 个会话索引` : ""}`
-        : "";
-      await promptCodexRestart({
-        config: result.config ?? props.config,
-        confirmMessage: selectedProviderMode === "openai"
-          ? "Codex 接管将使用 openai 历史记录模式，是否现在重启 Codex 客户端？\n\n重启后请求仍会走 AI Zero Token 网关，历史记录会继续归在 Codex 原生 openai provider 下。"
-          : "Codex 接管将切换到 AI Zero Token 新 provider，是否现在重启 Codex 客户端？\n\n重启后请求仍会走 AI Zero Token 网关，历史记录会归在新的 AI Zero Token provider 下。",
-        deferStatus: `${wasUpdating ? "已更新" : "已写入"} ${selectedProviderLabel} 接管配置：${result.codexProvider.baseUrl}${migrationSuffix}。重启 Codex 后生效。`,
-        restartingStatus: "正在重启 Codex 客户端...",
-        restartedStatus: `${wasUpdating ? "已更新" : "已接管"} ${selectedProviderLabel} 请求，并已重启 Codex 客户端。`,
-        failedStatusPrefix: `${wasUpdating ? "已更新" : "已接管"} ${selectedProviderLabel} 请求，但重启 Codex 失败`,
-      });
-    } catch (error) {
-      props.setStatus(errorMessage(error));
-    } finally {
-      props.setBusy(null);
-    }
-  }
-
-  const currentProviderMode = normalizeCodexProviderMode(props.config?.codex.gatewayProvider?.providerId);
-  const currentProviderLabel = codexProviderModeLabel(currentProviderMode);
-  const selectedProviderWriteTarget = codexProviderWriteTarget(codexProviderMode);
-  const codexProviderActive = Boolean(props.config?.codex.gatewayProvider?.active);
-  const codexProviderBusy = props.busy === "codex-provider";
-  const codexShareBusy = props.busy === "codex-share";
-  const localCodexGatewayUrl = getLocalCodexGatewayUrl(props.config);
-  const selectedCodexGatewayUrl = codexGatewayMode === "local" ? localCodexGatewayUrl : codexGatewayUrl;
-  const normalizedSelectedCodexGatewayUrl = normalizeCodexGatewayUrlSafe(selectedCodexGatewayUrl);
-  const currentCodexProviderUrl = props.config?.codex.gatewayProvider?.baseUrl || "";
-  const codexProviderUrlChanged = Boolean(
-    codexProviderActive &&
-    currentCodexProviderUrl &&
-    normalizeCodexGatewayUrlSafe(currentCodexProviderUrl) !== normalizedSelectedCodexGatewayUrl,
-  );
-  const codexProviderModeChanged = Boolean(
-    codexProviderActive &&
-    currentProviderMode !== codexProviderMode,
-  );
-  const codexProviderButtonClass = [
-    "btn-secondary",
-    "codex-provider-button",
-    codexProviderBusy
-      ? "is-busy"
-      : codexProviderActive && !codexProviderUrlChanged && !codexProviderModeChanged
-        ? "is-active"
-        : "is-inactive",
-  ].join(" ");
-  const codexProviderButtonLabel = codexProviderBusy
-    ? "处理中"
-    : codexProviderActive && !codexProviderUrlChanged && !codexProviderModeChanged
-      ? "解除 Codex 接管"
-      : codexProviderActive
-        ? "更新接管配置"
-        : "写入并接管";
-  const codexProviderStatusLabel = codexProviderActive ? currentProviderLabel : "未接管";
-  const codexProviderStatusClass = codexProviderActive ? "is-included" : "is-excluded";
-
   return (
     <section className="settings-page">
       <div className="settings-page-head settings-page-head-actions-only">
@@ -586,134 +243,6 @@ export function SettingsPage(props: {
       </div>
 
       <div className="settings-grid">
-        <section className="settings-section codex-provider-section">
-          <div className="codex-provider-head">
-            <div>
-              <h4>Codex 请求接管</h4>
-              <p className="hint">默认使用 openai 保留 Codex 原生历史；也可以切到 AI Zero Token，写入新的 provider 历史分组。接管地址既可以是本机网关，也可以是远程网关 URL。</p>
-            </div>
-            <span className={`count-pill ${codexProviderStatusClass}`}>{codexProviderStatusLabel}</span>
-          </div>
-
-          <div className="codex-provider-mode-row">
-            <div className="codex-provider-mode-copy">
-              <div className="codex-provider-mode-title">历史记录模式</div>
-              <p className="hint">{codexProviderModeLabel(codexProviderMode)} · {codexProviderModeDescription(codexProviderMode)}</p>
-            </div>
-            <div className="codex-provider-mode-toggle" role="group" aria-label="历史记录模式">
-              <button className={`codex-provider-mode-option ${codexProviderMode === "openai" ? "is-active" : ""}`} type="button" onClick={() => selectCodexProviderMode("openai")}>
-                openai
-              </button>
-              <button className={`codex-provider-mode-option ${codexProviderMode === "ai-zero-token" ? "is-active" : ""}`} type="button" onClick={() => selectCodexProviderMode("ai-zero-token")}>
-                AI Zero Token
-              </button>
-            </div>
-          </div>
-
-          <div className="codex-provider-controls">
-            <div className="codex-mode-toggle" role="group" aria-label="Codex 网关模式">
-              <button className={`codex-mode-option ${codexGatewayMode === "local" ? "is-active" : ""}`} type="button" onClick={() => selectCodexGatewayMode("local")}>
-                <MonitorCog size={16} />
-                本机网关
-              </button>
-              <button className={`codex-mode-option ${codexGatewayMode === "remote" ? "is-active" : ""}`} type="button" onClick={() => selectCodexGatewayMode("remote")}>
-                <Globe2 size={16} />
-                远程网关
-              </button>
-            </div>
-
-            <label className="field codex-url-field">
-              <span>Codex 网关 URL</span>
-              <input
-                className="input codex-url-input"
-                value={codexGatewayMode === "local" ? localCodexGatewayUrl : codexGatewayUrl}
-                onChange={(event) => {
-                  setCodexGatewayTouched(true);
-                  setCodexGatewayMode("remote");
-                  setCodexGatewayUrl(event.target.value);
-                }}
-                placeholder="http://192.168.1.10:8787/codex/v1"
-                readOnly={codexGatewayMode === "local"}
-              />
-            </label>
-
-            <div className="codex-provider-actions">
-              <button className="btn-secondary share-gateway-button" type="button" onClick={shareGateway} disabled={codexShareBusy}>
-                {codexShareBusy ? <Loader2 className="spin" size={16} /> : <Share2 size={16} />}
-                {codexShareBusy ? "生成中" : shareGatewayCopied ? "已复制" : "复制代理配置"}
-              </button>
-              <button className="btn-secondary" type="button" onClick={() => selectCodexGatewayMode("local")}>
-                <MonitorCog size={16} />
-                使用本机地址
-              </button>
-              <button className={codexProviderButtonClass} type="button" onClick={toggleCodexProvider} disabled={codexProviderBusy}>
-                {codexProviderBusy ? (
-                  <Loader2 className="spin" size={16} />
-                ) : codexProviderActive && !codexProviderUrlChanged ? (
-                  <Unplug size={16} />
-                ) : (
-                  <PlugZap size={16} />
-                )}
-                {codexProviderButtonLabel}
-              </button>
-            </div>
-          </div>
-
-          {shareGatewayFeedback ? (
-            <div className={`share-gateway-feedback ${shareGatewayFeedback.tone === "success" ? "is-success" : "is-warning"}`} role="status" aria-live="polite">
-              <strong>{shareGatewayFeedback.title}</strong>
-              <span>{shareGatewayFeedback.detail}</span>
-              <div className="share-gateway-config-list">
-                {shareGatewayFeedback.codexUrl ? (
-                  <div>
-                    <span>Codex 远程网关 URL</span>
-                    <code>{shareGatewayFeedback.codexUrl}</code>
-                  </div>
-                ) : null}
-                {shareGatewayFeedback.baseUrl ? (
-                  <div>
-                    <span>OpenAI 兼容 Base URL</span>
-                    <code>{shareGatewayFeedback.baseUrl}</code>
-                  </div>
-                ) : null}
-                {shareGatewayFeedback.apiKey ? (
-                  <div>
-                    <span>API Key</span>
-                    <code>{shareGatewayFeedback.apiKey}</code>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-
-          <p className="hint">
-            可直接输入 IP:端口，系统会自动补全为 http://IP:端口/codex/v1。当前将写入 <code>{selectedProviderWriteTarget}</code>：<code>{normalizedSelectedCodexGatewayUrl || "-"}</code>
-          </p>
-
-          <div className="codex-provider-meta-strip">
-            <div>
-              <span>配置文件</span>
-              <code>{props.config?.codex.gatewayProvider.path || "~/.codex/config.toml"}</code>
-            </div>
-            <div>
-              <span>当前状态</span>
-              <code>{codexProviderActive ? `${currentProviderLabel} · ${codexProviderModeDescription(currentProviderMode)}` : "未接管"}</code>
-            </div>
-            <div>
-              <span>写入目标</span>
-              <code>{selectedProviderWriteTarget}</code>
-            </div>
-            <div>
-              <span>接管地址</span>
-              <code>{currentCodexProviderUrl || "未写入受管配置"}</code>
-            </div>
-            <div className="is-warning">
-              <span>远程网关提示</span>
-              <strong>远程请求会消耗对方网关机器上保存的账号额度。</strong>
-            </div>
-          </div>
-        </section>
-
         <section className="settings-section">
           <h4>模型</h4>
           <label className="field">
@@ -729,20 +258,25 @@ export function SettingsPage(props: {
           <p className="hint">模型列表来源：{props.config?.modelCatalog.source || "-"}，共 {props.config?.modelCatalog.modelCount || 0} 个。</p>
         </section>
 
-        <section className="settings-section free-image-section">
-          <h4>Free 账号生图</h4>
+        <section className="settings-section wecom-section">
+          <h4>企业微信登录</h4>
           <label className="switch-line">
-            <input
-              type="checkbox"
-              checked={settingsDraft.freeAccountWebGenerationEnabled}
-              onChange={(event) => markSettingsDirty({ freeAccountWebGenerationEnabled: event.target.checked })}
-            />
-            <span>允许 Free 账号使用 ChatGPT 网页链路生图</span>
+            <input type="checkbox" checked={settingsDraft.wecomEnabled} onChange={(event) => markSettingsDirty({ wecomEnabled: event.target.checked })} />
+            <span>启用企业微信扫码登录</span>
           </label>
-          <p className="hint">关闭时，Free 账号生图会继续走原先 Codex Responses 图片工具链路，由上游决定是否可用。</p>
-          <p className="free-image-warning">
-            <strong>封号风险：</strong>该能力不是官方 API 标准流程，使用 Free 账号生图存在账号风控或封号风险。<strong>额度较少：</strong>Free 额度通常较少，当前经验值大约 8 张，实际以上游账号为准。
-          </p>
+          <label className="field">
+            <span>企业 ID</span>
+            <input className="input" value={settingsDraft.wecomCorpId} onChange={(event) => markSettingsDirty({ wecomCorpId: event.target.value })} placeholder="wwxxxxxxxxxxxxxxxx" />
+          </label>
+          <label className="field">
+            <span>AgentID</span>
+            <input className="input" value={settingsDraft.wecomAgentId} onChange={(event) => markSettingsDirty({ wecomAgentId: event.target.value })} placeholder="1000002" />
+          </label>
+          <label className="field">
+            <span>Secret</span>
+            <input className="input" type="password" value={settingsDraft.wecomSecret} onChange={(event) => markSettingsDirty({ wecomSecret: event.target.value })} placeholder="企业微信应用 Secret" />
+          </label>
+          <p className="hint">扫码成功后会按企业微信 UserId 自动创建普通用户，用户名格式为 wxwork:UserId。</p>
         </section>
 
         <section className="settings-section">
@@ -853,6 +387,8 @@ export function SettingsPage(props: {
           </label>
           <p className="hint">开启后账号邮箱将以脱敏形式展示。</p>
         </section>
+
+        {props.role === "admin" ? <DatabaseUsersPanel currentUser={props.currentUser} setStatus={props.setStatus} /> : null}
       </div>
 
       <div className="settings-page-actions settings-page-footer-actions">

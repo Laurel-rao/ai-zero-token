@@ -3,15 +3,18 @@ import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
 import type { BusyAction } from "@/shared/lib/app-types";
 import { errorMessage } from "@/shared/lib/app-utils";
-import { readRouteFromHash, type AppRoute } from "@/routes/routes";
+import { canAccessRoute, normalizeUserRole, readRouteFromHash, type AppRoute, type UserRole } from "@/routes/routes";
 
-export type ModalImage = { src: string; meta: string; filename?: string };
+export type ModalImage = { src: string; meta: string; filename?: string; ratio?: string };
 export type ManualLoginState = {
   loginId: string;
   message: string;
+  authorizeUrl?: string;
 } | null;
 
 export type WorkspaceState = {
+  currentUser: string | null;
+  role: UserRole;
   config: AdminConfig | null;
   setConfig: Dispatch<SetStateAction<AdminConfig | null>>;
   busy: BusyAction;
@@ -30,6 +33,8 @@ export type WorkspaceState = {
   setPreviewImage: Dispatch<SetStateAction<ModalImage | null>>;
   activeRoute: AppRoute;
   setActiveRoute: Dispatch<SetStateAction<AppRoute>>;
+  dataOwnerFilter: string;
+  setDataOwnerFilter: Dispatch<SetStateAction<string>>;
   requestLogs: RequestLog[];
   setRequestLogs: Dispatch<SetStateAction<RequestLog[]>>;
   refreshConfig: (options?: { runtime?: boolean; silent?: boolean }) => Promise<AdminConfig>;
@@ -47,7 +52,9 @@ function readStoredShowEmails(): boolean {
   }
 }
 
-export function useAdminWorkspaceState(): WorkspaceState {
+export function useAdminWorkspaceState(auth?: { currentUser?: string | null; role?: UserRole }): WorkspaceState {
+  const role = normalizeUserRole(auth?.role);
+  const currentUser = auth?.currentUser ?? null;
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [busy, setBusy] = useState<BusyAction>("initial");
   const [status, setStatus] = useState("正在读取本地网关状态...");
@@ -56,7 +63,8 @@ export function useAdminWorkspaceState(): WorkspaceState {
   const [contactOpen, setContactOpen] = useState(false);
   const [manualLogin, setManualLogin] = useState<ManualLoginState>(null);
   const [previewImage, setPreviewImage] = useState<ModalImage | null>(null);
-  const [activeRoute, setActiveRoute] = useState<AppRoute>(() => readRouteFromHash());
+  const [activeRoute, setActiveRoute] = useState<AppRoute>(() => readRouteFromHash(role));
+  const [dataOwnerFilter, setDataOwnerFilter] = useState("");
   const [requestLogs, setRequestLogs] = useState<RequestLog[]>([]);
 
   const refreshConfig = useCallback(async (options?: { runtime?: boolean; silent?: boolean }) => {
@@ -96,12 +104,16 @@ export function useAdminWorkspaceState(): WorkspaceState {
 
   const refreshRequestLogs = useCallback(async () => {
     try {
-      const next = await fetchJson<{ data: RequestLog[] }>("/_gateway/admin/request-logs");
+      const params = new URLSearchParams();
+      if (role === "admin" && dataOwnerFilter) {
+        params.set("owner", dataOwnerFilter);
+      }
+      const next = await fetchJson<{ data: RequestLog[] }>(`/_gateway/admin/request-logs${params.size ? `?${params.toString()}` : ""}`);
       setRequestLogs(next.data);
     } catch {
       // Request logs are diagnostic only; keep the rest of the console usable.
     }
-  }, []);
+  }, [dataOwnerFilter, role]);
 
   useEffect(() => {
     refreshConfig().catch(() => undefined);
@@ -131,14 +143,22 @@ export function useAdminWorkspaceState(): WorkspaceState {
 
   useEffect(() => {
     const handleHashChange = () => {
-      const route = readRouteFromHash();
+      const route = readRouteFromHash(role);
       startTransition(() => {
         setActiveRoute((current) => (current === route ? current : route));
       });
     };
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
-  }, []);
+  }, [role]);
+
+  useEffect(() => {
+    const route = readRouteFromHash(role);
+    setActiveRoute((current) => (canAccessRoute(current, role) ? current : route));
+    if (window.location.hash !== `#${route}` && !canAccessRoute(readRouteFromHash("admin"), role)) {
+      window.history.replaceState(null, "", `#${route}`);
+    }
+  }, [role]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -163,6 +183,8 @@ export function useAdminWorkspaceState(): WorkspaceState {
   }, []);
 
   return {
+    currentUser,
+    role,
     config,
     setConfig,
     busy,
@@ -181,6 +203,8 @@ export function useAdminWorkspaceState(): WorkspaceState {
     setPreviewImage,
     activeRoute,
     setActiveRoute,
+    dataOwnerFilter,
+    setDataOwnerFilter,
     requestLogs,
     setRequestLogs,
     refreshConfig,

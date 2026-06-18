@@ -7,10 +7,44 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function createClientId(prefix = "client"): string {
+  const randomUuid = globalThis.crypto?.randomUUID;
+  if (typeof randomUuid === "function") {
+    return randomUuid.call(globalThis.crypto);
+  }
+
+  const randomPart = Math.random().toString(36).slice(2, 12);
+  const timePart = Date.now().toString(36);
+  return `${prefix}_${timePart}_${randomPart}`;
+}
+
 export async function copyText(text: string): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(text);
-    return true;
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the textarea fallback for HTTP origins and denied permissions.
+  }
+
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "0";
+    textarea.style.top = "0";
+    textarea.style.width = "1px";
+    textarea.style.height = "1px";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    const ok = document.execCommand("copy");
+    textarea.remove();
+    return ok;
   } catch {
     return false;
   }
@@ -174,23 +208,48 @@ export function buildSeedRequests(config: AdminConfig, showEmails: boolean): Req
   });
 }
 
-export function extractPreviewImages(payload: unknown): Array<{ src: string; filename: string; meta: string }> {
+export function extractPreviewImages(payload: unknown): Array<{ src: string; fullSrc?: string; filename: string; meta: string; fullMeta?: string; width?: number; height?: number }> {
   if (!payload || typeof payload !== "object" || !("data" in payload) || !Array.isArray((payload as { data?: unknown }).data)) {
     return [];
   }
-  return ((payload as { data: Array<Record<string, unknown>> }).data || [])
+  const imagePayload = payload as {
+    data: Array<Record<string, unknown>>;
+    _gateway_images?: unknown;
+    output_format?: unknown;
+  };
+  const gatewayImages = Array.isArray(imagePayload._gateway_images)
+    ? (imagePayload._gateway_images as Array<Record<string, unknown>>)
+    : [];
+  return (imagePayload.data || [])
     .map((item, index) => {
       const b64 = typeof item.b64_json === "string" ? item.b64_json : "";
-      if (!b64) {
+      const gatewayImage = gatewayImages[index];
+      const fullUrl = typeof gatewayImage?.url === "string" ? gatewayImage.url : "";
+      const previewUrl = typeof gatewayImage?.previewUrl === "string" ? gatewayImage.previewUrl : "";
+      if (!b64 && !fullUrl && !previewUrl) {
         return null;
       }
-      const outputFormat = (payload as { output_format?: unknown }).output_format;
+      const outputFormat = imagePayload.output_format;
       const format = typeof outputFormat === "string" ? outputFormat : "png";
+      const filename = typeof gatewayImage?.filename === "string" ? gatewayImage.filename : `generated-${index + 1}.${format}`;
+      const mimeType = typeof gatewayImage?.mimeType === "string" ? gatewayImage.mimeType : `image/${format}`;
+      const size = typeof gatewayImage?.size === "number" ? gatewayImage.size : 0;
+      const previewSize = typeof gatewayImage?.previewSize === "number" ? gatewayImage.previewSize : 0;
+      const width = typeof gatewayImage?.width === "number" ? gatewayImage.width : undefined;
+      const height = typeof gatewayImage?.height === "number" ? gatewayImage.height : undefined;
+      const dimension = width && height ? `${width}×${height}` : "";
+      const fallbackDataUrl = b64 ? `data:image/${format};base64,${b64}` : fullUrl;
       return {
-        src: `data:image/${format};base64,${b64}`,
-        filename: `generated-${index + 1}.${format}`,
-        meta: `${format.toUpperCase()} · ${b64.length} chars`,
+        src: previewUrl || fallbackDataUrl,
+        fullSrc: fullUrl || fallbackDataUrl,
+        filename,
+        meta: previewUrl && previewSize > 0
+          ? `${dimension ? `${dimension} · ` : ""}预览 ${Math.round(previewSize / 1024)} KB · 原图 ${Math.round(size / 1024)} KB`
+          : `${dimension ? `${dimension} · ` : ""}${format.toUpperCase()} · ${b64.length} chars`,
+        fullMeta: size > 0 ? `${mimeType}${dimension ? ` · ${dimension}` : ""} · ${(size / 1024).toFixed(1)} KB` : undefined,
+        width,
+        height,
       };
     })
-    .filter(Boolean) as Array<{ src: string; filename: string; meta: string }>;
+    .filter(Boolean) as Array<{ src: string; fullSrc?: string; filename: string; meta: string; fullMeta?: string; width?: number; height?: number }>;
 }

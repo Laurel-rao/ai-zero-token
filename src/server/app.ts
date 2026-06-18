@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
@@ -15,25 +15,35 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { z } from "zod";
 import { createGatewayContext } from "../core/context.js";
-import type { ChatResult, OAuthProfile, ProfileSummary } from "../core/types.js";
+import type { ChatResult, GatewaySettings, OAuthProfile, ProfileSummary } from "../core/types.js";
 import { isTransientHttpError, requestText } from "../core/providers/http-client.js";
 import { streamOpenAICodex } from "../core/providers/openai-codex/chat.js";
 import { generateChatGPTWebImage, type ChatGPTWebImageResult } from "../core/providers/openai-codex/chatgpt-web-image.js";
 import {
-  startOpenAICodexLogin,
-  type OpenAICodexLoginSession,
+  startOpenAICodexRemoteLogin,
+  type OpenAICodexRemoteLoginSession,
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
+import type { GatewayUserRole } from "../core/services/gateway-database-service.js";
+import { getGenerationAssetsDir } from "../core/store/state-paths.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 const adminUiDistDir = path.join(packageRoot, "admin-ui", "dist");
 const adminUiIndexPath = path.join(adminUiDistDir, "index.html");
 const BYTES_PER_MIB = 1024 * 1024;
 const MAX_GATEWAY_REQUEST_LOGS = 100;
+const MAX_PERSISTED_REQUEST_LOGS = 200;
 const MAX_CODEX_RESPONSE_PROFILE_BINDINGS = 5000;
 const CODEX_STREAM_DRAIN_AFTER_CLIENT_CLOSE_MS = 30_000;
+const IMAGE_GENERATION_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_ROUTE_BODY_LIMIT_BYTES = 128 * BYTES_PER_MIB;
 const CODEX_COMPACT_BODY_LIMIT_BYTES = 256 * BYTES_PER_MIB;
+const ADMIN_SESSION_COOKIE = "azt_admin_session";
+const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const WECOM_LOGIN_STATE_COOKIE = "azt_wecom_login_state";
+const WECOM_LOGIN_STATE_TTL_MS = 10 * 60 * 1000;
+const WECOM_EMBED_LOGIN_STATE_TTL_MS = 10 * 60 * 1000;
+const WECOM_EMBED_COMPLETE_TTL_MS = 60 * 1000;
 const gunzipAsync = promisify(gunzip);
 const inflateAsync = promisify(inflate);
 const brotliDecompressAsync = promisify(brotliDecompress);
@@ -56,6 +66,7 @@ const assetContentTypes: Record<string, string> = {
 
 type GatewayRequestLog = {
   id: string;
+  owner?: string;
   time: number;
   method: string;
   endpoint: string;
@@ -76,6 +87,18 @@ type GatewayRequestUsageMeta = {
   errorType?: string;
 };
 
+type GatewayImageAsset = {
+  filename: string;
+  url: string;
+  mimeType: string;
+  size: number;
+  width?: number;
+  height?: number;
+  previewUrl?: string;
+  previewMimeType?: string;
+  previewSize?: number;
+};
+
 type GatewayShareAddress = {
   host: string;
   label: string;
@@ -83,6 +106,229 @@ type GatewayShareAddress = {
   baseUrl: string;
   codexBaseUrl: string;
 };
+
+type SecurityConfig = {
+  adminUser: string | null;
+  adminPasswordHash: string | null;
+  apiKeyHash: string | null;
+  sessionSecret: string;
+};
+
+type AdminSession = {
+  user: string;
+  role: GatewayUserRole;
+  expiresAt: number;
+};
+
+type WecomLoginChannel = "qr" | "oauth";
+
+function hashSecret(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function getEnvValue(...names: string[]): string | null {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function createSecurityConfig(): SecurityConfig {
+  const adminUser = getEnvValue("AZT_ADMIN_USER", "ADMIN_USER");
+  const adminPassword = getEnvValue("AZT_ADMIN_PASSWORD", "ADMIN_PASSWORD");
+  const apiKey = getEnvValue("AZT_API_KEY", "API_KEY");
+  const sessionSecret = getEnvValue("AZT_SESSION_SECRET", "SESSION_SECRET") ?? "change-me";
+
+  return {
+    adminUser,
+    adminPasswordHash: adminPassword ? hashSecret(adminPassword) : null,
+    apiKeyHash: apiKey ? hashSecret(apiKey) : null,
+    sessionSecret,
+  };
+}
+
+function secureEqualHash(hash: string | null, value: string | null | undefined): boolean {
+  if (!hash || !value) {
+    return false;
+  }
+  const expected = Buffer.from(hash, "hex");
+  const actual = Buffer.from(hashSecret(value), "hex");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function toGatewayImageAssets(
+  images: Array<{
+    filename: string;
+    url: string;
+    mimeType: string;
+    size: number;
+    previewUrl?: string;
+    previewMimeType?: string;
+    previewSize?: number;
+  }>,
+): GatewayImageAsset[] {
+  return images.map((image) => ({
+    filename: image.filename,
+    url: image.url,
+    mimeType: image.mimeType,
+    size: image.size,
+    width: image.width,
+    height: image.height,
+    previewUrl: image.previewUrl,
+    previewMimeType: image.previewMimeType,
+    previewSize: image.previewSize,
+  }));
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!header) {
+    return cookies;
+  }
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=");
+    if (index <= 0) {
+      continue;
+    }
+    const name = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (name) {
+      cookies[name] = decodeURIComponent(value);
+    }
+  }
+  return cookies;
+}
+
+function createAdminSessionToken(config: SecurityConfig, user: string, role: GatewayUserRole): string {
+  const expiresAt = Date.now() + ADMIN_SESSION_TTL_MS;
+  const nonce = randomBytes(16).toString("hex");
+  const payload = Buffer.from(JSON.stringify({ user, role, expiresAt, nonce }), "utf8").toString("base64url");
+  const signature = createHash("sha256")
+    .update(`${payload}.${config.sessionSecret}`)
+    .digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifyAdminSessionToken(config: SecurityConfig, token: string | undefined): AdminSession | null {
+  if (!token) {
+    return null;
+  }
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) {
+    return null;
+  }
+  const expected = createHash("sha256")
+    .update(`${payload}.${config.sessionSecret}`)
+    .digest("base64url");
+  const expectedBuffer = Buffer.from(expected);
+  const actualBuffer = Buffer.from(signature);
+  if (expectedBuffer.length !== actualBuffer.length || !timingSafeEqual(expectedBuffer, actualBuffer)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Partial<AdminSession>;
+    if (typeof parsed.user !== "string" || typeof parsed.expiresAt !== "number" || parsed.expiresAt <= Date.now()) {
+      return null;
+    }
+    const role = parsed.role === "user" ? "user" : "admin";
+    return { user: parsed.user, role, expiresAt: parsed.expiresAt };
+  } catch {
+    return null;
+  }
+}
+
+function buildSessionCookie(token: string): string {
+  const maxAge = Math.floor(ADMIN_SESSION_TTL_MS / 1000);
+  return `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+function buildExpiredSessionCookie(): string {
+  return `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function buildWecomStateCookie(state: string): string {
+  const maxAge = Math.floor(WECOM_LOGIN_STATE_TTL_MS / 1000);
+  return `${WECOM_LOGIN_STATE_COOKIE}=${encodeURIComponent(state)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+function buildExpiredWecomStateCookie(): string {
+  return `${WECOM_LOGIN_STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+function getBearerToken(request: FastifyRequest): string | null {
+  const authorization = request.headers.authorization;
+  if (!authorization) {
+    return null;
+  }
+  const [scheme, token] = authorization.split(/\s+/, 2);
+  return scheme?.toLowerCase() === "bearer" && token ? token : null;
+}
+
+function getAdminSessionFromRequest(config: SecurityConfig, request: FastifyRequest): AdminSession | null {
+  const cookies = parseCookies(request.headers.cookie);
+  return verifyAdminSessionToken(config, cookies[ADMIN_SESSION_COOKIE]);
+}
+
+function isAdminSession(session: AdminSession | null): boolean {
+  return session?.role === "admin";
+}
+
+function requestOwnerFromSession(session: AdminSession | null): string | undefined {
+  return session?.user;
+}
+
+function isWecomUserAgent(userAgent: string | undefined): boolean {
+  return /wxwork|micromessenger/i.test(userAgent ?? "");
+}
+
+function isPublicPath(method: string, url: string): boolean {
+  const pathOnly = url.split("?")[0] ?? "/";
+  return method === "OPTIONS" ||
+    pathOnly === "/" ||
+    pathOnly === "/favicon.ico" ||
+    pathOnly === "/_gateway/health" ||
+    pathOnly === "/_gateway/auth/status" ||
+    pathOnly === "/_gateway/auth/login" ||
+    pathOnly === "/_gateway/auth/wecom/start" ||
+    pathOnly === "/_gateway/auth/wecom/oauth/start" ||
+    pathOnly === "/_gateway/auth/wecom/url" ||
+    pathOnly === "/_gateway/auth/wecom/panel-config" ||
+    pathOnly === "/_gateway/auth/wecom/panel-login" ||
+    pathOnly === "/_gateway/auth/wecom/callback" ||
+    pathOnly === "/_gateway/auth/wecom/complete" ||
+    pathOnly === "/_gateway/auth/logout" ||
+    pathOnly.startsWith("/assets/");
+}
+
+function isAdminPath(url: string): boolean {
+  const pathOnly = url.split("?")[0] ?? "/";
+  return pathOnly.startsWith("/_gateway/");
+}
+
+function isUserGatewayPath(method: string, url: string): boolean {
+  const pathOnly = url.split("?")[0] ?? "/";
+  if (method === "GET" && pathOnly === "/_gateway/admin/config") {
+    return true;
+  }
+  if (method === "GET" && pathOnly === "/_gateway/admin/request-logs") {
+    return true;
+  }
+  if ((method === "GET" || method === "DELETE") && pathOnly === "/_gateway/generations/history") {
+    return true;
+  }
+  if (method === "GET" && pathOnly.startsWith("/_gateway/generations/images/")) {
+    return true;
+  }
+  return false;
+}
+
+function isApiPath(url: string): boolean {
+  const pathOnly = url.split("?")[0] ?? "/";
+  return pathOnly.startsWith("/v1/") || pathOnly.startsWith("/codex/v1/");
+}
 
 type CodexImageGenerationRequest = {
   prompt: string;
@@ -222,6 +468,42 @@ const chatCompletionsBodySchema = z
   })
   .passthrough();
 
+const adminLoginSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+
+const wecomCallbackQuerySchema = z.object({
+  code: z.string().min(1),
+  state: z.string().min(1),
+  embed: z.coerce.boolean().optional(),
+  channel: z.enum(["qr", "oauth"]).optional(),
+});
+
+const wecomCompleteQuerySchema = z.object({
+  token: z.string().min(1),
+});
+
+const wecomPanelLoginSchema = z.object({
+  code: z.string().min(1),
+});
+
+const gatewayUserCreateSchema = z.object({
+  username: z.string().trim().min(1).max(80),
+  password: z.string().min(6).max(200),
+  role: z.enum(["admin", "user"]).default("user"),
+});
+
+const gatewayUserUpdateSchema = z.object({
+  password: z.string().min(6).max(200).optional(),
+  role: z.enum(["admin", "user"]).optional(),
+  disabled: z.boolean().optional(),
+});
+
+const gatewayUserParamsSchema = z.object({
+  id: z.string().min(1),
+});
+
 const settingsUpdateSchema = z.object({
   defaultModel: z.string().min(1).optional(),
   networkProxy: z
@@ -248,6 +530,14 @@ const settingsUpdateSchema = z.object({
   image: z
     .object({
       freeAccountWebGenerationEnabled: z.boolean().optional(),
+    })
+    .optional(),
+  wecom: z
+    .object({
+      enabled: z.boolean().optional(),
+      corpId: z.string().optional(),
+      agentId: z.string().optional(),
+      secret: z.string().optional(),
     })
     .optional(),
   server: z
@@ -320,6 +610,16 @@ const githubImageBedHistoryQuerySchema = z.object({
 
 const githubImageBedHistoryParamsSchema = z.object({
   id: z.string().min(1),
+});
+
+const generationHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  owner: z.string().min(1).max(120).optional(),
+});
+
+const requestLogsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  owner: z.string().min(1).max(120).optional(),
 });
 
 const imageGenerationsBodySchema = z
@@ -1273,6 +1573,52 @@ function summarizeImageEditRequestForLog(body: z.infer<typeof imageEditsBodySche
   };
 }
 
+function ratioFromImageSize(size: string | undefined): string | undefined {
+  if (!size) {
+    return undefined;
+  }
+  const match = /^(\d+)x(\d+)$/i.exec(size.trim());
+  if (!match) {
+    return undefined;
+  }
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!width || !height) {
+    return undefined;
+  }
+  const gcd = (left: number, right: number): number => right === 0 ? left : gcd(right, left % right);
+  const divisor = gcd(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
+function getImageEditReferenceAssets(data: z.infer<typeof imageEditsBodySchema>): Array<{ name?: string; value: string }> {
+  return getImageEditReferences(data)
+    .map((reference, index) => {
+      const normalized = normalizeJsonImageReference(reference);
+      const value = normalized.imageUrl ?? normalized.fileId ?? "";
+      return value ? { name: `reference-${index + 1}`, value } : null;
+    })
+    .filter(Boolean) as Array<{ name?: string; value: string }>;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(message) as Error & { statusCode?: number };
+      error.statusCode = 504;
+      reject(error);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
 function buildResponseApiBody(result: ChatResult, includeRaw?: boolean): Record<string, unknown> {
   const usage = buildResponsesUsagePayload(extractTokenUsage(result.raw));
   const responseBody: Record<string, unknown> = {
@@ -1515,7 +1861,7 @@ function serializeProfile(profile: OAuthProfile | null): Record<string, unknown>
     exportAudit: profile.exportAudit,
     expiresAt: profile.expires,
     accessTokenPreview: maskSecret(profile.access),
-    refreshTokenPreview: maskSecret(profile.refresh),
+    refreshTokenPreview: profile.refresh ? maskSecret(profile.refresh) : "session-only",
   };
 }
 
@@ -1539,13 +1885,77 @@ function serializeManagedProfile(profile: ProfileSummary): Record<string, unknow
   };
 }
 
+function serializeSettings(settings: GatewaySettings, isAdmin: boolean): GatewaySettings {
+  return {
+    ...settings,
+    wecom: {
+      ...settings.wecom,
+      secret: isAdmin ? settings.wecom.secret : "",
+    },
+  };
+}
+
 function resolveOrigin(request: FastifyRequest): string {
   const host = request.headers.host;
   if (host) {
-    return `${request.protocol}://${host}`;
+    const forwardedProto = request.headers["x-forwarded-proto"];
+    const protocol = (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto)?.split(",")[0]?.trim() || request.protocol;
+    return `${protocol}://${host}`;
   }
 
   return "http://127.0.0.1:8787";
+}
+
+function sanitizeGatewayUsername(value: string, prefix = ""): string {
+  const normalized = value.trim().replace(/[^\w.@:-]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+  return `${prefix}${normalized || "user"}`.slice(0, 80);
+}
+
+async function requestWecomJson<T>(url: string): Promise<T> {
+  const response = await requestText({
+    method: "GET",
+    url,
+    timeoutMs: 20_000,
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(response.body) as unknown;
+  } catch {
+    throw new Error("企业微信接口返回不是有效 JSON。");
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("企业微信接口返回格式错误。");
+  }
+  const record = parsed as Record<string, unknown>;
+  const errcode = Number(record.errcode ?? 0);
+  if (errcode !== 0) {
+    const errmsg = typeof record.errmsg === "string" ? record.errmsg : "unknown error";
+    throw new Error(`企业微信接口错误 ${errcode}: ${errmsg}`);
+  }
+  return parsed as T;
+}
+
+async function getWecomAccessToken(params: { corpId: string; secret: string }): Promise<string> {
+  const url = new URL("https://qyapi.weixin.qq.com/cgi-bin/gettoken");
+  url.searchParams.set("corpid", params.corpId);
+  url.searchParams.set("corpsecret", params.secret);
+  const result = await requestWecomJson<{ access_token?: string }>(url.toString());
+  if (!result.access_token) {
+    throw new Error("企业微信未返回 access_token。");
+  }
+  return result.access_token;
+}
+
+async function getWecomUserId(params: { accessToken: string; code: string }): Promise<string> {
+  const url = new URL("https://qyapi.weixin.qq.com/cgi-bin/user/getuserinfo");
+  url.searchParams.set("access_token", params.accessToken);
+  url.searchParams.set("code", params.code);
+  const result = await requestWecomJson<{ UserId?: string; userid?: string; OpenId?: string; openid?: string }>(url.toString());
+  const userId = result.UserId || result.userid;
+  if (!userId) {
+    throw new Error(result.OpenId || result.openid ? "该企业微信账号不是企业成员，无法登录。" : "企业微信未返回成员 UserId。");
+  }
+  return userId;
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -1781,6 +2191,7 @@ export function createApp(params?: {
   onRestart?: () => void | Promise<void>;
   onRestartCodex?: () => void | Promise<void>;
 }) {
+  const security = createSecurityConfig();
   const defaultBodyLimit = params?.bodyLimit ?? DEFAULT_ROUTE_BODY_LIMIT_BYTES;
   const codexCompactBodyLimit = Math.max(defaultBodyLimit, CODEX_COMPACT_BODY_LIMIT_BYTES);
   const app = Fastify({
@@ -1800,14 +2211,243 @@ export function createApp(params?: {
   const ctx = createGatewayContext();
   const gatewayRequestLogs: GatewayRequestLog[] = [];
   const codexResponseProfileBindings = new Map<string, { profileId: string; accountId: string; seenAt: number }>();
-  let pendingOAuthLogin: { id: string; session: OpenAICodexLoginSession; createdAt: number } | null = null;
+  let pendingOAuthLogin: { id: string; session: OpenAICodexRemoteLoginSession; createdAt: number } | null = null;
+  let bootstrapReady: Promise<void> | null = null;
+  const pendingWecomEmbedStates = new Map<string, number>();
+  const pendingWecomOAuthStates = new Map<string, number>();
+  const pendingWecomCompleteTokens = new Map<string, { username: string; role: GatewayUserRole; expiresAt: number }>();
+
+  function ensureSecurityConfigured(): boolean {
+    return Boolean(security.adminUser && security.adminPasswordHash && security.sessionSecret !== "change-me");
+  }
+
+  function ensureBootstrapUsers(): Promise<void> {
+    if (!bootstrapReady) {
+      bootstrapReady = (async () => {
+        await ctx.gatewayDatabaseService.init();
+        if (security.adminUser && security.adminPasswordHash) {
+          await ctx.gatewayDatabaseService.ensureBootstrapAdmin(security.adminUser, security.adminPasswordHash);
+        }
+      })();
+    }
+    return bootstrapReady;
+  }
+
+  async function getSessionFromRequest(request: FastifyRequest): Promise<AdminSession | null> {
+    const tokenSession = getAdminSessionFromRequest(security, request);
+    if (!tokenSession) {
+      return null;
+    }
+    await ensureBootstrapUsers();
+    const user = await ctx.gatewayDatabaseService.getUserByUsername(tokenSession.user);
+    if (!user || user.disabled) {
+      return null;
+    }
+    return {
+      user: user.username,
+      role: user.role,
+      expiresAt: tokenSession.expiresAt,
+    };
+  }
+
+  async function getRequestOwner(request: FastifyRequest): Promise<string | undefined> {
+    return requestOwnerFromSession(await getSessionFromRequest(request));
+  }
+
+  function resolveDataOwnerFilter(session: AdminSession | null, requestedOwner?: string): string | undefined {
+    const currentOwner = requestOwnerFromSession(session);
+    if (!isAdminSession(session)) {
+      return currentOwner;
+    }
+    if (requestedOwner === "all") {
+      return undefined;
+    }
+    return requestedOwner?.trim() || currentOwner;
+  }
+
+  function cleanupPendingWecomEmbedStates(): void {
+    const now = Date.now();
+    for (const [state, expiresAt] of pendingWecomEmbedStates) {
+      if (expiresAt <= now) {
+        pendingWecomEmbedStates.delete(state);
+      }
+    }
+    for (const [state, expiresAt] of pendingWecomOAuthStates) {
+      if (expiresAt <= now) {
+        pendingWecomOAuthStates.delete(state);
+      }
+    }
+    for (const [token, value] of pendingWecomCompleteTokens) {
+      if (value.expiresAt <= now) {
+        pendingWecomCompleteTokens.delete(token);
+      }
+    }
+  }
+
+  function rememberWecomEmbedState(state: string): void {
+    cleanupPendingWecomEmbedStates();
+    pendingWecomEmbedStates.set(state, Date.now() + WECOM_EMBED_LOGIN_STATE_TTL_MS);
+  }
+
+  function consumeWecomEmbedState(state: string): boolean {
+    cleanupPendingWecomEmbedStates();
+    const expiresAt = pendingWecomEmbedStates.get(state);
+    if (!expiresAt || expiresAt <= Date.now()) {
+      pendingWecomEmbedStates.delete(state);
+      return false;
+    }
+    pendingWecomEmbedStates.delete(state);
+    return true;
+  }
+
+  function rememberWecomOAuthState(state: string): void {
+    cleanupPendingWecomEmbedStates();
+    pendingWecomOAuthStates.set(state, Date.now() + WECOM_LOGIN_STATE_TTL_MS);
+  }
+
+  function consumeWecomOAuthState(state: string): boolean {
+    cleanupPendingWecomEmbedStates();
+    const expiresAt = pendingWecomOAuthStates.get(state);
+    if (!expiresAt || expiresAt <= Date.now()) {
+      pendingWecomOAuthStates.delete(state);
+      return false;
+    }
+    pendingWecomOAuthStates.delete(state);
+    return true;
+  }
+
+  function rememberWecomCompleteToken(username: string, role: GatewayUserRole): string {
+    cleanupPendingWecomEmbedStates();
+    const token = randomBytes(24).toString("base64url");
+    pendingWecomCompleteTokens.set(token, {
+      username,
+      role,
+      expiresAt: Date.now() + WECOM_EMBED_COMPLETE_TTL_MS,
+    });
+    return token;
+  }
+
+  function consumeWecomCompleteToken(token: string): { username: string; role: GatewayUserRole } | null {
+    cleanupPendingWecomEmbedStates();
+    const value = pendingWecomCompleteTokens.get(token);
+    if (!value || value.expiresAt <= Date.now()) {
+      pendingWecomCompleteTokens.delete(token);
+      return null;
+    }
+    pendingWecomCompleteTokens.delete(token);
+    return {
+      username: value.username,
+      role: value.role,
+    };
+  }
+
+  async function buildWecomLoginUrl(request: FastifyRequest, embed = false): Promise<{ authUrl: string; state: string }> {
+    if (!ensureSecurityConfigured()) {
+      const error = new Error("Admin access is disabled. Set AZT_ADMIN_USER, AZT_ADMIN_PASSWORD and AZT_SESSION_SECRET.") as Error & { statusCode?: number };
+      error.statusCode = 403;
+      throw error;
+    }
+    await ensureBootstrapUsers();
+    const settings = await ctx.configService.getSettings();
+    if (!settings.wecom.enabled || !settings.wecom.corpId || !settings.wecom.agentId || !settings.wecom.secret) {
+      const error = new Error("企业微信扫码登录未配置或未启用。") as Error & { statusCode?: number };
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const state = randomBytes(18).toString("base64url");
+    if (embed) {
+      rememberWecomEmbedState(state);
+    }
+    const redirectUrl = new URL(`${resolveOrigin(request)}/_gateway/auth/wecom/callback`);
+    if (embed) {
+      redirectUrl.searchParams.set("embed", "1");
+    }
+    const authUrl = new URL("https://open.work.weixin.qq.com/wwopen/sso/qrConnect");
+    authUrl.searchParams.set("appid", settings.wecom.corpId);
+    authUrl.searchParams.set("agentid", settings.wecom.agentId);
+    authUrl.searchParams.set("redirect_uri", redirectUrl.toString());
+    authUrl.searchParams.set("state", state);
+
+    return {
+      authUrl: authUrl.toString(),
+      state,
+    };
+  }
+
+  async function buildWecomOAuthUrl(request: FastifyRequest): Promise<{ authUrl: string; state: string }> {
+    if (!ensureSecurityConfigured()) {
+      const error = new Error("Admin access is disabled. Set AZT_ADMIN_USER, AZT_ADMIN_PASSWORD and AZT_SESSION_SECRET.") as Error & { statusCode?: number };
+      error.statusCode = 403;
+      throw error;
+    }
+    await ensureBootstrapUsers();
+    const settings = await ctx.configService.getSettings();
+    if (!settings.wecom.enabled || !settings.wecom.corpId || !settings.wecom.agentId || !settings.wecom.secret) {
+      const error = new Error("企业微信 OAuth 登录未配置或未启用。") as Error & { statusCode?: number };
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const state = randomBytes(18).toString("base64url");
+    rememberWecomOAuthState(state);
+    const redirectUrl = new URL(`${resolveOrigin(request)}/_gateway/auth/wecom/callback`);
+    redirectUrl.searchParams.set("channel", "oauth");
+
+    const authUrl = new URL("https://open.weixin.qq.com/connect/oauth2/authorize");
+    authUrl.searchParams.set("appid", settings.wecom.corpId);
+    authUrl.searchParams.set("redirect_uri", redirectUrl.toString());
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("scope", "snsapi_base");
+    authUrl.searchParams.set("state", state);
+    return {
+      authUrl: `${authUrl.toString()}#wechat_redirect`,
+      state,
+    };
+  }
+
+  async function loginWecomCode(code: string): Promise<{ username: string; role: GatewayUserRole }> {
+    const settings = await ctx.configService.getSettings();
+    if (!settings.wecom.enabled || !settings.wecom.corpId || !settings.wecom.agentId || !settings.wecom.secret) {
+      const error = new Error("企业微信扫码登录未配置或未启用。") as Error & { statusCode?: number };
+      error.statusCode = 400;
+      throw error;
+    }
+    const accessToken = await getWecomAccessToken({
+      corpId: settings.wecom.corpId,
+      secret: settings.wecom.secret,
+    });
+    const userId = await getWecomUserId({
+      accessToken,
+      code,
+    });
+    const username = sanitizeGatewayUsername(userId, "wxwork:");
+    let user = await ctx.gatewayDatabaseService.getUserByUsername(username);
+    if (!user) {
+      const randomPasswordHash = hashSecret(`wecom:${userId}:${randomUUID()}:${Date.now()}`);
+      await ctx.gatewayDatabaseService.createUser({
+        username,
+        passwordHash: randomPasswordHash,
+        role: "user",
+      });
+      user = await ctx.gatewayDatabaseService.getUserByUsername(username);
+    }
+    if (!user || user.disabled) {
+      const error = new Error("当前企业微信用户已被禁用或无法创建。") as Error & { statusCode?: number };
+      error.statusCode = 403;
+      throw error;
+    }
+    return {
+      username: user.username,
+      role: user.role,
+    };
+  }
 
   function clearPendingOAuthLogin(loginId?: string): void {
     if (!pendingOAuthLogin || (loginId && pendingOAuthLogin.id !== loginId)) {
       return;
     }
 
-    pendingOAuthLogin.session.close();
     pendingOAuthLogin = null;
   }
 
@@ -1841,6 +2481,7 @@ export function createApp(params?: {
   function pushGatewayRequestLog(log: Omit<GatewayRequestLog, "id" | "time"> & { id?: string; time?: number; usage?: GatewayRequestUsageMeta }): void {
     const entry: GatewayRequestLog = {
       id: log.id ?? randomUUID(),
+      owner: log.owner,
       time: log.time ?? Date.now(),
       method: log.method,
       endpoint: log.endpoint,
@@ -1851,10 +2492,25 @@ export function createApp(params?: {
       source: log.source,
       details: log.details,
     };
-    gatewayRequestLogs.unshift(entry);
+    const existingIndex = gatewayRequestLogs.findIndex((item) => item.id === entry.id);
+    if (existingIndex >= 0) {
+      gatewayRequestLogs.splice(existingIndex, 1, entry);
+    } else {
+      gatewayRequestLogs.unshift(entry);
+    }
     if (gatewayRequestLogs.length > MAX_GATEWAY_REQUEST_LOGS) {
       gatewayRequestLogs.length = MAX_GATEWAY_REQUEST_LOGS;
     }
+    ctx.gatewayDatabaseService.saveRequestLog(entry).catch((error) => {
+      console.warn("[gateway:request-log] failed to persist request log", {
+        id: entry.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    if (entry.statusCode === 102) {
+      return;
+    }
+
     const profile = log.usage?.profile ?? undefined;
     const usageEvent: UsageRecordEvent = {
       id: entry.id,
@@ -1883,7 +2539,83 @@ export function createApp(params?: {
 
   void app.register(cors, {
     origin: params?.corsOrigin ?? true,
+    credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  });
+
+  app.addHook("onRequest", async (request, reply) => {
+    if (isPublicPath(request.method, request.url)) {
+      return;
+    }
+
+    if (!ensureSecurityConfigured()) {
+      reply.code(403);
+      return reply.send({
+        error: {
+          type: "forbidden",
+          message: "Admin access is disabled. Set AZT_ADMIN_USER, AZT_ADMIN_PASSWORD and AZT_SESSION_SECRET.",
+        },
+      });
+    }
+    await ensureBootstrapUsers();
+    const session = await getSessionFromRequest(request);
+
+    if (isApiPath(request.url)) {
+      const pathOnly = request.url.split("?")[0] ?? "/";
+      if (
+        isAdminSession(session) ||
+        (session && (
+          pathOnly === "/v1/images/generations" ||
+          pathOnly === "/v1/images/edits" ||
+          pathOnly === "/v1/chat/completions"
+        ))
+      ) {
+        return;
+      }
+
+      if (!security.apiKeyHash) {
+        reply.code(403);
+        return reply.send({
+          error: {
+            type: "forbidden",
+            message: "API access is disabled. Set AZT_API_KEY to enable OpenAI-compatible endpoints.",
+          },
+        });
+      }
+
+      if (!secureEqualHash(security.apiKeyHash, getBearerToken(request))) {
+        reply.code(401);
+        reply.header("WWW-Authenticate", "Bearer");
+        return reply.send({
+          error: {
+            type: "unauthorized",
+            message: "Missing or invalid API key.",
+          },
+        });
+      }
+      return;
+    }
+
+    if (isAdminPath(request.url)) {
+      if (!session) {
+        reply.code(401);
+        return reply.send({
+          error: {
+            type: "unauthorized",
+            message: "Login required.",
+          },
+        });
+      }
+      if (!isAdminSession(session) && !isUserGatewayPath(request.method, request.url)) {
+        reply.code(403);
+        return reply.send({
+          error: {
+            type: "forbidden",
+            message: "当前用户没有权限访问该功能。",
+          },
+        });
+      }
+    }
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -1911,15 +2643,74 @@ export function createApp(params?: {
     };
   });
 
-  app.get("/_gateway/admin/request-logs", async () => ({
-    data: gatewayRequestLogs,
-  }));
+  app.get("/_gateway/admin/request-logs", async (request) => {
+    const parsed = requestLogsQuerySchema.safeParse(request.query);
+    const limit = parsed.success ? parsed.data.limit ?? MAX_PERSISTED_REQUEST_LOGS : MAX_PERSISTED_REQUEST_LOGS;
+    const session = await getSessionFromRequest(request);
+    const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
+    const persisted = await ctx.gatewayDatabaseService.listRequestLogs(limit, owner);
+    return {
+      data: persisted.length > 0
+        ? persisted
+        : gatewayRequestLogs.filter((item) => !owner || item.owner === owner).slice(0, limit),
+    };
+  });
 
   app.get("/_gateway/admin/usage", async () => ctx.usageService.getSummary());
 
   app.post("/_gateway/admin/usage/reset", async () => ctx.usageService.backupAndReset());
 
+  app.get("/_gateway/generations/history", async (request) => {
+    const parsed = generationHistoryQuerySchema.safeParse(request.query);
+    const limit = parsed.success ? parsed.data.limit ?? 100 : 100;
+    const session = await getSessionFromRequest(request);
+    const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
+    return {
+      items: await ctx.gatewayDatabaseService.listGenerationHistory(limit, owner),
+    };
+  });
+
+  app.delete("/_gateway/generations/history", async (request) => {
+    const parsed = generationHistoryQuerySchema.safeParse(request.query);
+    const session = await getSessionFromRequest(request);
+    const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
+    await ctx.gatewayDatabaseService.clearGenerationHistory(owner);
+    return { items: [] };
+  });
+
+  app.get("/_gateway/generations/images/*", async (request, reply) => {
+    const session = await getSessionFromRequest(request);
+    const wildcard = (request.params as { "*": string })["*"] ?? "";
+    const normalized = path.normalize(wildcard).replace(/^(\.\.(\/|\\|$))+/, "");
+    const root = getGenerationAssetsDir();
+    const filePath = path.resolve(root, normalized);
+    const rootPath = path.resolve(root);
+    if (!filePath.startsWith(`${rootPath}${path.sep}`)) {
+      reply.code(403);
+      return { error: { type: "forbidden", message: "禁止访问该文件。" } };
+    }
+    const generationId = normalized.split(path.sep)[0] || normalized.split("/")[0];
+    if (!isAdminSession(session) && generationId) {
+      const owner = await ctx.gatewayDatabaseService.getGenerationOwner(generationId);
+      if (!owner || owner !== requestOwnerFromSession(session)) {
+        reply.code(403);
+        return { error: { type: "forbidden", message: "禁止访问该图片。" } };
+      }
+    }
+    try {
+      const data = await fs.readFile(filePath);
+      reply.header("Content-Type", getContentType(filePath));
+      reply.header("Cache-Control", "private, max-age=3600");
+      return reply.send(data);
+    } catch {
+      reply.code(404);
+      return { error: { type: "not_found", message: "图片不存在。" } };
+    }
+  });
+
   async function buildAdminConfig(request: FastifyRequest) {
+    const session = await getSessionFromRequest(request);
+    const isAdmin = isAdminSession(session);
     const [status, models, modelCatalog, versionStatus, settings, profile, profiles, codexStatus, usage] = await Promise.all([
       ctx.authService.getStatus(),
       ctx.modelService.listModels(),
@@ -1934,20 +2725,32 @@ export function createApp(params?: {
     const origin = resolveOrigin(request);
 
     return {
+      auth: session ? { user: session.user, role: session.role } : null,
       status,
-      settings,
+      settings: serializeSettings(settings, isAdmin),
       models,
       modelCatalog,
-      versionStatus,
+      versionStatus: isAdmin ? versionStatus : { ...versionStatus, latestVersion: undefined },
       profile: serializeProfile(profile),
-      profiles: profiles.map((item) => serializeManagedProfile(item)),
-      codex: codexStatus,
-      usage,
+      profiles: isAdmin ? profiles.map((item) => serializeManagedProfile(item)) : [],
+      codex: isAdmin
+        ? codexStatus
+        : {
+            exists: false,
+            path: "",
+            gatewayProvider: {
+              path: "",
+              providerId: "openai",
+              exists: false,
+              active: false,
+            },
+          },
+      usage: isAdmin ? usage : undefined,
       adminUrl: `${origin}/`,
       baseUrl: `${origin}/v1`,
       codexBaseUrl: `${origin}/codex/v1`,
-      restartSupported: Boolean(params?.onRestart),
-      codexRestartSupported: Boolean(params?.onRestartCodex),
+      restartSupported: isAdmin && Boolean(params?.onRestart),
+      codexRestartSupported: isAdmin && Boolean(params?.onRestartCodex),
       supportedEndpoints: [
         {
           method: "GET",
@@ -1988,7 +2791,21 @@ export function createApp(params?: {
     };
   }
 
-  app.get("/", async (_request, reply) => {
+  app.get("/", async (request, reply) => {
+    const query = request.query as { skip_auto_wecom?: string } | undefined;
+    if (query?.skip_auto_wecom !== "1" && isWecomUserAgent(request.headers["user-agent"])) {
+      const session = ensureSecurityConfigured() ? await getSessionFromRequest(request) : null;
+      if (!session) {
+        try {
+          const login = await buildWecomOAuthUrl(request);
+          reply.header("Set-Cookie", buildWecomStateCookie(login.state));
+          return reply.redirect(login.authUrl);
+        } catch {
+          // Fall back to the normal login page when OAuth is unavailable.
+        }
+      }
+    }
+
     try {
       reply.header("Content-Type", "text/html; charset=utf-8");
       return fs.readFile(adminUiIndexPath, "utf8");
@@ -2020,12 +2837,418 @@ export function createApp(params?: {
     return asset.body;
   });
 
+  app.get("/:rootAsset", async (request, reply) => {
+    const rootAsset = (request.params as { rootAsset: string }).rootAsset;
+    if (!rootAsset.includes(".") || rootAsset.includes("/") || rootAsset.includes("\\")) {
+      reply.code(404);
+      return {
+        error: {
+          type: "not_found",
+          message: "asset not found",
+        },
+      };
+    }
+
+    const asset = await readAdminUiAsset(rootAsset);
+    if (!asset) {
+      reply.code(404);
+      return {
+        error: {
+          type: "not_found",
+          message: "asset not found",
+        },
+      };
+    }
+
+    reply.header("Content-Type", getContentType(asset.filePath));
+    return asset.body;
+  });
+
   app.get("/favicon.ico", async (_request, reply) => {
     reply.code(204);
     return "";
   });
 
   app.get("/_gateway/health", async () => ({ ok: true }));
+
+  app.get("/_gateway/auth/status", async (request) => {
+    const configured = ensureSecurityConfigured();
+    if (configured) {
+      await ensureBootstrapUsers();
+    }
+    const session = configured ? await getSessionFromRequest(request) : null;
+    const settings = configured ? await ctx.configService.getSettings() : null;
+    return {
+      configured,
+      authenticated: Boolean(session),
+      user: session?.user ?? null,
+      role: session?.role ?? null,
+      wecomLoginEnabled: Boolean(settings?.wecom.enabled && settings.wecom.corpId && settings.wecom.agentId && settings.wecom.secret),
+    };
+  });
+
+  app.post("/_gateway/auth/login", async (request, reply) => {
+    if (!ensureSecurityConfigured()) {
+      reply.code(403);
+      return {
+        error: {
+          type: "forbidden",
+          message: "Admin access is disabled. Set AZT_ADMIN_USER, AZT_ADMIN_PASSWORD and AZT_SESSION_SECRET.",
+        },
+      };
+    }
+    await ensureBootstrapUsers();
+
+    const parsed = adminLoginSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: parsed.error.issues[0]?.message ?? "请求体格式错误",
+        },
+      };
+    }
+
+    const user = await ctx.gatewayDatabaseService.getUserByUsername(parsed.data.username);
+    if (!user || user.disabled || !secureEqualHash(user.passwordHash, parsed.data.password)) {
+      reply.code(401);
+      return {
+        error: {
+          type: "unauthorized",
+          message: "用户名或密码错误。",
+        },
+      };
+    }
+
+    reply.header("Set-Cookie", buildSessionCookie(createAdminSessionToken(security, user.username, user.role)));
+    return {
+      ok: true,
+      user: user.username,
+      role: user.role,
+    };
+  });
+
+  app.get("/_gateway/auth/wecom/start", async (request, reply) => {
+    try {
+      const login = await buildWecomLoginUrl(request);
+      reply.header("Set-Cookie", buildWecomStateCookie(login.state));
+      return reply.redirect(login.authUrl);
+    } catch (error) {
+      reply.code((error as { statusCode?: number }).statusCode ?? 500);
+      return {
+        error: {
+          type: (error as { statusCode?: number }).statusCode === 403 ? "forbidden" : "wecom_login_error",
+          message: error instanceof Error ? error.message : "企业微信登录初始化失败。",
+        },
+      };
+    }
+  });
+
+  app.get("/_gateway/auth/wecom/url", async (request, reply) => {
+    try {
+      const login = await buildWecomLoginUrl(request, true);
+      reply.header("Set-Cookie", buildWecomStateCookie(login.state));
+      return {
+        authUrl: login.authUrl,
+      };
+    } catch (error) {
+      reply.code((error as { statusCode?: number }).statusCode ?? 500);
+      return {
+        error: {
+          type: (error as { statusCode?: number }).statusCode === 403 ? "forbidden" : "wecom_login_error",
+          message: error instanceof Error ? error.message : "企业微信登录初始化失败。",
+        },
+      };
+    }
+  });
+
+  app.get("/_gateway/auth/wecom/panel-config", async (request, reply) => {
+    if (!ensureSecurityConfigured()) {
+      reply.code(403);
+      return {
+        error: {
+          type: "forbidden",
+          message: "Admin access is disabled. Set AZT_ADMIN_USER, AZT_ADMIN_PASSWORD and AZT_SESSION_SECRET.",
+        },
+      };
+    }
+    await ensureBootstrapUsers();
+    const settings = await ctx.configService.getSettings();
+    if (!settings.wecom.enabled || !settings.wecom.corpId || !settings.wecom.agentId || !settings.wecom.secret) {
+      reply.code(400);
+      return {
+        error: {
+          type: "wecom_not_configured",
+          message: "企业微信网页快捷登录未配置或未启用。",
+        },
+      };
+    }
+
+    const state = randomBytes(18).toString("base64url");
+    rememberWecomOAuthState(state);
+    reply.header("Set-Cookie", buildWecomStateCookie(state));
+    return {
+      appid: settings.wecom.corpId,
+      agentid: settings.wecom.agentId,
+      redirectUri: `${resolveOrigin(request)}/_gateway/auth/wecom/callback?channel=oauth`,
+      state,
+    };
+  });
+
+  app.post("/_gateway/auth/wecom/panel-login", async (request, reply) => {
+    if (!ensureSecurityConfigured()) {
+      reply.code(403);
+      return {
+        error: {
+          type: "forbidden",
+          message: "Admin access is disabled. Set AZT_ADMIN_USER, AZT_ADMIN_PASSWORD and AZT_SESSION_SECRET.",
+        },
+      };
+    }
+    await ensureBootstrapUsers();
+    const parsed = wecomPanelLoginSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: parsed.error.issues[0]?.message ?? "请求体格式错误",
+        },
+      };
+    }
+
+    try {
+      const user = await loginWecomCode(parsed.data.code);
+      reply.header("Set-Cookie", [
+        buildSessionCookie(createAdminSessionToken(security, user.username, user.role)),
+        buildExpiredWecomStateCookie(),
+      ]);
+      return {
+        ok: true,
+        user: user.username,
+        role: user.role,
+      };
+    } catch (error) {
+      reply.code((error as { statusCode?: number }).statusCode ?? 502);
+      return {
+        error: {
+          type: "wecom_login_error",
+          message: error instanceof Error ? error.message : "企业微信登录失败。",
+        },
+      };
+    }
+  });
+
+  app.get("/_gateway/auth/wecom/oauth/start", async (request, reply) => {
+    try {
+      const login = await buildWecomOAuthUrl(request);
+      reply.header("Set-Cookie", buildWecomStateCookie(login.state));
+      return reply.redirect(login.authUrl);
+    } catch (error) {
+      reply.code((error as { statusCode?: number }).statusCode ?? 500);
+      return error instanceof Error ? error.message : "企业微信 OAuth 登录初始化失败。";
+    }
+  });
+
+  app.get("/_gateway/auth/wecom/complete", async (request, reply) => {
+    const parsed = wecomCompleteQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      reply.code(400);
+      return "企业微信登录完成参数错误。";
+    }
+    const complete = consumeWecomCompleteToken(parsed.data.token);
+    if (!complete) {
+      reply.code(400);
+      return "企业微信登录完成凭证已失效，请返回登录页重试。";
+    }
+    reply.header("Set-Cookie", [
+      buildSessionCookie(createAdminSessionToken(security, complete.username, complete.role)),
+      buildExpiredWecomStateCookie(),
+    ]);
+    return reply.redirect("/");
+  });
+
+  app.get("/_gateway/auth/wecom/callback", async (request, reply) => {
+    if (!ensureSecurityConfigured()) {
+      reply.code(403);
+      return "Admin access is disabled.";
+    }
+    await ensureBootstrapUsers();
+    const parsed = wecomCallbackQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      reply.code(400);
+      return "企业微信回调参数错误。";
+    }
+    const cookies = parseCookies(request.headers.cookie);
+    const channel: WecomLoginChannel = parsed.data.channel === "oauth" ? "oauth" : "qr";
+    const validCookieState = cookies[WECOM_LOGIN_STATE_COOKIE] && cookies[WECOM_LOGIN_STATE_COOKIE] === parsed.data.state;
+    const validEmbedState = parsed.data.embed ? consumeWecomEmbedState(parsed.data.state) : false;
+    const validOAuthState = channel === "oauth" ? consumeWecomOAuthState(parsed.data.state) : false;
+    if (!validCookieState && !validEmbedState && !validOAuthState) {
+      reply.code(400);
+      return "企业微信登录状态已失效，请返回登录页重试。";
+    }
+
+    try {
+      const user = await loginWecomCode(parsed.data.code);
+      if (parsed.data.embed) {
+        const token = rememberWecomCompleteToken(user.username, user.role);
+        const completeUrl = `/_gateway/auth/wecom/complete?token=${encodeURIComponent(token)}`;
+        reply.header("Content-Type", "text/html; charset=utf-8");
+        return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>企业微信登录成功</title>
+</head>
+<body>
+  <script>
+    var completeUrl = ${JSON.stringify(completeUrl)};
+    window.parent && window.parent.postMessage({ type: "azt-wecom-login-success", completeUrl: completeUrl }, window.location.origin);
+    window.setTimeout(function () {
+      window.top.location.href = completeUrl;
+    }, 300);
+  </script>
+  <p>企业微信登录成功，正在进入管理台。</p>
+</body>
+</html>`;
+      }
+      reply.header("Set-Cookie", [
+        buildSessionCookie(createAdminSessionToken(security, user.username, user.role)),
+        buildExpiredWecomStateCookie(),
+      ]);
+      return reply.redirect("/");
+    } catch (error) {
+      reply.code(502);
+      return error instanceof Error ? error.message : "企业微信登录失败。";
+    }
+  });
+
+  app.post("/_gateway/auth/logout", async (_request, reply) => {
+    reply.header("Set-Cookie", buildExpiredSessionCookie());
+    return { ok: true };
+  });
+
+  app.get("/_gateway/admin/users", async () => ({
+    users: await ctx.gatewayDatabaseService.listUsers(),
+  }));
+
+  app.post("/_gateway/admin/users", async (request, reply) => {
+    const parsed = gatewayUserCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: parsed.error.issues[0]?.message ?? "请求体格式错误",
+        },
+      };
+    }
+    try {
+      const user = await ctx.gatewayDatabaseService.createUser({
+        username: parsed.data.username,
+        passwordHash: hashSecret(parsed.data.password),
+        role: parsed.data.role,
+      });
+      return {
+        user,
+        users: await ctx.gatewayDatabaseService.listUsers(),
+      };
+    } catch (error) {
+      reply.code(409);
+      return {
+        error: {
+          type: "user_conflict",
+          message: error instanceof Error && error.message ? error.message : "用户创建失败，用户名可能已存在。",
+        },
+      };
+    }
+  });
+
+  app.put("/_gateway/admin/users/:id", async (request, reply) => {
+    const params = gatewayUserParamsSchema.safeParse(request.params);
+    const parsed = gatewayUserUpdateSchema.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      reply.code(400);
+      const validationMessage = !params.success
+        ? params.error.issues[0]?.message
+        : !parsed.success
+          ? parsed.error.issues[0]?.message
+          : undefined;
+      return {
+        error: {
+          type: "validation_error",
+          message: validationMessage ?? "请求体格式错误",
+        },
+      };
+    }
+
+    if ((parsed.data.disabled === true || parsed.data.role === "user") && await ctx.gatewayDatabaseService.countActiveAdmins(params.data.id) <= 0) {
+      reply.code(400);
+      return {
+        error: {
+          type: "last_admin",
+          message: "至少需要保留一个启用的管理员。",
+        },
+      };
+    }
+
+    const user = await ctx.gatewayDatabaseService.updateUser(params.data.id, {
+      passwordHash: parsed.data.password ? hashSecret(parsed.data.password) : undefined,
+      role: parsed.data.role,
+      disabled: parsed.data.disabled,
+    });
+    if (!user) {
+      reply.code(404);
+      return {
+        error: {
+          type: "not_found",
+          message: "用户不存在。",
+        },
+      };
+    }
+    return {
+      user,
+      users: await ctx.gatewayDatabaseService.listUsers(),
+    };
+  });
+
+  app.delete("/_gateway/admin/users/:id", async (request, reply) => {
+    const params = gatewayUserParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: params.error.issues[0]?.message ?? "请求参数错误",
+        },
+      };
+    }
+    if (await ctx.gatewayDatabaseService.countActiveAdmins(params.data.id) <= 0) {
+      reply.code(400);
+      return {
+        error: {
+          type: "last_admin",
+          message: "至少需要保留一个启用的管理员。",
+        },
+      };
+    }
+    const deleted = await ctx.gatewayDatabaseService.deleteUser(params.data.id);
+    if (!deleted) {
+      reply.code(404);
+      return {
+        error: {
+          type: "not_found",
+          message: "用户不存在。",
+        },
+      };
+    }
+    return {
+      ok: true,
+      users: await ctx.gatewayDatabaseService.listUsers(),
+    };
+  });
 
   app.get("/_gateway/status", async () => ctx.authService.getStatus());
 
@@ -2097,7 +3320,7 @@ export function createApp(params?: {
 
   app.post("/_gateway/admin/login", async (request) => {
     clearPendingOAuthLogin();
-    const session = await startOpenAICodexLogin();
+    const session = await startOpenAICodexRemoteLogin();
     const loginId = randomUUID();
     pendingOAuthLogin = {
       id: loginId,
@@ -2105,25 +3328,15 @@ export function createApp(params?: {
       createdAt: Date.now(),
     };
 
-    const code = await session.waitForCode(180_000);
-    if (!code) {
-      return {
-        login: {
-          status: "manual_required",
-          loginId,
-          message: "3 分钟内没有收到 OAuth 自动回调。可以粘贴浏览器地址栏里的完整回调 URL 或 authorization code 继续登录。",
-        },
-        config: await buildAdminConfig(request),
-      };
-    }
-
-    try {
-      const profile = await session.completeWithCode(code);
-      await saveCompletedOAuthLogin(profile);
-      return buildAdminConfig(request);
-    } finally {
-      clearPendingOAuthLogin(loginId);
-    }
+    return {
+      login: {
+        status: "manual_required",
+        loginId,
+        authorizeUrl: session.authorizeUrl,
+        message: "请打开授权链接完成 ChatGPT/Codex 登录。浏览器跳到 localhost:1455/auth/callback 后，把地址栏完整链接粘贴回来保存账号。",
+      },
+      config: await buildAdminConfig(request),
+    };
   });
 
   app.post("/_gateway/admin/login/manual", async (request, reply) => {
@@ -2884,6 +4097,7 @@ export function createApp(params?: {
       }
 
       pushGatewayRequestLog({
+        id: request.id,
         method: request.method,
         endpoint: request.url,
         account: profileLogLabel(profile),
@@ -3192,6 +4406,7 @@ export function createApp(params?: {
 
     const activeProfile = result.profile ?? await ctx.authService.getActiveProfile();
     pushGatewayRequestLog({
+      id: request.id,
       method: request.method,
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
@@ -3223,9 +4438,12 @@ export function createApp(params?: {
 
   app.post("/v1/chat/completions", async (request, reply) => {
     const startedAt = performance.now();
+    const requestOwner = await getRequestOwner(request);
     const parsed = chatCompletionsBodySchema.safeParse(request.body);
     if (!parsed.success) {
       pushGatewayRequestLog({
+        id: request.id,
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3254,6 +4472,7 @@ export function createApp(params?: {
 
     if (typeof parsed.data.n === "number" && parsed.data.n > 1) {
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3314,6 +4533,7 @@ export function createApp(params?: {
       const statusCode = getErrorStatusCode(normalized);
       const activeProfile = await ctx.authService.getActiveProfile();
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: profileLogLabel(activeProfile),
@@ -3343,6 +4563,8 @@ export function createApp(params?: {
 
     const activeProfile = result.profile ?? await ctx.authService.getActiveProfile();
     pushGatewayRequestLog({
+      id: request.id,
+      owner: requestOwner,
       method: request.method,
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
@@ -3399,6 +4621,7 @@ export function createApp(params?: {
 
   app.post("/v1/images/generations", async (request, reply) => {
     const startedAt = performance.now();
+    const requestOwner = await getRequestOwner(request);
     const parsed = imageGenerationsBodySchema.safeParse(request.body);
     if (!parsed.success) {
       console.error("[gateway:image] validation failure", {
@@ -3407,6 +4630,7 @@ export function createApp(params?: {
         issue: parsed.error.issues[0]?.message ?? "请求体格式错误",
       });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3442,6 +4666,7 @@ export function createApp(params?: {
         issue: validationError,
       });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3477,6 +4702,7 @@ export function createApp(params?: {
         issue: "当前网关暂不支持 images.generations 一次返回多张图（n > 1）",
       });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3514,29 +4740,101 @@ export function createApp(params?: {
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const generationId = request.id;
+    pushGatewayRequestLog({
+      id: generationId,
+      owner: requestOwner,
+      method: request.method,
+      endpoint: request.url,
+      account: profileLogLabel(activeProfile),
+      model: parsed.data.model ?? "gpt-image-2",
+      statusCode: 102,
+      durationMs: 0,
+      source: requestSourceFromUserAgent(request.headers["user-agent"]),
+      details: {
+        requestId: request.id,
+        remoteAddress: request.ip,
+        userAgent: request.headers["user-agent"],
+        request: requestSummary,
+        state: "running",
+      },
+    });
+    ctx.gatewayDatabaseService.saveGeneration({
+      id: generationId,
+      owner: requestOwner,
+      status: "running",
+      endpoint: request.url,
+      account: profileLogLabel(activeProfile),
+      model: parsed.data.model ?? "gpt-image-2",
+      prompt: parsed.data.prompt,
+      ratio: ratioFromImageSize(parsed.data.size),
+      size: parsed.data.size,
+      quality: parsed.data.quality,
+      outputFormat: parsed.data.output_format,
+      durationMs: 0,
+      request: {
+        ...requestSummary,
+        prompt: parsed.data.prompt,
+      },
+    }).catch((persistError) => {
+      console.warn("[gateway:image] failed to persist running generation", {
+        requestId: request.id,
+        message: persistError instanceof Error ? persistError.message : String(persistError),
+      });
+    });
     let response: Awaited<ReturnType<typeof ctx.imageService.generate>>;
     try {
-      response = await ctx.imageService.generate({
-        prompt: parsed.data.prompt,
-        model: parsed.data.model,
-        n: parsed.data.n,
-        size: parsed.data.size,
-        quality: parsed.data.quality,
-        background: parsed.data.background,
-        outputFormat: parsed.data.output_format,
-        outputCompression: parsed.data.output_compression,
-        moderation: parsed.data.moderation,
-      });
+      response = await withTimeout(
+        ctx.imageService.generate({
+          prompt: parsed.data.prompt,
+          model: parsed.data.model,
+          n: parsed.data.n,
+          size: parsed.data.size,
+          quality: parsed.data.quality,
+          background: parsed.data.background,
+          outputFormat: parsed.data.output_format,
+          outputCompression: parsed.data.output_compression,
+          moderation: parsed.data.moderation,
+        }),
+        IMAGE_GENERATION_TIMEOUT_MS,
+        `图片生成超过 ${Math.floor(IMAGE_GENERATION_TIMEOUT_MS / 1000)} 秒仍未完成，已超时。`,
+      );
     } catch (error) {
       const normalized = normalizeError(error);
       const statusCode = getErrorStatusCode(normalized);
+      const durationMs = performance.now() - startedAt;
+      ctx.gatewayDatabaseService.saveGeneration({
+        id: generationId,
+        owner: requestOwner,
+        status: "failed",
+        endpoint: request.url,
+        account: profileLogLabel(activeProfile),
+        model: parsed.data.model ?? "gpt-image-2",
+        prompt: parsed.data.prompt,
+        ratio: ratioFromImageSize(parsed.data.size),
+        size: parsed.data.size,
+        quality: parsed.data.quality,
+        outputFormat: parsed.data.output_format,
+        durationMs,
+        request: {
+          ...requestSummary,
+          prompt: parsed.data.prompt,
+        },
+        error: normalized.message,
+      }).catch((persistError) => {
+        console.warn("[gateway:image] failed to persist generation failure", {
+          requestId: request.id,
+          message: persistError instanceof Error ? persistError.message : String(persistError),
+        });
+      });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: profileLogLabel(activeProfile),
         model: parsed.data.model ?? "gpt-image-2",
         statusCode,
-        durationMs: performance.now() - startedAt,
+        durationMs,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
         details: {
           requestId: request.id,
@@ -3558,6 +4856,7 @@ export function createApp(params?: {
       throw error;
     }
 
+    const durationMs = performance.now() - startedAt;
     console.info("[gateway:image] response ready", {
       method: request.method,
       url: request.url,
@@ -3569,12 +4868,13 @@ export function createApp(params?: {
       size: response.size,
     });
     pushGatewayRequestLog({
+      owner: requestOwner,
       method: request.method,
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
       model: parsed.data.model ?? "gpt-image-2",
       statusCode: 200,
-      durationMs: performance.now() - startedAt,
+      durationMs,
       source: requestSourceFromUserAgent(request.headers["user-agent"]),
       details: {
         requestId: request.id,
@@ -3595,15 +4895,42 @@ export function createApp(params?: {
         imageRoute,
       },
     });
+    const savedGeneration = await ctx.gatewayDatabaseService.saveGeneration({
+      id: generationId,
+      owner: requestOwner,
+      status: "success",
+      endpoint: request.url,
+      account: profileLogLabel(activeProfile),
+      model: parsed.data.model ?? "gpt-image-2",
+      prompt: parsed.data.prompt,
+      ratio: ratioFromImageSize(response.size ?? parsed.data.size),
+      size: response.size ?? parsed.data.size,
+      quality: response.quality ?? parsed.data.quality,
+      outputFormat: response.output_format ?? parsed.data.output_format,
+      durationMs,
+      request: {
+        ...requestSummary,
+        prompt: parsed.data.prompt,
+      },
+      response,
+    }).catch((persistError) => {
+      console.warn("[gateway:image] failed to persist generation", {
+        requestId: request.id,
+        message: persistError instanceof Error ? persistError.message : String(persistError),
+      });
+      return null;
+    });
 
-    return response;
+    return savedGeneration ? { ...response, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : response;
   });
 
   app.post("/v1/images/edits", async (request, reply) => {
     const startedAt = performance.now();
+    const requestOwner = await getRequestOwner(request);
     const contentType = request.headers["content-type"] ?? "";
     if (!String(contentType).toLowerCase().includes("application/json")) {
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3638,6 +4965,7 @@ export function createApp(params?: {
         issue: parsed.error.issues[0]?.message ?? "请求体格式错误",
       });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3673,6 +5001,7 @@ export function createApp(params?: {
         issue: validationError,
       });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3708,6 +5037,7 @@ export function createApp(params?: {
         issue: "当前网关暂不支持 images.edits 一次返回多张图（n > 1）",
       });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: "-",
@@ -3750,30 +5080,104 @@ export function createApp(params?: {
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const generationId = request.id;
+    pushGatewayRequestLog({
+      id: generationId,
+      owner: requestOwner,
+      method: request.method,
+      endpoint: request.url,
+      account: profileLogLabel(activeProfile),
+      model: parsed.data.model ?? "gpt-image-2",
+      statusCode: 102,
+      durationMs: 0,
+      source: requestSourceFromUserAgent(request.headers["user-agent"]),
+      details: {
+        requestId: request.id,
+        remoteAddress: request.ip,
+        userAgent: request.headers["user-agent"],
+        request: requestSummary,
+        state: "running",
+      },
+    });
+    ctx.gatewayDatabaseService.saveGeneration({
+      id: generationId,
+      owner: requestOwner,
+      status: "running",
+      endpoint: request.url,
+      account: profileLogLabel(activeProfile),
+      model: parsed.data.model ?? "gpt-image-2",
+      prompt: parsed.data.prompt,
+      ratio: ratioFromImageSize(parsed.data.size),
+      size: parsed.data.size,
+      quality: parsed.data.quality,
+      outputFormat: parsed.data.output_format,
+      durationMs: 0,
+      request: {
+        ...requestSummary,
+        prompt: parsed.data.prompt,
+      },
+      referenceImages: getImageEditReferenceAssets(parsed.data),
+    }).catch((persistError) => {
+      console.warn("[gateway:image:edit] failed to persist running generation", {
+        requestId: request.id,
+        message: persistError instanceof Error ? persistError.message : String(persistError),
+      });
+    });
     let response: Awaited<ReturnType<typeof ctx.imageService.generate>>;
     try {
-      response = await ctx.imageService.generate({
-        prompt: parsed.data.prompt,
-        inputImages: imageReferences,
-        model: parsed.data.model,
-        n: parsed.data.n,
-        size: parsed.data.size,
-        quality: parsed.data.quality,
-        background: parsed.data.background,
-        outputFormat: parsed.data.output_format,
-        outputCompression: parsed.data.output_compression,
-        moderation: parsed.data.moderation,
-      });
+      response = await withTimeout(
+        ctx.imageService.generate({
+          prompt: parsed.data.prompt,
+          inputImages: imageReferences,
+          model: parsed.data.model,
+          n: parsed.data.n,
+          size: parsed.data.size,
+          quality: parsed.data.quality,
+          background: parsed.data.background,
+          outputFormat: parsed.data.output_format,
+          outputCompression: parsed.data.output_compression,
+          moderation: parsed.data.moderation,
+        }),
+        IMAGE_GENERATION_TIMEOUT_MS,
+        `图片生成超过 ${Math.floor(IMAGE_GENERATION_TIMEOUT_MS / 1000)} 秒仍未完成，已超时。`,
+      );
     } catch (error) {
       const normalized = normalizeError(error);
       const statusCode = getErrorStatusCode(normalized);
+      const durationMs = performance.now() - startedAt;
+      ctx.gatewayDatabaseService.saveGeneration({
+        id: generationId,
+        owner: requestOwner,
+        status: "failed",
+        endpoint: request.url,
+        account: profileLogLabel(activeProfile),
+        model: parsed.data.model ?? "gpt-image-2",
+        prompt: parsed.data.prompt,
+        ratio: ratioFromImageSize(parsed.data.size),
+        size: parsed.data.size,
+        quality: parsed.data.quality,
+        outputFormat: parsed.data.output_format,
+        durationMs,
+        request: {
+          ...requestSummary,
+          prompt: parsed.data.prompt,
+        },
+        error: normalized.message,
+        referenceImages: getImageEditReferenceAssets(parsed.data),
+      }).catch((persistError) => {
+        console.warn("[gateway:image:edit] failed to persist generation failure", {
+          requestId: request.id,
+          message: persistError instanceof Error ? persistError.message : String(persistError),
+        });
+      });
       pushGatewayRequestLog({
+        owner: requestOwner,
         method: request.method,
         endpoint: request.url,
         account: profileLogLabel(activeProfile),
         model: parsed.data.model ?? "gpt-image-2",
         statusCode,
-        durationMs: performance.now() - startedAt,
+        durationMs,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
         details: {
           requestId: request.id,
@@ -3795,6 +5199,7 @@ export function createApp(params?: {
       throw error;
     }
 
+    const durationMs = performance.now() - startedAt;
     console.info("[gateway:image:edit] response ready", {
       method: request.method,
       url: request.url,
@@ -3806,12 +5211,13 @@ export function createApp(params?: {
       size: response.size,
     });
     pushGatewayRequestLog({
+      owner: requestOwner,
       method: request.method,
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
       model: parsed.data.model ?? "gpt-image-2",
       statusCode: 200,
-      durationMs: performance.now() - startedAt,
+      durationMs,
       source: requestSourceFromUserAgent(request.headers["user-agent"]),
       details: {
         requestId: request.id,
@@ -3832,8 +5238,34 @@ export function createApp(params?: {
         imageRoute,
       },
     });
+    const savedGeneration = await ctx.gatewayDatabaseService.saveGeneration({
+      id: generationId,
+      owner: requestOwner,
+      status: "success",
+      endpoint: request.url,
+      account: profileLogLabel(activeProfile),
+      model: parsed.data.model ?? "gpt-image-2",
+      prompt: parsed.data.prompt,
+      ratio: ratioFromImageSize(response.size ?? parsed.data.size),
+      size: response.size ?? parsed.data.size,
+      quality: response.quality ?? parsed.data.quality,
+      outputFormat: response.output_format ?? parsed.data.output_format,
+      durationMs,
+      request: {
+        ...requestSummary,
+        prompt: parsed.data.prompt,
+      },
+      response,
+      referenceImages: getImageEditReferenceAssets(parsed.data),
+    }).catch((persistError) => {
+      console.warn("[gateway:image:edit] failed to persist generation", {
+        requestId: request.id,
+        message: persistError instanceof Error ? persistError.message : String(persistError),
+      });
+      return null;
+    });
 
-    return response;
+    return savedGeneration ? { ...response, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : response;
   });
 
   return app;

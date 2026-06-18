@@ -171,6 +171,7 @@ export class ConfigService {
       codexRequestJitterMs?: number;
     };
     image?: { freeAccountWebGenerationEnabled?: boolean };
+    wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
     server?: { port: number };
   }): Promise<GatewaySettings> {
     const settings = await this.getSettings();
@@ -223,6 +224,25 @@ export class ConfigService {
         image: {
           ...next.image,
           freeAccountWebGenerationEnabled: params.image.freeAccountWebGenerationEnabled ?? next.image.freeAccountWebGenerationEnabled,
+        },
+      };
+    }
+
+    if (params.wecom) {
+      const enabled = params.wecom.enabled ?? next.wecom.enabled;
+      const corpId = params.wecom.corpId?.trim() ?? next.wecom.corpId;
+      const agentId = params.wecom.agentId?.trim() ?? next.wecom.agentId;
+      const secret = params.wecom.secret?.trim() ?? next.wecom.secret;
+      if (enabled && (!corpId || !agentId || !secret)) {
+        throw new Error("启用企业微信扫码登录时必须填写企业 ID、AgentID 和 Secret。");
+      }
+      next = {
+        ...next,
+        wecom: {
+          enabled,
+          corpId,
+          agentId,
+          secret,
         },
       };
     }

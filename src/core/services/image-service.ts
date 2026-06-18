@@ -227,19 +227,77 @@ function summarizeImageDebug(raw: unknown): Record<string, unknown> {
 
   const response = isRecord(raw.response) ? raw.response : null;
   const events = Array.isArray(raw.events) ? raw.events : [];
+  const describeValue = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return {
+        type: "string",
+        length: value.length,
+        preview: value.slice(0, 80),
+      };
+    }
+
+    if (Array.isArray(value)) {
+      return {
+        type: "array",
+        length: value.length,
+      };
+    }
+
+    if (isRecord(value)) {
+      return {
+        type: "object",
+        keys: Object.keys(value).slice(0, 20),
+      };
+    }
+
+    return {
+      type: typeof value,
+      value,
+    };
+  };
   const imageEvents = events
     .filter((event) => isRecord(event) && typeof event.type === "string" && event.type.includes("image_generation"))
     .slice(0, 12)
     .map((event) => {
       const safeEvent = event as Record<string, unknown>;
+      const item = isRecord(safeEvent.item) ? safeEvent.item : null;
       return {
         type: safeEvent.type,
         item_id: typeof safeEvent.item_id === "string" ? safeEvent.item_id : undefined,
         output_index: typeof safeEvent.output_index === "number" ? safeEvent.output_index : undefined,
+        keys: Object.keys(safeEvent).slice(0, 24),
+        status: typeof safeEvent.status === "string" ? safeEvent.status : undefined,
+        item: item
+          ? {
+              id: typeof item.id === "string" ? item.id : undefined,
+              type: typeof item.type === "string" ? item.type : undefined,
+              status: typeof item.status === "string" ? item.status : undefined,
+              keys: Object.keys(item).slice(0, 24),
+              result: describeValue(item.result),
+              partial_image_b64: describeValue(item.partial_image_b64),
+            }
+          : undefined,
+        result: describeValue(safeEvent.result),
         partial_image_b64_length:
           typeof safeEvent.partial_image_b64 === "string" ? safeEvent.partial_image_b64.length : undefined,
       };
     });
+  const outputItems = Array.isArray(response?.output)
+    ? response.output.slice(0, 12).map((item) => {
+        if (!isRecord(item)) {
+          return describeValue(item);
+        }
+
+        return {
+          id: typeof item.id === "string" ? item.id : undefined,
+          type: typeof item.type === "string" ? item.type : undefined,
+          status: typeof item.status === "string" ? item.status : undefined,
+          keys: Object.keys(item).slice(0, 24),
+          result: describeValue(item.result),
+          partial_image_b64: describeValue(item.partial_image_b64),
+        };
+      })
+    : [];
 
   return {
     response_status: typeof response?.status === "string" ? response.status : undefined,
@@ -251,6 +309,7 @@ function summarizeImageDebug(raw: unknown): Record<string, unknown> {
         }
       : undefined,
     response_output_length: Array.isArray(response?.output) ? response.output.length : 0,
+    response_output_items: outputItems,
     event_count: events.length,
     event_types: events
       .filter((event) => isRecord(event) && typeof event.type === "string")
@@ -563,6 +622,37 @@ export class ImageService {
         if (upstreamFailure) {
           const reason = upstreamFailure.code ? `${upstreamFailure.code}: ${upstreamFailure.message}` : upstreamFailure.message;
           throw createError(`上游图片生成失败: ${reason}`, upstreamFailure.transient ? 503 : 502);
+        }
+
+        if (request.inputImages && request.inputImages.length > 0) {
+          try {
+            console.warn("[gateway:image] Codex image edit returned no image; falling back to ChatGPT web image route", {
+              ...requestSummary,
+              attempt,
+              debug: debugSummary,
+            });
+            const fallbackResponse = await generateChatGPTWebImage({
+              profile,
+              prompt: request.prompt,
+              model: requestedImageModel,
+              inputImages: request.inputImages,
+              size: request.size,
+              responseFormat: "b64_json",
+            });
+            await this.deps.authService.recordProfileRequestSuccess(profile.profileId, undefined, "openai-codex");
+            console.info("[gateway:image] ChatGPT web image fallback response", {
+              ...requestSummary,
+              imageCount: fallbackResponse.data.length,
+              firstImageBase64Length: fallbackResponse.data[0]?.b64_json.length ?? 0,
+            });
+            return fallbackResponse;
+          } catch (fallbackError) {
+            console.warn("[gateway:image] ChatGPT web image fallback failed", {
+              ...requestSummary,
+              attempt,
+              message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+            });
+          }
         }
         throw createError("图片生成请求已完成，但没有解析出 image_generation_call 结果。", 502);
       }

@@ -1,7 +1,8 @@
 .app-shell {
-  width: min(calc(100vw - 32px), 1540px);
+  width: 100%;
   max-width: none;
-  margin: 6px auto 18px;
+  margin: 6px 0 18px;
+  padding: 0 10px;
   display: grid;
   grid-template-columns: 236px minmax(0, 1fr);
   gap: 14px;
@@ -27,11 +28,23 @@
   top: 10px;
   min-width: 0;
   border-radius: 18px;
-  padding: 14px 12px;
+  padding: 14px 2px 8px;
   display: grid;
   gap: 14px;
+  align-content: start;
   max-height: calc(100vh - 20px);
   overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+.sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.7);
 }
 
 .brand {
@@ -225,6 +238,7 @@
 }
 
 .main {
+  width: 100%;
   min-width: 0;
   display: grid;
   gap: 16px;
@@ -242,17 +256,47 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
-  align-items: start;
+  align-items: center;
+}
+
+.topbar-account {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.topbar-account span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.topbar-logout {
+  min-height: 34px;
+  padding: 0 10px;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.page-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
 }
 
 .page-title h1 {
+  flex: 0 0 auto;
   margin: 0;
   font-size: 27px;
   line-height: 1.15;
 }
 
 .page-kicker {
-  display: inline-flex;
+  display: none;
   margin-bottom: 8px;
   color: var(--brand);
   font-size: 12px;
@@ -261,10 +305,14 @@
 }
 
 .page-title p {
-  margin: 8px 0 0;
+  min-width: 0;
+  margin: 0;
   color: var(--text-muted);
-  line-height: 1.6;
+  line-height: 1.35;
   font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .top-actions,

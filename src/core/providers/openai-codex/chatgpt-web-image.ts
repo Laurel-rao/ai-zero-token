@@ -945,9 +945,6 @@ function imageModelSlug(model?: string): string {
 }
 
 function promptWithSize(prompt: string, size?: string): string {
-  if (!size) {
-    return prompt;
-  }
   const hints: Record<string, string> = {
     "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
     "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
@@ -955,9 +952,9 @@ function promptWithSize(prompt: string, size?: string): string {
     "4:3": "输出为 4:3 比例，兼顾宽度与高度，适合展示画面细节。",
     "3:4": "输出为 3:4 比例，纵向构图，适合人物肖像或竖向场景。",
   };
-  const normalized = size.trim();
-  const hint = hints[normalized] ?? `输出图片，宽高比为 ${normalized}。`;
-  return `${prompt.trim()}\n\n${hint}`;
+  const normalized = size?.trim();
+  const sizeHint = normalized ? (hints[normalized] ?? `输出图片，宽高比为 ${normalized}。`) : "";
+  return [prompt.trim(), sizeHint].filter(Boolean).join("\n\n");
 }
 
 function toChatGptSize(size?: string): string | undefined {
@@ -1562,16 +1559,17 @@ async function downloadImage(profile: OAuthProfile, url: string): Promise<Buffer
   throw new Error(`下载生成图片失败: ${errors.join("；")}`);
 }
 
-async function resolveImages(profile: OAuthProfile, state: ConversationState): Promise<Buffer[]> {
+async function resolveImages(profile: OAuthProfile, state: ConversationState, excludedFileIds: string[] = []): Promise<Buffer[]> {
   if (!state.conversationId) {
     throw new Error("ChatGPT 官网图片链路没有返回 conversation_id。");
   }
 
-  let fileIds = state.fileIds.filter((id) => id !== "file_upload");
+  const excluded = new Set(["file_upload", ...excludedFileIds]);
+  let fileIds = state.fileIds.filter((id) => !excluded.has(id));
   let sedimentIds = state.sedimentIds;
   if (fileIds.length === 0 && sedimentIds.length === 0) {
     const polled = await pollImageIds(profile, state.conversationId);
-    fileIds = polled.fileIds.filter((id) => id !== "file_upload");
+    fileIds = polled.fileIds.filter((id) => !excluded.has(id));
     sedimentIds = polled.sedimentIds;
   }
 
@@ -1641,7 +1639,7 @@ export async function generateChatGPTWebImage(request: ChatGPTWebImageRequest): 
     model: request.model,
     references,
   });
-  const images = await resolveImages(request.profile, state);
+  const images = await resolveImages(request.profile, state, references.map((reference) => reference.fileId));
 
   return {
     created: unixSeconds(),

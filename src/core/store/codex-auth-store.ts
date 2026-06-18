@@ -625,6 +625,10 @@ export async function applyProfileToCodexAuth(profile: OAuthProfile): Promise<Ap
     throw new Error("当前账号缺少 id_token。请先刷新账号 token 或重新导入包含 id_token 的账号 JSON。");
   }
 
+  if (!profile.refresh) {
+    throw new Error("该账号是 session-only 导入账号，缺少 refresh_token，不能应用到本机 Codex。");
+  }
+
   const authPath = getCodexAuthPath();
   const codexHomeDir = path.dirname(authPath);
   await fs.mkdir(codexHomeDir, { recursive: true });

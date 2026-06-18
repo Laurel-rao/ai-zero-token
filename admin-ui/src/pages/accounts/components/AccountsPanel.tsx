@@ -57,7 +57,7 @@ export function AccountsPanel(props: {
             删除所选
           </button>
           <button className="btn-primary" type="button" onClick={props.onAddAccount}>
-            新增账号
+            导入 ChatGPT Session
           </button>
           <button className="btn-secondary" type="button" onClick={props.onRefreshStatus}>
             刷新状态
@@ -122,7 +122,7 @@ export function AccountsPanel(props: {
 
       <div className={`account-grid ${gridCountClass}`}>
         {props.profiles.length === 0 ? (
-          <div className="empty-state">还没有匹配的账号。可以新增账号或调整筛选条件。</div>
+          <div className="empty-state">还没有匹配的账号。可以导入 ChatGPT session JSON 或调整筛选条件。</div>
         ) : (
           props.profiles.map((profile) => {
             const health = profileHealth(profile);

@@ -8,6 +8,7 @@ import { NetworkDetectService } from "./services/network-detect-service.js";
 import { RequestThrottleService } from "./services/request-throttle-service.js";
 import { VersionService } from "./services/version-service.js";
 import { UsageService } from "./services/usage-service.js";
+import { GatewayDatabaseService } from "./services/gateway-database-service.js";
 
 export function createGatewayContext() {
   const configService = new ConfigService();
@@ -15,6 +16,7 @@ export function createGatewayContext() {
   const modelService = new ModelService(configService, authService);
   const versionService = new VersionService();
   const usageService = new UsageService();
+  const gatewayDatabaseService = new GatewayDatabaseService();
   const networkDetectService = new NetworkDetectService();
   const githubImageBedService = new GithubImageBedService();
   const requestThrottleService = new RequestThrottleService(configService);
@@ -34,6 +36,7 @@ export function createGatewayContext() {
     modelService,
     versionService,
     usageService,
+    gatewayDatabaseService,
     networkDetectService,
     githubImageBedService,
     requestThrottleService,

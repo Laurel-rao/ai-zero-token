@@ -2,7 +2,7 @@ import { startTransition, useCallback } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
 import { errorMessage } from "@/shared/lib/app-utils";
-import type { AppRoute } from "@/routes/routes";
+import { canAccessRoute, defaultRouteForRole, type AppRoute } from "@/routes/routes";
 import type { WorkspaceState } from "./useAdminWorkspaceState";
 
 export type WorkspaceActions = {
@@ -10,6 +10,7 @@ export type WorkspaceActions = {
   submitManualLogin: (input: string) => Promise<void>;
   cancelManualLogin: () => Promise<void>;
   logout: () => Promise<void>;
+  signOut: () => Promise<void>;
   goRoute: (route: AppRoute) => void;
   copyBaseUrl: () => void;
 };
@@ -19,6 +20,7 @@ type ManualLoginResult = {
     status: "manual_required";
     loginId: string;
     message: string;
+    authorizeUrl?: string;
   };
   config: AdminConfig;
 };
@@ -30,7 +32,7 @@ function isManualLoginResult(value: AdminConfig | ManualLoginResult): value is M
 export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceActions {
   const login = useCallback(async () => {
     state.setBusy("login");
-    state.setStatus("正在打开 OAuth 登录...");
+    state.setStatus("正在生成 OAuth 登录链接...");
     try {
       const result = await fetchJson<AdminConfig | ManualLoginResult>("/_gateway/admin/login", { method: "POST" });
       if (isManualLoginResult(result)) {
@@ -38,9 +40,10 @@ export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceAction
         state.setManualLogin({
           loginId: result.login.loginId,
           message: result.login.message,
+          authorizeUrl: result.login.authorizeUrl,
         });
         state.setAccountModalOpen(true);
-        state.setStatus(result.login.message);
+        state.setStatus("OAuth 登录链接已生成，请打开链接登录后粘贴 1455 回调链接。");
         return;
       }
 
@@ -78,7 +81,7 @@ export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceAction
       state.setConfig(next);
       state.setManualLogin(null);
       state.setAccountModalOpen(false);
-      state.setStatus("登录完成，账号状态已同步。");
+      state.setStatus("OAuth token 已提取并保存，账号状态已同步。");
     } catch (error) {
       state.setStatus(errorMessage(error));
     } finally {
@@ -128,13 +131,26 @@ export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceAction
     }
   }, [state]);
 
+  const signOut = useCallback(async () => {
+    state.setBusy("logout");
+    state.setStatus("正在退出登录...");
+    try {
+      await fetchJson<{ ok: boolean }>("/_gateway/auth/logout", { method: "POST" });
+      window.location.reload();
+    } catch (error) {
+      state.setStatus(errorMessage(error));
+      state.setBusy(null);
+    }
+  }, [state]);
+
   const goRoute = useCallback((route: AppRoute) => {
-    const nextHash = `#${route}`;
+    const targetRoute = canAccessRoute(route, state.role) ? route : defaultRouteForRole(state.role);
+    const nextHash = `#${targetRoute}`;
     startTransition(() => {
-      state.setActiveRoute(route);
+      state.setActiveRoute(targetRoute);
     });
     if (window.location.hash !== nextHash) {
-      window.location.hash = route;
+      window.location.hash = targetRoute;
     }
   }, [state]);
 
@@ -151,6 +167,7 @@ export function useAdminWorkspaceActions(state: WorkspaceState): WorkspaceAction
     submitManualLogin,
     cancelManualLogin,
     logout,
+    signOut,
     goRoute,
     copyBaseUrl,
   };

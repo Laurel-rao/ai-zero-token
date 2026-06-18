@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
 import type { BusyAction, PreviewImage, ResultTab } from "@/shared/lib/app-types";
-import { buildExample, copyText, errorMessage, extractPreviewImages, insertEditImageIntoBody, readFileAsDataUrl, summarizeJson } from "@/shared/lib/app-utils";
+import { buildExample, copyText, createClientId, errorMessage, extractPreviewImages, insertEditImageIntoBody, readFileAsDataUrl, summarizeJson } from "@/shared/lib/app-utils";
 import { endpointOrder, endpointSort } from "@/shared/lib/endpoints";
 import { formatDuration, formatFileSize, formatJson } from "@/shared/lib/format";
 import { profileLabel } from "@/shared/lib/profiles";
@@ -129,7 +129,7 @@ export function TesterPage(props: {
       props.setStatus(`${response.ok ? "成功" : "失败"}: HTTP ${response.status} ${meta.method} ${meta.path}`);
       props.setRequestLogs((items) => [
         {
-          id: crypto.randomUUID(),
+          id: createClientId("request"),
           time: Date.now(),
           method: meta.method,
           endpoint: meta.path,

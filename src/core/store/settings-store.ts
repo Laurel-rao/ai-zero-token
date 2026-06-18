@@ -30,6 +30,12 @@ export function createDefaultSettings(): GatewaySettings {
     image: {
       freeAccountWebGenerationEnabled: false,
     },
+    wecom: {
+      enabled: false,
+      corpId: "",
+      agentId: "",
+      secret: "",
+    },
     server: {
       host: "0.0.0.0",
       port: 8787,
@@ -60,6 +66,12 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
     },
     image: {
       freeAccountWebGenerationEnabled: parsed.image?.freeAccountWebGenerationEnabled ?? defaults.image.freeAccountWebGenerationEnabled,
+    },
+    wecom: {
+      enabled: parsed.wecom?.enabled ?? defaults.wecom.enabled,
+      corpId: parsed.wecom?.corpId ?? defaults.wecom.corpId,
+      agentId: parsed.wecom?.agentId ?? defaults.wecom.agentId,
+      secret: parsed.wecom?.secret ?? defaults.wecom.secret,
     },
     server: {
       host: parsed.server?.host ?? defaults.server.host,

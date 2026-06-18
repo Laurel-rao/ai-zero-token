@@ -115,7 +115,7 @@ export class AuthService {
 
   private toProfileSummary(profile: OAuthProfile, activeProfileId?: string): ProfileSummary {
     const codexAccountId = this.resolveCodexAccountId(profile);
-    const codexApplySupported = Boolean(codexAccountId);
+    const codexApplySupported = Boolean(codexAccountId && profile.refresh);
 
     return {
       provider: profile.provider,
@@ -124,12 +124,16 @@ export class AuthService {
       codexAccountId,
       accountIdSource: profile.accountIdSource ?? (codexAccountId ? "chatgpt_account_id" : undefined),
       codexApplySupported,
-      codexApplyReason: codexApplySupported ? undefined : CODEX_APPLY_UNSUPPORTED_REASON,
+      codexApplyReason: codexApplySupported
+        ? undefined
+        : !profile.refresh
+          ? "session-only 导入账号缺少 refresh_token，只能用于网关/API 转发，不能应用到本机 Codex。"
+          : CODEX_APPLY_UNSUPPORTED_REASON,
       email: profile.email,
       quota: profile.quota,
       expiresAt: profile.expires,
       accessTokenPreview: this.maskSecret(profile.access),
-      refreshTokenPreview: this.maskSecret(profile.refresh),
+      refreshTokenPreview: profile.refresh ? this.maskSecret(profile.refresh) : "session-only",
       isActive: profile.profileId === activeProfileId,
       authStatus: profile.authStatus,
       exportAudit: profile.exportAudit,

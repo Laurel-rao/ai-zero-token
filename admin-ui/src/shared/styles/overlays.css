@@ -131,6 +131,44 @@
   min-height: 110px;
 }
 
+.oauth-link-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.oauth-link-box a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: #1d4ed8;
+  background: #fff;
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.oauth-link-box code {
+  grid-column: 1 / -1;
+  display: block;
+  max-height: 78px;
+  overflow: auto;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
 .zip-import-trigger {
   position: relative;
   overflow: hidden;

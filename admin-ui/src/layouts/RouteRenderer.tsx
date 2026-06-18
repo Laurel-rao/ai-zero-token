@@ -5,6 +5,7 @@ const LaunchPage = lazy(() => import("@/pages/launch").then((module) => ({ defau
 const OverviewPage = lazy(() => import("@/pages/overview").then((module) => ({ default: module.OverviewPage })));
 const DocsPage = lazy(() => import("@/pages/docs").then((module) => ({ default: module.DocsPage })));
 const AccountsPage = lazy(() => import("@/pages/accounts").then((module) => ({ default: module.AccountsPage })));
+const GeneratePage = lazy(() => import("@/pages/generate").then((module) => ({ default: module.GeneratePage })));
 const UsagePage = lazy(() => import("@/pages/usage").then((module) => ({ default: module.UsagePage })));
 const TesterPage = lazy(() => import("@/pages/tester").then((module) => ({ default: module.TesterPage })));
 const ImageBedPage = lazy(() => import("@/pages/image-bed").then((module) => ({ default: module.ImageBedPage })));
@@ -63,6 +64,19 @@ export function RouteRenderer({ workspace }: { workspace: UseAdminWorkspaceResul
         refreshConfig={refreshConfig}
         logout={workspace.logout}
       />
+    ) : activeRoute === "generate" ? (
+      <GeneratePage
+        config={config}
+        currentUser={workspace.currentUser}
+        role={workspace.role}
+        busy={busy}
+        showEmails={workspace.showEmails}
+        setBusy={workspace.setBusy}
+        setStatus={workspace.setStatus}
+        setRequestLogs={workspace.setRequestLogs}
+        refreshConfig={refreshConfig}
+        setPreviewImage={workspace.setPreviewImage}
+      />
     ) : activeRoute === "usage" ? (
       <UsagePage config={config} setStatus={workspace.setStatus} />
     ) : activeRoute === "tester" ? (
@@ -86,6 +100,8 @@ export function RouteRenderer({ workspace }: { workspace: UseAdminWorkspaceResul
       <SettingsPage
         showEmails={workspace.showEmails}
         setShowEmails={workspace.setShowEmails}
+        currentUser={workspace.currentUser}
+        role={workspace.role}
         config={config}
         busy={busy}
         status={workspace.status}
@@ -95,7 +111,14 @@ export function RouteRenderer({ workspace }: { workspace: UseAdminWorkspaceResul
         refreshConfig={refreshConfig}
       />
     ) : (
-      <LogsPage logs={workspace.requestLogs} />
+      <LogsPage
+        logs={workspace.requestLogs}
+        config={config}
+        currentUser={workspace.currentUser}
+        role={workspace.role}
+        dataOwnerFilter={workspace.dataOwnerFilter}
+        setDataOwnerFilter={workspace.setDataOwnerFilter}
+      />
     );
   return <Suspense fallback={<RouteLoading />}>{page}</Suspense>;
 }

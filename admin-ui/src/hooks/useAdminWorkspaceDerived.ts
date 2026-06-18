@@ -1,12 +1,12 @@
 import { useMemo } from "react";
 import type { ProfileSummary } from "@/shared/types";
 import { getPlanType, imageCapability, isCodexActiveProfile, profileLabel } from "@/shared/lib/profiles";
-import { routes, type AppRoute } from "@/routes/routes";
+import { defaultRouteForRole, visibleRoutesForRole, type AppRoute, type NavRoute, type UserRole } from "@/routes/routes";
 import type { WorkspaceState } from "./useAdminWorkspaceState";
 
 export type WorkspaceDerived = {
-  routes: typeof routes;
-  activeRouteMeta: (typeof routes)[number];
+  routes: NavRoute[];
+  activeRouteMeta: NavRoute;
   pageDescriptions: Record<AppRoute, string>;
   activeProfile: ProfileSummary | null;
   codexProfile: ProfileSummary | null;
@@ -15,7 +15,9 @@ export type WorkspaceDerived = {
   isLoading: boolean;
 };
 
-type DerivedSource = Pick<WorkspaceState, "config" | "activeRoute" | "showEmails" | "busy">;
+type DerivedSource = Pick<WorkspaceState, "config" | "activeRoute" | "showEmails" | "busy"> & {
+  role: UserRole;
+};
 
 export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived {
   const activeProfile = state.config?.profile || null;
@@ -26,13 +28,19 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
     [codexAccountId, state.config?.profiles],
   );
 
-  const activeRouteMeta = routes.find((route) => route.id === state.activeRoute) || routes[0];
+  const visibleRoutes = useMemo(() => visibleRoutesForRole(state.role), [state.role]);
+  const activeRouteMeta = visibleRoutes.find((route) => route.id === state.activeRoute) || visibleRoutes[0] || {
+    id: defaultRouteForRole(state.role),
+    label: "生图",
+    icon: visibleRoutesForRole("user")[0].icon,
+  };
   const pageDescriptions: Record<AppRoute, string> = {
     launch: "面向桌面端的启动入口，聚合服务状态、快捷操作和产品视觉。",
     overview: activeProfile
       ? `当前账号为 ${profileLabel(activeProfile, state.showEmails)}，套餐 ${getPlanType(activeProfile)}，可查看网关状态和运行摘要。`
       : "还没有激活账号。你可以新增账号、导入账号 JSON，或先查看本地 API 信息。",
     accounts: "账号池、额度、套餐、Codex 应用状态集中管理，适合横向比较多个账号。",
+    generate: "面向图片生成的专用工作台，支持参考图、比例预设和本地生图历史。",
     usage: "查看今日、本次启动和历史累计的请求、token、图片、账号、模型和错误统计。",
     tester: "独立接口测试工作区，支持 Chat、Responses、Models 和 gpt-image-2 图片接口。",
     "image-bed": "本地图片上传工作台，使用单个 GitHub token 维护个人图床并返回公网链接。",
@@ -43,7 +51,7 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
   };
 
   return {
-    routes,
+    routes: visibleRoutes,
     activeRouteMeta,
     pageDescriptions,
     activeProfile,

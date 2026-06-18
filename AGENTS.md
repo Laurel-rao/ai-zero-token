@@ -1,5 +1,135 @@
 # AI Zero Token Agent Notes
 
+## Local Workspace And Server Deployment
+
+This project was customized and deployed as a Docker service for:
+
+- Public URL: `http://43.134.21.160/`
+- Public port: `80`
+- Container name: `ai-zero-token`
+- Docker image tag: `ai-zero-token:local`
+- Local workspace: `/Users/raojiajun/mypro/server/nodejs/ai-zero-token`
+- Server source path: `/opt/ai-zero-token/src`
+- Server env file: `/opt/ai-zero-token/.env`
+- Server persisted state volume: `/opt/ai-zero-token/state:/data`
+- Runtime data root inside container: `AI_ZERO_TOKEN_HOME=/data`
+
+Use Chinese for user-facing replies.
+
+### What To Run Before Deploying
+
+From the local workspace:
+
+```bash
+cd /Users/raojiajun/mypro/server/nodejs/ai-zero-token
+npm run build
+```
+
+`npm run build` runs the admin UI Vite build and server `tsup` build. It is the normal pre-deploy verification for these UI/server changes.
+
+### Docker Deployment Command
+
+Deploy by syncing the built workspace to the server, rebuilding the Docker image, and recreating the container:
+
+```bash
+cd /Users/raojiajun/mypro/server/nodejs/ai-zero-token
+npm run build && \
+rsync -az --delete --exclude node_modules ./ root@43.134.21.160:/opt/ai-zero-token/src/ && \
+ssh root@43.134.21.160 '
+  cd /opt/ai-zero-token/src &&
+  docker build -t ai-zero-token:local . >/tmp/azt-build.log &&
+  docker rm -f ai-zero-token >/dev/null 2>&1 || true &&
+  docker run -d \
+    --name ai-zero-token \
+    --restart unless-stopped \
+    --env-file /opt/ai-zero-token/.env \
+    -e AI_ZERO_TOKEN_HOME=/data \
+    -p 80:8787 \
+    -v /opt/ai-zero-token/state:/data \
+    ai-zero-token:local &&
+  sleep 2 &&
+  docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" &&
+  curl -s --max-time 10 http://127.0.0.1:80/_gateway/auth/status
+'
+```
+
+The service listens on `8787` inside the container and is published as host port `80`.
+
+### Post-Deploy Checks
+
+Run these checks after deployment:
+
+```bash
+curl -s http://43.134.21.160/ | sed -n '1,40p'
+ssh root@43.134.21.160 'docker logs --tail 80 ai-zero-token'
+ssh root@43.134.21.160 'docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+```
+
+Expected auth status without browser cookie:
+
+```json
+{"configured":true,"authenticated":false,"user":null,"role":null}
+```
+
+This means the admin auth system is configured and the unauthenticated curl is correctly not logged in.
+
+### Important Deployment Notes
+
+- Do not use `git reset --hard` or revert local changes unless the user explicitly asks.
+- The worktree is intentionally dirty because this service has many local customizations.
+- `rsync --delete` is used against `/opt/ai-zero-token/src`; be careful to run it only from the project root.
+- Exclude `node_modules` from rsync. The Docker image installs production dependencies with `npm ci --omit=dev --ignore-scripts`.
+- Persisted runtime state, SQLite database, generated images, and uploaded/reference files live under `/opt/ai-zero-token/state`; do not delete it during deploy.
+- If a UI change appears stale, check the asset hash in the served HTML:
+
+  ```bash
+  curl -s http://43.134.21.160/ | sed -n '1,40p'
+  ```
+
+### Useful Server Debug Commands
+
+Inspect recent generated image files:
+
+```bash
+ssh root@43.134.21.160 'find /opt/ai-zero-token/state -path "*generations*" -type f -printf "%T@ %s %p\n" | sort -nr | head -40'
+```
+
+Inspect recent generation history rows:
+
+```bash
+ssh root@43.134.21.160 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync("/data/.state/gateway.sqlite");
+for (const row of db.prepare("SELECT id, owner, created_at, status, endpoint, substr(prompt,1,60) AS prompt, duration_ms FROM generation_history ORDER BY created_at DESC LIMIT 12").all()) {
+  console.log(JSON.stringify(row));
+}
+NODE'"'"''
+```
+
+Inspect request logs:
+
+```bash
+ssh root@43.134.21.160 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync("/data/.state/gateway.sqlite");
+for (const row of db.prepare("SELECT id, owner, time, method, endpoint, model, status_code, duration_ms, source FROM request_logs ORDER BY time DESC LIMIT 20").all()) {
+  console.log(JSON.stringify(row));
+}
+NODE'"'"''
+```
+
+### Current Custom Behavior To Preserve
+
+- Multi-user admin/user management is stored in SQLite.
+- Normal users only see image generation and their own request logs/history.
+- Admin users default to their own data but can filter to other users or all users.
+- Image generation history and request logs are persisted in SQLite.
+- Generated images are saved locally under the persisted state volume.
+- Image previews are compressed server-side, but UI previews must display complete images with `object-fit: contain` and must not crop.
+- The request log UI must not display account information in the list, detail panel, detail JSON, or copied detail payload.
+- The image generation page must prevent duplicate submissions while one generation is running.
+- Successful/failed generation saves clean up covered stale `running` history rows for the same owner, endpoint, and prompt.
+
 ## Release Defaults
 
 When the user asks to publish, release, or ship a new version, treat it as the full npm plus desktop GitHub Release flow unless they explicitly narrow the request.

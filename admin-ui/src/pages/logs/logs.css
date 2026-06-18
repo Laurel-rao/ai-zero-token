@@ -110,6 +110,26 @@ td code {
   font-weight: 700;
 }
 
+.filter-chip input {
+  width: 150px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.filter-chip button {
+  border: 0;
+  color: #1d4ed8;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
 .table-scroller tbody tr {
   cursor: pointer;
 }

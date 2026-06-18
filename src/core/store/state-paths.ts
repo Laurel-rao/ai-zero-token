@@ -55,6 +55,14 @@ export function getUsageDailyPath(): string {
   return path.join(getUsageDir(), "daily.json");
 }
 
+export function getDatabasePath(): string {
+  return path.join(stateDir, "gateway.sqlite");
+}
+
+export function getGenerationAssetsDir(): string {
+  return path.join(stateDir, "generations", "images");
+}
+
 export function getUsageLifetimePath(): string {
   return path.join(getUsageDir(), "lifetime.json");
 }

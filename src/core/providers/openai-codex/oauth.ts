@@ -53,6 +53,12 @@ export type OpenAICodexLoginSession = {
   close: () => void;
 };
 
+export type OpenAICodexRemoteLoginSession = {
+  state: string;
+  authorizeUrl: string;
+  completeWithInput: (input: string) => Promise<OAuthProfile>;
+};
+
 type UpstreamErrorBody = {
   message?: string;
   type?: string;
@@ -294,6 +300,10 @@ async function exchangeAuthorizationCode(code: string, verifier: string): Promis
 }
 
 export async function refreshOpenAICodexToken(profile: OAuthProfile): Promise<OAuthProfile> {
+  if (!profile.refresh) {
+    throw new Error("该账号是导入的 ChatGPT session token，没有 refresh_token；session 过期后请重新导入。");
+  }
+
   const response = await requestText({
     method: "POST",
     url: TOKEN_URL,
@@ -553,9 +563,7 @@ async function requestManualCode(expectedState: string): Promise<string> {
   return parseManualAuthorizationCode(manual, expectedState);
 }
 
-export async function startOpenAICodexLogin(): Promise<OpenAICodexLoginSession> {
-  const { verifier, challenge } = await generatePKCE();
-  const state = createState();
+function buildAuthorizeUrl(state: string, challenge: string): string {
   const authorizeUrl = new URL(AUTHORIZE_URL);
 
   authorizeUrl.searchParams.set("response_type", "code");
@@ -569,8 +577,32 @@ export async function startOpenAICodexLogin(): Promise<OpenAICodexLoginSession> 
   authorizeUrl.searchParams.set("codex_cli_simplified_flow", "true");
   authorizeUrl.searchParams.set("originator", "pi");
 
+  return authorizeUrl.toString();
+}
+
+export async function startOpenAICodexRemoteLogin(): Promise<OpenAICodexRemoteLoginSession> {
+  const { verifier, challenge } = await generatePKCE();
+  const state = createState();
+  const authorizeUrl = buildAuthorizeUrl(state, challenge);
+
+  return {
+    state,
+    authorizeUrl,
+    completeWithInput: async (inputValue: string) => {
+      const code = parseManualAuthorizationCode(inputValue, state);
+      const token = await exchangeAuthorizationCode(code, verifier);
+      return extractProfile(token.access, token.refresh, token.expires, token.idToken);
+    },
+  };
+}
+
+export async function startOpenAICodexLogin(): Promise<OpenAICodexLoginSession> {
+  const { verifier, challenge } = await generatePKCE();
+  const state = createState();
+  const authorizeUrl = buildAuthorizeUrl(state, challenge);
+
   const callbackServer = await startLocalCallbackServer(state);
-  const url = authorizeUrl.toString();
+  const url = authorizeUrl;
 
   console.log("开始 OpenAI Codex OAuth 登录。");
   console.log(`回调地址: ${REDIRECT_URI}`);

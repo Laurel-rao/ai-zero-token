@@ -53,7 +53,7 @@ export type OAuthProfile = {
   profileId: string;
   mode: AuthMode;
   access: string;
-  refresh: string;
+  refresh?: string;
   idToken?: string;
   expires: number;
   accountId: string;
@@ -171,6 +171,12 @@ export type GatewaySettings = {
   };
   image: {
     freeAccountWebGenerationEnabled: boolean;
+  };
+  wecom: {
+    enabled: boolean;
+    corpId: string;
+    agentId: string;
+    secret: string;
   };
   server: {
     host: string;

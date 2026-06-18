@@ -1,5 +1,5 @@
 import { useEffect, useState, type ChangeEvent, type Dispatch, type FormEvent, type SetStateAction } from "react";
-import { FileArchive, Loader2, LogIn, Send } from "lucide-react";
+import { Copy, ExternalLink, FileArchive, Loader2, LogIn, Send } from "lucide-react";
 import { unzipSync, strFromU8 } from "fflate";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
@@ -87,6 +87,19 @@ export function AccountModal(props: {
   function handleManualSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     props.submitManualLogin(manualInput).catch((error) => props.setStatus(errorMessage(error)));
+  }
+
+  async function copyAuthorizeUrl() {
+    const url = props.manualLogin?.authorizeUrl;
+    if (!url) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      props.setStatus("OAuth 登录链接已复制。");
+    } catch {
+      props.setStatus("复制失败，请手动选中登录链接复制。");
+    }
   }
 
   async function importProfile(profileInput?: unknown, successMessage?: (count: number) => string) {
@@ -178,44 +191,11 @@ export function AccountModal(props: {
   }
 
   return (
-    <Modal title="新增账号" onClose={closeModal}>
+    <Modal title="导入 ChatGPT Session" onClose={closeModal}>
       <div className="modal-grid">
         <section className="modal-section">
-          <h4>OAuth 登录</h4>
-          <p>使用浏览器完成 Codex OAuth 授权，完成后会自动写入本地账号池。</p>
-          <button className="btn-primary" type="button" onClick={props.login} disabled={props.busy === "login"}>
-            {props.busy === "login" ? <Loader2 className="spin" size={16} /> : <LogIn size={16} />}
-            登录
-          </button>
-          {props.manualLogin ? (
-            <form className="manual-login-panel" onSubmit={handleManualSubmit}>
-              <div>
-                <strong>需要手动完成授权</strong>
-                <p>{props.manualLogin.message}</p>
-              </div>
-              <textarea
-                className="textarea manual-login-textarea"
-                value={manualInput}
-                onChange={(event) => setManualInput(event.target.value)}
-                placeholder="粘贴完整回调 URL 或 authorization code"
-                autoFocus
-                spellCheck={false}
-              />
-              <div className="button-row">
-                <button className="btn-secondary" type="button" onClick={props.cancelManualLogin} disabled={props.busy === "login-manual"}>
-                  取消本次登录
-                </button>
-                <button className="btn-primary" type="submit" disabled={props.busy === "login-manual" || !manualInput.trim()}>
-                  {props.busy === "login-manual" ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-                  提交授权结果
-                </button>
-              </div>
-            </form>
-          ) : null}
-        </section>
-        <section className="modal-section">
-          <h4>导入账号 JSON</h4>
-          <p>支持粘贴单个对象、对象数组、profiles 对象，也支持上传包含多个 JSON 的 ZIP 压缩包。导入前会先校验格式。</p>
+          <h4>导入 ChatGPT session JSON</h4>
+          <p>支持 Codex OAuth 导出 JSON，也支持 ChatGPT session JSON（accessToken / access_token）。session-only 账号可用于网关生图，过期后需要重新导入。</p>
           <div className="button-row">
             <button className="btn-secondary" type="button" onClick={loadImportTemplate} disabled={props.busy === "template"}>
               填入参考格式
@@ -224,7 +204,7 @@ export function AccountModal(props: {
               导入
             </button>
           </div>
-          <textarea className="textarea import-textarea" value={importText} onChange={(event) => setImportText(event.target.value)} placeholder='粘贴账号 JSON，支持 { "profiles": [...] } 批量导入' spellCheck={false} />
+          <textarea className="textarea import-textarea" value={importText} onChange={(event) => setImportText(event.target.value)} placeholder='粘贴账号 JSON，支持 { "accessToken": "...", "expires": 1780000000 } 或 { "profiles": [...] }' spellCheck={false} />
           <div className="zip-import-box">
             <div>
               <strong>批量导入 ZIP</strong>
@@ -247,6 +227,52 @@ export function AccountModal(props: {
                 批量导入 {zipPreview.profileCount} 个账号
               </button>
             </div>
+          ) : null}
+        </section>
+        <section className="modal-section">
+          <h4>Codex OAuth 登录</h4>
+          <p>生成登录链接后，在浏览器完成 ChatGPT 登录；跳到 localhost:1455 回调页时，把地址栏完整链接粘贴回来，服务端会提取并保存 OAuth token。</p>
+          <button className="btn-secondary" type="button" onClick={props.login} disabled={props.busy === "login"}>
+            {props.busy === "login" ? <Loader2 className="spin" size={16} /> : <LogIn size={16} />}
+            生成登录链接
+          </button>
+          {props.manualLogin ? (
+            <form className="manual-login-panel" onSubmit={handleManualSubmit}>
+              <div>
+                <strong>打开登录链接</strong>
+                <p>{props.manualLogin.message}</p>
+              </div>
+              {props.manualLogin.authorizeUrl ? (
+                <div className="oauth-link-box">
+                  <a href={props.manualLogin.authorizeUrl} target="_blank" rel="noreferrer">
+                    <ExternalLink size={16} />
+                    打开 ChatGPT OAuth 登录
+                  </a>
+                  <button className="btn-secondary" type="button" onClick={copyAuthorizeUrl}>
+                    <Copy size={16} />
+                    复制链接
+                  </button>
+                  <code>{props.manualLogin.authorizeUrl}</code>
+                </div>
+              ) : null}
+              <textarea
+                className="textarea manual-login-textarea"
+                value={manualInput}
+                onChange={(event) => setManualInput(event.target.value)}
+                placeholder="登录后粘贴浏览器地址栏里的完整 localhost:1455/auth/callback?... 链接"
+                autoFocus
+                spellCheck={false}
+              />
+              <div className="button-row">
+                <button className="btn-secondary" type="button" onClick={props.cancelManualLogin} disabled={props.busy === "login-manual"}>
+                  取消本次登录
+                </button>
+                <button className="btn-primary" type="submit" disabled={props.busy === "login-manual" || !manualInput.trim()}>
+                  {props.busy === "login-manual" ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+                  提取并保存 token
+                </button>
+              </div>
+            </form>
           ) : null}
         </section>
       </div>

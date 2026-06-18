@@ -73,6 +73,12 @@ export type GatewaySettings = {
   image: {
     freeAccountWebGenerationEnabled: boolean;
   };
+  wecom: {
+    enabled: boolean;
+    corpId: string;
+    agentId: string;
+    secret: string;
+  };
   server: {
     host: string;
     port: number;
@@ -195,6 +201,10 @@ export type UsageResetResult = {
 };
 
 export type AdminConfig = {
+  auth?: {
+    user: string;
+    role: "admin" | "user";
+  } | null;
   status: GatewayStatus;
   settings: GatewaySettings;
   models: ModelInfo[];
@@ -227,6 +237,7 @@ export type AdminConfig = {
 
 export type RequestLog = {
   id: string;
+  owner?: string;
   time: number;
   method: string;
   endpoint: string;
