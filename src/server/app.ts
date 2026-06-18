@@ -2344,23 +2344,36 @@ export function createApp(params?: {
     perUserDaily: number;
     perUserHourly: number;
     minIntervalSeconds: number;
+    hasActiveOverride: boolean;
   } {
     const limits = settings.image.limits;
     const override = limits.userOverrides.find((item) => item.username === owner);
+    const hasActiveOverride = Boolean(
+      override &&
+      ((override.perUserDaily ?? 0) > 0 || (override.perUserHourly ?? 0) > 0 || (override.minIntervalSeconds ?? 0) > 0),
+    );
+    const inheritedDaily = limits.enabled ? limits.perUserDaily : 0;
+    const inheritedHourly = limits.enabled ? limits.perUserHourly : 0;
+    const inheritedMinIntervalSeconds = limits.enabled ? limits.minIntervalSeconds : 0;
     return {
-      perUserDaily: override?.perUserDaily ?? limits.perUserDaily,
-      perUserHourly: override?.perUserHourly ?? limits.perUserHourly,
-      minIntervalSeconds: override?.minIntervalSeconds ?? limits.minIntervalSeconds,
+      perUserDaily: override?.perUserDaily ?? inheritedDaily,
+      perUserHourly: override?.perUserHourly ?? inheritedHourly,
+      minIntervalSeconds: override?.minIntervalSeconds ?? inheritedMinIntervalSeconds,
+      hasActiveOverride,
     };
   }
 
   async function checkImageGenerationLimit(owner: string | undefined, settings: GatewaySettings): Promise<ImageLimitCheckResult> {
     const limits = settings.image.limits;
-    if (!limits.enabled || !owner) {
+    if (!owner) {
       return { allowed: true };
     }
 
     const effective = resolveImageLimits(settings, owner);
+    if (!limits.enabled && !effective.hasActiveOverride) {
+      return { allowed: true };
+    }
+
     const now = Date.now();
     const dayStart = now - 24 * 60 * 60 * 1000;
     const hourStart = now - 60 * 60 * 1000;
