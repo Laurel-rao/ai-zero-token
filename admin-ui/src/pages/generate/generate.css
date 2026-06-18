@@ -819,6 +819,11 @@
   background: #ede9fe;
 }
 
+.generate-status.is-queued {
+  color: #0369a1;
+  background: #e0f2fe;
+}
+
 .generate-status.is-failed {
   color: #b91c1c;
   background: #fee2e2;

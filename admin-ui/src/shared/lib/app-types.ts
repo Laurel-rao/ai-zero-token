@@ -71,9 +71,21 @@ export type SettingDraft = {
   proxyUrl: string;
   proxyNoProxy: string;
   autoSwitchEnabled: boolean;
+  accountRotationEnabled: boolean;
   autoSwitchExcludedProfileIds: string[];
   quotaSyncConcurrency: string;
+  accountMaxConcurrency: string;
   freeAccountWebGenerationEnabled: boolean;
+  imageLimitsEnabled: boolean;
+  imageLimitDaily: string;
+  imageLimitHourly: string;
+  imageLimitMinIntervalSeconds: string;
+  imageLimitUserOverrides: Array<{
+    username: string;
+    perUserDaily: string;
+    perUserHourly: string;
+    minIntervalSeconds: string;
+  }>;
   wecomEnabled: boolean;
   wecomCorpId: string;
   wecomAgentId: string;

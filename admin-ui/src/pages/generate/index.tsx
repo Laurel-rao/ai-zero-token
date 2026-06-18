@@ -26,7 +26,8 @@ type GenerateHistoryItem = {
   id: string;
   owner?: string;
   createdAt: number;
-  status: "running" | "success" | "failed";
+  startedAt?: number;
+  status: "queued" | "running" | "success" | "failed";
   endpoint: string;
   account: string;
   model: string;
@@ -36,6 +37,7 @@ type GenerateHistoryItem = {
   quality?: "low" | "medium" | "high" | "auto";
   outputFormat?: OutputFormat;
   durationMs: number;
+  waitDurationMs?: number;
   error?: string;
   referenceImages: Array<{
     name?: string;
@@ -63,8 +65,10 @@ type GenerateReportBucket = {
   success: number;
   failed: number;
   running: number;
+  queued: number;
   imageCount: number;
   averageDurationMs: number;
+  averageWaitDurationMs: number;
 };
 
 type GenerateReportStats = {
@@ -72,9 +76,11 @@ type GenerateReportStats = {
   success: number;
   failed: number;
   running: number;
+  queued: number;
   imageCount: number;
   successRate: number;
   averageDurationMs: number;
+  averageWaitDurationMs: number;
   buckets: GenerateReportBucket[];
 };
 
@@ -162,6 +168,13 @@ function percentLabel(value: number): string {
   return `${value.toFixed(value >= 99.95 || value < 10 ? 1 : 0)}%`;
 }
 
+function generateStatusMeta(status: GenerateHistoryItem["status"]): { className: string; label: string } {
+  if (status === "success") return { className: "is-success", label: "成功" };
+  if (status === "queued") return { className: "is-queued", label: "排队中" };
+  if (status === "running") return { className: "is-running", label: "处理中" };
+  return { className: "is-failed", label: "失败" };
+}
+
 function formatReportBucketLabel(value: number, bucketMs: number): string {
   const date = new Date(value);
   if (bucketMs >= 24 * 60 * 60 * 1000) {
@@ -183,10 +196,15 @@ function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportS
   const success = items.filter((item) => item.status === "success").length;
   const failed = items.filter((item) => item.status === "failed").length;
   const running = items.filter((item) => item.status === "running").length;
+  const queued = items.filter((item) => item.status === "queued").length;
   const imageCount = items.reduce((sum, item) => sum + item.images.length, 0);
-  const timedItems = items.filter((item) => item.status !== "running" && Number.isFinite(item.durationMs) && item.durationMs > 0);
+  const timedItems = items.filter((item) => item.status !== "queued" && item.status !== "running" && Number.isFinite(item.durationMs) && item.durationMs > 0);
   const averageDurationMs = timedItems.length > 0
     ? timedItems.reduce((sum, item) => sum + item.durationMs, 0) / timedItems.length
+    : 0;
+  const waitItems = items.filter((item) => Number.isFinite(item.waitDurationMs) && (item.waitDurationMs ?? 0) > 0);
+  const averageWaitDurationMs = waitItems.length > 0
+    ? waitItems.reduce((sum, item) => sum + (item.waitDurationMs ?? 0), 0) / waitItems.length
     : 0;
 
   if (items.length === 0) {
@@ -195,9 +213,11 @@ function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportS
       success,
       failed,
       running,
+      queued,
       imageCount,
       successRate: 0,
       averageDurationMs,
+      averageWaitDurationMs,
       buckets: [],
     };
   }
@@ -213,9 +233,12 @@ function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportS
     success: number;
     failed: number;
     running: number;
+    queued: number;
     imageCount: number;
     totalDurationMs: number;
+    totalWaitDurationMs: number;
     timedCount: number;
+    waitCount: number;
   }>();
 
   for (let current = start; current <= end; current += bucketMs) {
@@ -224,9 +247,12 @@ function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportS
       success: 0,
       failed: 0,
       running: 0,
+      queued: 0,
       imageCount: 0,
       totalDurationMs: 0,
+      totalWaitDurationMs: 0,
       timedCount: 0,
+      waitCount: 0,
     });
   }
 
@@ -237,18 +263,26 @@ function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportS
       success: 0,
       failed: 0,
       running: 0,
+      queued: 0,
       imageCount: 0,
       totalDurationMs: 0,
+      totalWaitDurationMs: 0,
       timedCount: 0,
+      waitCount: 0,
     };
     bucket.count += 1;
     bucket.imageCount += item.images.length;
     if (item.status === "success") bucket.success += 1;
     if (item.status === "failed") bucket.failed += 1;
     if (item.status === "running") bucket.running += 1;
-    if (item.status !== "running" && Number.isFinite(item.durationMs) && item.durationMs > 0) {
+    if (item.status === "queued") bucket.queued += 1;
+    if (item.status !== "queued" && item.status !== "running" && Number.isFinite(item.durationMs) && item.durationMs > 0) {
       bucket.totalDurationMs += item.durationMs;
       bucket.timedCount += 1;
+    }
+    if (Number.isFinite(item.waitDurationMs) && (item.waitDurationMs ?? 0) > 0) {
+      bucket.totalWaitDurationMs += item.waitDurationMs ?? 0;
+      bucket.waitCount += 1;
     }
     bucketMap.set(key, bucket);
   }
@@ -258,9 +292,11 @@ function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportS
     success,
     failed,
     running,
+    queued,
     imageCount,
     successRate: total > 0 ? (success / total) * 100 : 0,
     averageDurationMs,
+    averageWaitDurationMs,
     buckets: Array.from(bucketMap.entries())
       .sort(([left], [right]) => left - right)
       .map(([key, bucket]) => ({
@@ -270,8 +306,10 @@ function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportS
         success: bucket.success,
         failed: bucket.failed,
         running: bucket.running,
+        queued: bucket.queued,
         imageCount: bucket.imageCount,
         averageDurationMs: bucket.timedCount > 0 ? bucket.totalDurationMs / bucket.timedCount : 0,
+        averageWaitDurationMs: bucket.waitCount > 0 ? bucket.totalWaitDurationMs / bucket.waitCount : 0,
       })),
   };
 }
@@ -1038,7 +1076,9 @@ export function GeneratePage(props: {
             <div className="empty-state">没有匹配的生图历史。</div>
           ) : (
             <div className="generate-history-grid">
-              {filteredHistory.map((item) => (
+              {filteredHistory.map((item) => {
+                const statusMeta = generateStatusMeta(item.status);
+                return (
                 <article className="generate-history-card" key={item.id}>
                   <button
                     className={ratioClassName(item.ratio || item.size)}
@@ -1052,8 +1092,8 @@ export function GeneratePage(props: {
                   </button>
                   <div>
                     <div className="generate-history-title-row">
-                      <span className={`generate-status ${item.status === "success" ? "is-success" : item.status === "running" ? "is-running" : "is-failed"}`}>
-                        {item.status === "success" ? "成功" : item.status === "running" ? "处理中" : "失败"}
+                      <span className={`generate-status ${statusMeta.className}`}>
+                        {statusMeta.label}
                       </span>
                       <strong className="history-prompt-text" title={item.prompt} data-full-prompt={item.prompt}>
                         {item.prompt}
@@ -1061,6 +1101,7 @@ export function GeneratePage(props: {
                     </div>
                     <span>
                       {formatFullTime(item.createdAt)} · {item.images[0]?.width && item.images[0]?.height ? `${item.images[0].width}×${item.images[0].height}` : item.ratio || item.size} · {item.referenceImages.length > 0 ? `参考图 ${item.referenceImages.length}` : "纯文本"} · {formatDuration(item.durationMs)}
+                      {item.waitDurationMs && item.waitDurationMs > 0 ? ` · 等待 ${formatDuration(item.waitDurationMs)}` : ""}
                       {props.role === "admin" ? ` · 用户 ${item.owner || "-"}` : ""}
                       {item.images[0]?.previewSize ? ` · 预览 ${(item.images[0].previewSize / 1024).toFixed(0)} KB` : ""}
                     </span>
@@ -1087,7 +1128,8 @@ export function GeneratePage(props: {
                     ) : null}
                   </div>
                 </article>
-              ))}
+              );
+              })}
             </div>
           )}
         </div>
@@ -1115,12 +1157,12 @@ export function GeneratePage(props: {
             <div className="generate-report-stat">
               <span>平均时间</span>
               <strong>{formatDuration(reportStats.averageDurationMs)}</strong>
-              <small>{reportStats.running > 0 ? `${reportStats.running} 条处理中` : "已完成样本"}</small>
+              <small>{reportStats.queued + reportStats.running > 0 ? `${reportStats.queued} 条排队 / ${reportStats.running} 条处理中` : "已完成样本"}</small>
             </div>
             <div className="generate-report-stat">
-              <span>时间段</span>
-              <strong>{reportStats.buckets.length}</strong>
-              <small>柱状图次数 / 曲线平均时间</small>
+              <span>平均等待</span>
+              <strong>{formatDuration(reportStats.averageWaitDurationMs)}</strong>
+              <small>{reportStats.buckets.length} 个时间段</small>
             </div>
           </div>
           <div className="generate-report-panel">

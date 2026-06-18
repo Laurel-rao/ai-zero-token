@@ -66,6 +66,81 @@
   color: #047857;
 }
 
+.image-limit-section {
+  grid-column: span 2;
+}
+
+.image-limit-head,
+.image-limit-overrides-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.image-limit-head .hint {
+  margin: 8px 0 0;
+  max-width: 640px;
+}
+
+.image-limit-head .switch-line {
+  min-height: 40px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.image-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.image-limit-overrides {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.image-limit-overrides-head strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.image-limit-empty {
+  display: grid;
+  place-items: center;
+  min-height: 72px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  color: var(--text-muted);
+  background: #f8fafc;
+  font-size: 13px;
+}
+
+.image-limit-override-list {
+  display: grid;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.image-limit-override-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) repeat(3, minmax(118px, 0.8fr)) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fbfcff;
+}
+
+.image-limit-remove {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
 .auto-switch-exclusion-section {
   grid-column: 1 / -1;
 }
@@ -371,12 +446,16 @@
 
 @media (max-width: 860px) {
   .database-users-head,
+  .image-limit-head,
+  .image-limit-overrides-head,
   .auto-switch-exclusion-head,
   .auto-switch-profile-row {
     grid-template-columns: 1fr;
   }
 
   .database-users-head,
+  .image-limit-head,
+  .image-limit-overrides-head,
   .auto-switch-exclusion-head {
     display: grid;
   }
@@ -395,5 +474,18 @@
 
   .database-user-create {
     grid-template-columns: 1fr;
+  }
+
+  .image-limit-section {
+    grid-column: 1 / -1;
+  }
+
+  .image-limit-grid,
+  .image-limit-override-row {
+    grid-template-columns: 1fr;
+  }
+
+  .image-limit-remove {
+    justify-self: flex-start;
   }
 }

@@ -9,16 +9,33 @@ import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth
 import { DatabaseUsersPanel } from "./components/DatabaseUsersPanel";
 import type { UserRole } from "@/routes/routes";
 
+function countToDraft(value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
+}
+
 function createSettingsDraft(config: AdminConfig): SettingDraft {
+  const imageLimits = config.settings.image?.limits;
   return {
     defaultModel: config.settings.defaultModel,
     proxyEnabled: config.settings.networkProxy.enabled,
     proxyUrl: config.settings.networkProxy.url,
     proxyNoProxy: config.settings.networkProxy.noProxy || "localhost,127.0.0.1,::1",
     autoSwitchEnabled: config.settings.autoSwitch.enabled,
+    accountRotationEnabled: Boolean(config.settings.accountRotation?.enabled),
     autoSwitchExcludedProfileIds: config.settings.autoSwitch.excludedProfileIds || [],
     quotaSyncConcurrency: String(config.settings.runtime?.quotaSyncConcurrency || 3),
+    accountMaxConcurrency: String(config.settings.runtime?.accountMaxConcurrency || 2),
     freeAccountWebGenerationEnabled: Boolean(config.settings.image?.freeAccountWebGenerationEnabled),
+    imageLimitsEnabled: Boolean(imageLimits?.enabled),
+    imageLimitDaily: countToDraft(imageLimits?.perUserDaily),
+    imageLimitHourly: countToDraft(imageLimits?.perUserHourly),
+    imageLimitMinIntervalSeconds: countToDraft(imageLimits?.minIntervalSeconds),
+    imageLimitUserOverrides: (imageLimits?.userOverrides || []).map((item) => ({
+      username: item.username,
+      perUserDaily: item.perUserDaily === undefined ? "" : String(item.perUserDaily),
+      perUserHourly: item.perUserHourly === undefined ? "" : String(item.perUserHourly),
+      minIntervalSeconds: item.minIntervalSeconds === undefined ? "" : String(item.minIntervalSeconds),
+    })),
     wecomEnabled: Boolean(config.settings.wecom?.enabled),
     wecomCorpId: config.settings.wecom?.corpId || "",
     wecomAgentId: config.settings.wecom?.agentId || "",
@@ -50,9 +67,16 @@ export function SettingsPage(props: {
     proxyUrl: "",
     proxyNoProxy: "localhost,127.0.0.1,::1",
     autoSwitchEnabled: false,
+    accountRotationEnabled: false,
     autoSwitchExcludedProfileIds: [],
     quotaSyncConcurrency: "3",
+    accountMaxConcurrency: "2",
     freeAccountWebGenerationEnabled: false,
+    imageLimitsEnabled: false,
+    imageLimitDaily: "0",
+    imageLimitHourly: "0",
+    imageLimitMinIntervalSeconds: "0",
+    imageLimitUserOverrides: [],
     wecomEnabled: false,
     wecomCorpId: "",
     wecomAgentId: "",
@@ -91,6 +115,34 @@ export function SettingsPage(props: {
     markSettingsDirty({ autoSwitchExcludedProfileIds: Array.from(nextSet) });
   }
 
+  function addImageLimitOverride() {
+    markSettingsDirty({
+      imageLimitUserOverrides: [
+        ...settingsDraft.imageLimitUserOverrides,
+        {
+          username: "",
+          perUserDaily: "",
+          perUserHourly: "",
+          minIntervalSeconds: "",
+        },
+      ],
+    });
+  }
+
+  function updateImageLimitOverride(index: number, next: Partial<SettingDraft["imageLimitUserOverrides"][number]>) {
+    markSettingsDirty({
+      imageLimitUserOverrides: settingsDraft.imageLimitUserOverrides.map((item, itemIndex) => (
+        itemIndex === index ? { ...item, ...next } : item
+      )),
+    });
+  }
+
+  function removeImageLimitOverride(index: number) {
+    markSettingsDirty({
+      imageLimitUserOverrides: settingsDraft.imageLimitUserOverrides.filter((_, itemIndex) => itemIndex !== index),
+    });
+  }
+
   const excludedProfileIds = useMemo(() => new Set(settingsDraft.autoSwitchExcludedProfileIds), [settingsDraft.autoSwitchExcludedProfileIds]);
   const autoSwitchProfiles = useMemo(() => {
     const query = autoSwitchSearch.trim().toLowerCase();
@@ -105,6 +157,14 @@ export function SettingsPage(props: {
 
   async function saveSettings(options?: { restart?: boolean }) {
     const hasDirtyField = (...fields: Array<keyof SettingDraft>) => fields.some((field) => settingsDirtyFields.has(field));
+    const parseLimit = (value: string, label: string, max = 100_000): number | null => {
+      const parsed = Number.parseInt(value || "0", 10);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) {
+        props.setStatus(`${label}必须是 0 到 ${max} 之间的整数，0 表示不限制。`);
+        return null;
+      }
+      return parsed;
+    };
     const serverPort = Number.parseInt(settingsDraft.serverPort, 10);
     if (hasDirtyField("serverPort") && (!Number.isInteger(serverPort) || serverPort < 1 || serverPort > 65535)) {
       props.setStatus("端口必须是 1 到 65535 之间的整数。");
@@ -115,13 +175,81 @@ export function SettingsPage(props: {
       props.setStatus("全局额度刷新并发数必须是 1 到 32 之间的整数。");
       return;
     }
+    const accountMaxConcurrency = Number.parseInt(settingsDraft.accountMaxConcurrency, 10);
+    if (hasDirtyField("accountMaxConcurrency") && (!Number.isInteger(accountMaxConcurrency) || accountMaxConcurrency < 1 || accountMaxConcurrency > 32)) {
+      props.setStatus("每账号最大并发数必须是 1 到 32 之间的整数。");
+      return;
+    }
+    const imageLimitDaily = parseLimit(settingsDraft.imageLimitDaily, "24 小时生图上限");
+    if (imageLimitDaily === null) return;
+    const imageLimitHourly = parseLimit(settingsDraft.imageLimitHourly, "1 小时生图上限");
+    if (imageLimitHourly === null) return;
+    const imageLimitMinIntervalSeconds = parseLimit(settingsDraft.imageLimitMinIntervalSeconds, "最小间隔秒数", 86_400);
+    if (imageLimitMinIntervalSeconds === null) return;
+
+    const imageLimitUserOverrides: Array<{
+      username: string;
+      perUserDaily?: number;
+      perUserHourly?: number;
+      minIntervalSeconds?: number;
+    }> = [];
+    const seenOverrideUsers = new Set<string>();
+    for (const [index, item] of settingsDraft.imageLimitUserOverrides.entries()) {
+      const username = item.username.trim();
+      if (!username) {
+        props.setStatus(`第 ${index + 1} 条用户覆盖缺少用户名。`);
+        return;
+      }
+      if (seenOverrideUsers.has(username)) {
+        props.setStatus(`用户覆盖里重复配置了 ${username}。`);
+        return;
+      }
+      seenOverrideUsers.add(username);
+      const override: {
+        username: string;
+        perUserDaily?: number;
+        perUserHourly?: number;
+        minIntervalSeconds?: number;
+      } = { username };
+      if (item.perUserDaily.trim()) {
+        const parsed = parseLimit(item.perUserDaily, `${username} 的 24 小时生图上限`);
+        if (parsed === null) return;
+        override.perUserDaily = parsed;
+      }
+      if (item.perUserHourly.trim()) {
+        const parsed = parseLimit(item.perUserHourly, `${username} 的 1 小时生图上限`);
+        if (parsed === null) return;
+        override.perUserHourly = parsed;
+      }
+      if (item.minIntervalSeconds.trim()) {
+        const parsed = parseLimit(item.minIntervalSeconds, `${username} 的最小间隔秒数`, 86_400);
+        if (parsed === null) return;
+        override.minIntervalSeconds = parsed;
+      }
+      imageLimitUserOverrides.push(override);
+    }
 
     const payload: {
       defaultModel?: string;
       networkProxy?: { enabled: boolean; url: string; noProxy: string };
       autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
-      runtime?: { quotaSyncConcurrency: number };
-      image?: { freeAccountWebGenerationEnabled: boolean };
+      accountRotation?: { enabled?: boolean; strategy?: "round_robin" };
+      runtime?: { quotaSyncConcurrency?: number; accountMaxConcurrency?: number };
+      image?: {
+        freeAccountWebGenerationEnabled?: boolean;
+        limits?: {
+          enabled: boolean;
+          perUserDaily: number;
+          perUserHourly: number;
+          minIntervalSeconds: number;
+          userOverrides: Array<{
+            username: string;
+            perUserDaily?: number;
+            perUserHourly?: number;
+            minIntervalSeconds?: number;
+          }>;
+        };
+      };
       wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
       server?: { port: number };
     } = {};
@@ -145,15 +273,44 @@ export function SettingsPage(props: {
         payload.autoSwitch.excludedProfileIds = settingsDraft.autoSwitchExcludedProfileIds;
       }
     }
-    if (hasDirtyField("quotaSyncConcurrency")) {
-      payload.runtime = {
-        quotaSyncConcurrency,
+    if (hasDirtyField("accountRotationEnabled")) {
+      payload.accountRotation = {
+        enabled: settingsDraft.accountRotationEnabled,
+        strategy: "round_robin",
       };
     }
-    if (hasDirtyField("freeAccountWebGenerationEnabled")) {
-      payload.image = {
-        freeAccountWebGenerationEnabled: settingsDraft.freeAccountWebGenerationEnabled,
-      };
+    if (hasDirtyField("quotaSyncConcurrency", "accountMaxConcurrency")) {
+      payload.runtime = {};
+      if (hasDirtyField("quotaSyncConcurrency")) {
+        payload.runtime.quotaSyncConcurrency = quotaSyncConcurrency;
+      }
+      if (hasDirtyField("accountMaxConcurrency")) {
+        payload.runtime.accountMaxConcurrency = accountMaxConcurrency;
+      }
+    }
+    if (
+      hasDirtyField(
+        "freeAccountWebGenerationEnabled",
+        "imageLimitsEnabled",
+        "imageLimitDaily",
+        "imageLimitHourly",
+        "imageLimitMinIntervalSeconds",
+        "imageLimitUserOverrides",
+      )
+    ) {
+      payload.image = {};
+      if (hasDirtyField("freeAccountWebGenerationEnabled")) {
+        payload.image.freeAccountWebGenerationEnabled = settingsDraft.freeAccountWebGenerationEnabled;
+      }
+      if (hasDirtyField("imageLimitsEnabled", "imageLimitDaily", "imageLimitHourly", "imageLimitMinIntervalSeconds", "imageLimitUserOverrides")) {
+        payload.image.limits = {
+          enabled: settingsDraft.imageLimitsEnabled,
+          perUserDaily: imageLimitDaily,
+          perUserHourly: imageLimitHourly,
+          minIntervalSeconds: imageLimitMinIntervalSeconds,
+          userOverrides: imageLimitUserOverrides,
+        };
+      }
     }
     if (hasDirtyField("wecomEnabled", "wecomCorpId", "wecomAgentId", "wecomSecret")) {
       payload.wecom = {
@@ -310,8 +467,24 @@ export function SettingsPage(props: {
         <section className="settings-section">
           <h4>账号运行策略</h4>
           <label className="switch-line">
+            <input type="checkbox" checked={settingsDraft.accountRotationEnabled} onChange={(event) => markSettingsDirty({ accountRotationEnabled: event.target.checked })} />
+            <span>按请求轮换可用账号</span>
+          </label>
+          <label className="switch-line">
             <input type="checkbox" checked={settingsDraft.autoSwitchEnabled} onChange={(event) => markSettingsDirty({ autoSwitchEnabled: event.target.checked })} />
             <span>当前 API 账号额度耗尽后自动切换到下一个仍有额度的账号</span>
+          </label>
+          <label className="field">
+            <span>每账号最大并发数</span>
+            <input
+              className="input"
+              inputMode="numeric"
+              max={32}
+              min={1}
+              type="number"
+              value={settingsDraft.accountMaxConcurrency}
+              onChange={(event) => markSettingsDirty({ accountMaxConcurrency: event.target.value })}
+            />
           </label>
           <label className="field">
             <span>全局额度刷新并发数</span>
@@ -325,15 +498,82 @@ export function SettingsPage(props: {
               onChange={(event) => markSettingsDirty({ quotaSyncConcurrency: event.target.value })}
             />
           </label>
+          <p className="hint">请求轮换使用顺序轮询策略，并复用下方“不参与自动轮换名单”。每个账号最多同时处理指定数量的请求，超出的请求会显示为排队中。</p>
           <p className="hint">手动刷新全部账号额度时使用，默认 3。账号很多可以调高，遇到限流或失败增多时调低。</p>
           <p className="hint">{props.status}</p>
+        </section>
+
+        <section className="settings-section image-limit-section">
+          <div className="image-limit-head">
+            <div>
+              <h4>生图限额</h4>
+              <p className="hint">对登录用户限制图片生成和图片编辑请求，0 表示不限制；未登录 API Key 请求不计入用户限额。</p>
+            </div>
+            <label className="switch-line">
+              <input type="checkbox" checked={settingsDraft.imageLimitsEnabled} onChange={(event) => markSettingsDirty({ imageLimitsEnabled: event.target.checked })} />
+              <span>启用</span>
+            </label>
+          </div>
+
+          <div className="image-limit-grid">
+            <label className="field">
+              <span>每用户 24 小时上限</span>
+              <input className="input" inputMode="numeric" min={0} type="number" value={settingsDraft.imageLimitDaily} onChange={(event) => markSettingsDirty({ imageLimitDaily: event.target.value })} />
+            </label>
+            <label className="field">
+              <span>每用户 1 小时上限</span>
+              <input className="input" inputMode="numeric" min={0} type="number" value={settingsDraft.imageLimitHourly} onChange={(event) => markSettingsDirty({ imageLimitHourly: event.target.value })} />
+            </label>
+            <label className="field">
+              <span>两次生图最小间隔（秒）</span>
+              <input className="input" inputMode="numeric" min={0} max={86400} type="number" value={settingsDraft.imageLimitMinIntervalSeconds} onChange={(event) => markSettingsDirty({ imageLimitMinIntervalSeconds: event.target.value })} />
+            </label>
+          </div>
+
+          <div className="image-limit-overrides">
+            <div className="image-limit-overrides-head">
+              <strong>用户覆盖</strong>
+              <button className="btn-secondary" type="button" onClick={addImageLimitOverride}>
+                新增用户覆盖
+              </button>
+            </div>
+            {settingsDraft.imageLimitUserOverrides.length === 0 ? (
+              <div className="image-limit-empty">暂无用户覆盖，所有登录用户使用全局限额。</div>
+            ) : (
+              <div className="image-limit-override-list">
+                {settingsDraft.imageLimitUserOverrides.map((item, index) => (
+                  <div className="image-limit-override-row" key={`${item.username}:${index}`}>
+                    <label className="field">
+                      <span>用户名</span>
+                      <input className="input" value={item.username} onChange={(event) => updateImageLimitOverride(index, { username: event.target.value })} placeholder="alice 或 wxwork:UserId" />
+                    </label>
+                    <label className="field">
+                      <span>24 小时上限</span>
+                      <input className="input" inputMode="numeric" min={0} type="number" value={item.perUserDaily} onChange={(event) => updateImageLimitOverride(index, { perUserDaily: event.target.value })} placeholder="继承" />
+                    </label>
+                    <label className="field">
+                      <span>1 小时上限</span>
+                      <input className="input" inputMode="numeric" min={0} type="number" value={item.perUserHourly} onChange={(event) => updateImageLimitOverride(index, { perUserHourly: event.target.value })} placeholder="继承" />
+                    </label>
+                    <label className="field">
+                      <span>间隔秒数</span>
+                      <input className="input" inputMode="numeric" min={0} max={86400} type="number" value={item.minIntervalSeconds} onChange={(event) => updateImageLimitOverride(index, { minIntervalSeconds: event.target.value })} placeholder="继承" />
+                    </label>
+                    <button className="btn-secondary danger-action image-limit-remove" type="button" onClick={() => removeImageLimitOverride(index)}>
+                      删除
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </section>
 
         <section className="settings-section auto-switch-exclusion-section">
           <div className="auto-switch-exclusion-head">
             <div>
               <h4>不参与自动轮换名单</h4>
-              <p className="hint">勾选表示手动排除。登录不可用或额度耗尽的账号即使未勾选，也不会被实际自动轮换选中。</p>
+              <p className="hint">勾选表示手动排除。该名单同时作用于按请求轮换和额度耗尽后的自动切换。</p>
             </div>
             <div className="auto-switch-counts" aria-label="自动轮换账号统计">
               <span className="count-pill is-included">可轮换 {autoSwitchRuntimeReadyCount} 个</span>
