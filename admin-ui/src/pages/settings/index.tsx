@@ -1,4 +1,20 @@
-import { Loader2, RefreshCw, Search } from "lucide-react";
+import {
+  ChevronDown,
+  Gauge,
+  Globe2,
+  KeyRound,
+  Layers3,
+  Loader2,
+  MonitorCog,
+  Network,
+  RefreshCw,
+  Search,
+  ServerCog,
+  ShieldCheck,
+  UsersRound,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, ProfileSummary } from "@/shared/types";
@@ -6,7 +22,6 @@ import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
 import { errorMessage } from "@/shared/lib/app-utils";
 import { formatJson } from "@/shared/lib/format";
 import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
-import { DatabaseUsersPanel } from "./components/DatabaseUsersPanel";
 import type { UserRole } from "@/routes/routes";
 
 function countToDraft(value: number | undefined): string {
@@ -48,6 +63,31 @@ function profileSearchText(profile: ProfileSummary): string {
   return [profileLabel(profile, true), profile.email || "", profile.accountId, profile.codexAccountId || "", profile.profileId, getPlanType(profile)].join(" ").toLowerCase();
 }
 
+type SettingSectionId = "model" | "wecom" | "proxy" | "server" | "runtime" | "limits" | "rotation" | "display";
+
+type SettingSectionMeta = {
+  id: SettingSectionId;
+  title: string;
+  description: string;
+  icon: LucideIcon;
+  tone: "violet" | "emerald" | "blue" | "indigo" | "green" | "orange" | "amber" | "slate";
+  status: string;
+  statusTone?: "success" | "info" | "warn" | "muted";
+  metrics?: string[];
+};
+
+function enabledLabel(value: boolean): string {
+  return value ? "已启用" : "未启用";
+}
+
+function limitLabel(value: string, suffix = ""): string {
+  const normalized = value.trim();
+  if (!normalized || normalized === "0") {
+    return "不限";
+  }
+  return `${normalized}${suffix}`;
+}
+
 export function SettingsPage(props: {
   showEmails: boolean;
   setShowEmails: Dispatch<SetStateAction<boolean>>;
@@ -85,6 +125,7 @@ export function SettingsPage(props: {
   });
   const [settingsDirtyFields, setSettingsDirtyFields] = useState<Set<keyof SettingDraft>>(() => new Set());
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
+  const [openSections, setOpenSections] = useState<Set<SettingSectionId>>(() => new Set(["model"]));
   const settingsDirty = settingsDirtyFields.size > 0;
 
   useEffect(() => {
@@ -136,6 +177,128 @@ export function SettingsPage(props: {
     (profile) => !excludedProfileIds.has(profile.profileId) && autoSwitchEligibility(profile).key === "ready",
   ).length;
   const autoSwitchBlockedCount = Math.max(0, autoSwitchTotalCount - autoSwitchExcludedCount - autoSwitchRuntimeReadyCount);
+  const modelCount = props.config?.modelCatalog.modelCount || props.config?.models.length || 0;
+  const wecomConfigured = Boolean(settingsDraft.wecomEnabled && settingsDraft.wecomCorpId.trim() && settingsDraft.wecomAgentId.trim());
+  const selectedModel = settingsDraft.defaultModel || props.config?.settings.defaultModel || "-";
+  const settingsSections: SettingSectionMeta[] = [
+    {
+      id: "model",
+      title: "模型配置",
+      description: "选择默认文本模型及同步模型目录",
+      icon: Layers3,
+      tone: "violet",
+      status: selectedModel,
+      statusTone: "success",
+      metrics: [`${modelCount} 个模型`, props.config?.modelCatalog.source ? `来源 ${props.config.modelCatalog.source}` : "来源 -"],
+    },
+    {
+      id: "wecom",
+      title: "账号与登录",
+      description: "企业微信登录与账号运行入口",
+      icon: UsersRound,
+      tone: "emerald",
+      status: settingsDraft.wecomEnabled ? (wecomConfigured ? "企业微信已启用" : "待补齐配置") : "企业微信未启用",
+      statusTone: settingsDraft.wecomEnabled ? (wecomConfigured ? "success" : "warn") : "muted",
+      metrics: [`${props.config?.profiles.length || 0} 个账号`, `${autoSwitchExcludedCount} 个排除`],
+    },
+    {
+      id: "proxy",
+      title: "代理与网络",
+      description: "上游代理设置与网络请求配置",
+      icon: Globe2,
+      tone: "blue",
+      status: settingsDraft.proxyEnabled ? "代理已启用" : "未启用代理",
+      statusTone: settingsDraft.proxyEnabled ? "info" : "muted",
+      metrics: [settingsDraft.proxyUrl || "未填写代理地址"],
+    },
+    {
+      id: "server",
+      title: "端口与网关",
+      description: "服务端口与网关地址配置",
+      icon: ServerCog,
+      tone: "indigo",
+      status: settingsDraft.serverPort || "-",
+      statusTone: "info",
+      metrics: [props.config?.restartSupported ? "支持重启生效" : "当前环境不支持重启"],
+    },
+    {
+      id: "runtime",
+      title: "账号运行策略",
+      description: "自动切换、请求轮换与并发控制",
+      icon: ShieldCheck,
+      tone: "green",
+      status: settingsDraft.accountRotationEnabled || settingsDraft.autoSwitchEnabled ? "已启用" : "未启用",
+      statusTone: settingsDraft.accountRotationEnabled || settingsDraft.autoSwitchEnabled ? "success" : "muted",
+      metrics: [`单账号并发 ${settingsDraft.accountMaxConcurrency}`, `额度刷新 ${settingsDraft.quotaSyncConcurrency}`],
+    },
+    {
+      id: "limits",
+      title: "生成限制",
+      description: "请求频率与用量限制配置",
+      icon: Gauge,
+      tone: "orange",
+      status: settingsDraft.imageLimitsEnabled ? "已启用" : "未启用",
+      statusTone: settingsDraft.imageLimitsEnabled ? "success" : "muted",
+      metrics: [`24h ${limitLabel(settingsDraft.imageLimitDaily)}`, `1h ${limitLabel(settingsDraft.imageLimitHourly)}`],
+    },
+    {
+      id: "rotation",
+      title: "不参与自动轮换名单",
+      description: "设置不参与自动切换的账号列表",
+      icon: KeyRound,
+      tone: "amber",
+      status: `${autoSwitchExcludedCount} 个账号`,
+      statusTone: autoSwitchExcludedCount > 0 ? "info" : "muted",
+      metrics: [`可轮换 ${autoSwitchRuntimeReadyCount}`, `不可用 ${autoSwitchBlockedCount}`],
+    },
+    {
+      id: "display",
+      title: "显示设置",
+      description: "界面显示与脱敏模式设置",
+      icon: MonitorCog,
+      tone: "slate",
+      status: props.showEmails ? "脱敏模式：开启" : "脱敏模式：关闭",
+      statusTone: props.showEmails ? "info" : "muted",
+      metrics: ["仅影响前端展示"],
+    },
+  ];
+
+  function toggleSection(sectionId: SettingSectionId) {
+    setOpenSections((current) => {
+      const next = new Set(current);
+      if (next.has(sectionId)) {
+        next.delete(sectionId);
+      } else {
+        next.add(sectionId);
+      }
+      return next;
+    });
+  }
+
+  function renderSectionHeader(section: SettingSectionMeta) {
+    const Icon = section.icon;
+    const isOpen = openSections.has(section.id);
+    return (
+      <button className="settings-config-header" type="button" onClick={() => toggleSection(section.id)} aria-expanded={isOpen}>
+        <span className={`settings-config-icon tone-${section.tone}`}>
+          <Icon size={25} />
+        </span>
+        <span className="settings-config-copy">
+          <strong>{section.title}</strong>
+          <span>{section.description}</span>
+        </span>
+        <span className="settings-config-meta">
+          <span className={`settings-status-chip tone-${section.statusTone || "muted"}`}>{section.status}</span>
+          {section.metrics?.map((metric) => (
+            <span className="settings-metric" key={metric}>
+              {metric}
+            </span>
+          ))}
+        </span>
+        <ChevronDown className={`settings-config-chevron ${isOpen ? "is-open" : ""}`} size={20} />
+      </button>
+    );
+  }
 
   async function saveSettings(options?: { restart?: boolean }) {
     const hasDirtyField = (...fields: Array<keyof SettingDraft>) => fields.some((field) => settingsDirtyFields.has(field));
@@ -372,7 +535,11 @@ export function SettingsPage(props: {
 
   return (
     <section className="settings-page">
-      <div className="settings-page-head settings-page-head-actions-only">
+      <div className="settings-page-head">
+        <div>
+          <h3>系统设置</h3>
+          <p className="hint">按运行域管理模型、登录、网络、网关和限额策略。展开卡片即可编辑对应配置。</p>
+        </div>
         <div className="settings-page-actions">
           <button className="btn-secondary" type="button" onClick={refreshModels} disabled={props.busy === "models"}>
             {props.busy === "models" ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
@@ -381,219 +548,307 @@ export function SettingsPage(props: {
         </div>
       </div>
 
-      <div className="settings-grid">
-        <section className="settings-section">
-          <h4>模型</h4>
-          <label className="field">
-            <span>默认文本模型</span>
-            <select className="control" value={settingsDraft.defaultModel} onChange={(event) => markSettingsDirty({ defaultModel: event.target.value })}>
-              {(props.config?.models || []).map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.id}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p className="hint">模型列表来源：{props.config?.modelCatalog.source || "-"}，共 {props.config?.modelCatalog.modelCount || 0} 个。</p>
-        </section>
-
-        <section className="settings-section wecom-section">
-          <h4>企业微信登录</h4>
-          <label className="switch-line">
-            <input type="checkbox" checked={settingsDraft.wecomEnabled} onChange={(event) => markSettingsDirty({ wecomEnabled: event.target.checked })} />
-            <span>启用企业微信扫码登录</span>
-          </label>
-          <label className="field">
-            <span>企业 ID</span>
-            <input className="input" value={settingsDraft.wecomCorpId} onChange={(event) => markSettingsDirty({ wecomCorpId: event.target.value })} placeholder="wwxxxxxxxxxxxxxxxx" />
-          </label>
-          <label className="field">
-            <span>AgentID</span>
-            <input className="input" value={settingsDraft.wecomAgentId} onChange={(event) => markSettingsDirty({ wecomAgentId: event.target.value })} placeholder="1000002" />
-          </label>
-          <label className="field">
-            <span>Secret</span>
-            <input className="input" type="password" value={settingsDraft.wecomSecret} onChange={(event) => markSettingsDirty({ wecomSecret: event.target.value })} placeholder="企业微信应用 Secret" />
-          </label>
-          <p className="hint">扫码成功后会按企业微信 UserId 自动创建普通用户，用户名格式为 wxwork:UserId。</p>
-        </section>
-
-        <section className="settings-section">
-          <h4>上游代理</h4>
-          <label className="switch-line">
-            <input type="checkbox" checked={settingsDraft.proxyEnabled} onChange={(event) => markSettingsDirty({ proxyEnabled: event.target.checked })} />
-            <span>启用 OAuth、模型刷新和接口转发代理</span>
-          </label>
-          <label className="field">
-            <span>代理地址</span>
-            <input className="input" value={settingsDraft.proxyUrl} onChange={(event) => markSettingsDirty({ proxyUrl: event.target.value })} placeholder="http://127.0.0.1:7890" />
-          </label>
-          <label className="field">
-            <span>No Proxy</span>
-            <input className="input" value={settingsDraft.proxyNoProxy} onChange={(event) => markSettingsDirty({ proxyNoProxy: event.target.value })} />
-          </label>
-          <button className="btn-secondary" type="button" onClick={testProxy} disabled={props.busy === "proxy"}>
-            测试代理
-          </button>
-        </section>
-
-        <section className="settings-section">
-          <h4>端口</h4>
-          <label className="field">
+      <div className="settings-overview">
+        <div className="settings-overview-card">
+          <span className="settings-overview-icon">
+            <Zap size={18} />
+          </span>
+          <div>
+            <span>默认模型</span>
+            <strong>{selectedModel}</strong>
+          </div>
+        </div>
+        <div className="settings-overview-card">
+          <span className="settings-overview-icon tone-green">
+            <Network size={18} />
+          </span>
+          <div>
+            <span>代理状态</span>
+            <strong>{settingsDraft.proxyEnabled ? "已启用" : "未启用"}</strong>
+          </div>
+        </div>
+        <div className="settings-overview-card">
+          <span className="settings-overview-icon tone-orange">
+            <Gauge size={18} />
+          </span>
+          <div>
+            <span>生成限制</span>
+            <strong>{enabledLabel(settingsDraft.imageLimitsEnabled)}</strong>
+          </div>
+        </div>
+        <div className="settings-overview-card">
+          <span className="settings-overview-icon tone-slate">
+            <ServerCog size={18} />
+          </span>
+          <div>
             <span>网关端口</span>
-            <input className="input" inputMode="numeric" type="number" min={1} max={65535} value={settingsDraft.serverPort} onChange={(event) => markSettingsDirty({ serverPort: event.target.value })} />
-          </label>
-          <p className="hint">修改后重启本地网关生效，桌面窗口不会退出。若端口被占用，启动时会自动顺延到下一个可用端口。</p>
-        </section>
-
-        <section className="settings-section">
-          <h4>账号运行策略</h4>
-          <label className="switch-line">
-            <input type="checkbox" checked={settingsDraft.accountRotationEnabled} onChange={(event) => markSettingsDirty({ accountRotationEnabled: event.target.checked })} />
-            <span>按请求轮换可用账号</span>
-          </label>
-          <label className="switch-line">
-            <input type="checkbox" checked={settingsDraft.autoSwitchEnabled} onChange={(event) => markSettingsDirty({ autoSwitchEnabled: event.target.checked })} />
-            <span>当前 API 账号额度耗尽后自动切换到下一个仍有额度的账号</span>
-          </label>
-          <label className="field">
-            <span>每账号最大并发数</span>
-            <input
-              className="input"
-              inputMode="numeric"
-              max={32}
-              min={1}
-              type="number"
-              value={settingsDraft.accountMaxConcurrency}
-              onChange={(event) => markSettingsDirty({ accountMaxConcurrency: event.target.value })}
-            />
-          </label>
-          <label className="field">
-            <span>全局额度刷新并发数</span>
-            <input
-              className="input"
-              inputMode="numeric"
-              max={32}
-              min={1}
-              type="number"
-              value={settingsDraft.quotaSyncConcurrency}
-              onChange={(event) => markSettingsDirty({ quotaSyncConcurrency: event.target.value })}
-            />
-          </label>
-          <p className="hint">请求轮换使用顺序轮询策略，并复用下方“不参与自动轮换名单”。每个账号最多同时处理指定数量的请求，超出的请求会显示为排队中。</p>
-          <p className="hint">手动刷新全部账号额度时使用，默认 3。账号很多可以调高，遇到限流或失败增多时调低。</p>
-          <p className="hint">{props.status}</p>
-        </section>
-
-        <section className="settings-section image-limit-section" id="image-limits">
-          <div className="image-limit-head">
-            <div>
-              <h4>生图限额</h4>
-              <p className="hint">对登录用户限制图片生成和图片编辑请求，0 表示不限制；未登录 API Key 请求不计入用户限额。</p>
-            </div>
-            <label className="switch-line">
-              <input type="checkbox" checked={settingsDraft.imageLimitsEnabled} onChange={(event) => markSettingsDirty({ imageLimitsEnabled: event.target.checked })} />
-              <span>启用</span>
-            </label>
+            <strong>{settingsDraft.serverPort || "-"}</strong>
           </div>
-
-          <div className="image-limit-grid">
-            <label className="field">
-              <span>每用户 24 小时上限</span>
-              <input className="input" inputMode="numeric" min={0} type="number" value={settingsDraft.imageLimitDaily} onChange={(event) => markSettingsDirty({ imageLimitDaily: event.target.value })} />
-            </label>
-            <label className="field">
-              <span>每用户 1 小时上限</span>
-              <input className="input" inputMode="numeric" min={0} type="number" value={settingsDraft.imageLimitHourly} onChange={(event) => markSettingsDirty({ imageLimitHourly: event.target.value })} />
-            </label>
-            <label className="field">
-              <span>两次生图最小间隔（秒）</span>
-              <input className="input" inputMode="numeric" min={0} max={86400} type="number" value={settingsDraft.imageLimitMinIntervalSeconds} onChange={(event) => markSettingsDirty({ imageLimitMinIntervalSeconds: event.target.value })} />
-            </label>
-          </div>
-
-          <p className="hint">单个数据库用户的覆盖值可在下方“数据库用户”表格里直接编辑；留空表示继承这里的全局限额。</p>
-        </section>
-
-        <section className="settings-section auto-switch-exclusion-section">
-          <div className="auto-switch-exclusion-head">
-            <div>
-              <h4>不参与自动轮换名单</h4>
-              <p className="hint">勾选表示手动排除。该名单同时作用于按请求轮换和额度耗尽后的自动切换。</p>
-            </div>
-            <div className="auto-switch-counts" aria-label="自动轮换账号统计">
-              <span className="count-pill is-included">可轮换 {autoSwitchRuntimeReadyCount} 个</span>
-              <span className="count-pill is-blocked">不可用 {autoSwitchBlockedCount} 个</span>
-              <span className="count-pill is-excluded">手动排除 {autoSwitchExcludedCount} 个</span>
-            </div>
-          </div>
-
-          <label className="auto-switch-search">
-            <Search size={16} />
-            <input value={autoSwitchSearch} onChange={(event) => setAutoSwitchSearch(event.target.value)} placeholder="搜索邮箱、账号 ID 或 Profile ID" />
-          </label>
-
-          <div className="auto-switch-profile-list">
-            {autoSwitchProfiles.length === 0 ? (
-              <div className="auto-switch-empty">还没有匹配的账号。</div>
-            ) : (
-              autoSwitchProfiles.map((profile) => {
-                const excluded = excludedProfileIds.has(profile.profileId);
-                const eligibility = autoSwitchEligibility(profile);
-                const health = profileHealth(profile);
-                const codexActive = isCodexActiveProfile(profile, props.config?.codex.accountId);
-                const disabledReason = eligibility.key === "ready" ? "" : eligibility.label;
-                const stateClass = excluded ? "is-excluded" : eligibility.key === "ready" ? "is-included" : "is-blocked";
-                const stateLabel = excluded ? "手动排除" : eligibility.label;
-                return (
-                  <label className={`auto-switch-profile-row ${excluded ? "is-excluded" : ""}`} key={profile.profileId}>
-                    <input type="checkbox" checked={excluded} onChange={(event) => toggleAutoSwitchExcludedProfile(profile.profileId, event.target.checked)} />
-                    <span className="auto-switch-profile-main">
-                      <strong>{profileLabel(profile, props.showEmails)}</strong>
-                      <span>
-                        {getPlanType(profile)} · {health.label}
-                        {profile.isActive ? " · 当前 API 使用中" : ""}
-                        {codexActive ? " · Codex 使用中" : ""}
-                        {disabledReason ? ` · ${disabledReason}` : ""}
-                      </span>
-                    </span>
-                    <span className={`auto-switch-state-pill ${stateClass}`}>{stateLabel}</span>
-                  </label>
-                );
-              })
-            )}
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <h4>显示</h4>
-          <label className="switch-line">
-            <input type="checkbox" checked={props.showEmails} onChange={(event) => props.setShowEmails(event.target.checked)} />
-            <span>脱敏模式</span>
-          </label>
-          <p className="hint">开启后账号邮箱将以脱敏形式展示。</p>
-        </section>
-
-        {props.role === "admin" ? (
-          <DatabaseUsersPanel
-            currentUser={props.currentUser}
-            imageLimitDefaults={{
-              perUserDaily: settingsDraft.imageLimitDaily,
-              perUserHourly: settingsDraft.imageLimitHourly,
-              minIntervalSeconds: settingsDraft.imageLimitMinIntervalSeconds,
-            }}
-            imageLimitOverrides={settingsDraft.imageLimitUserOverrides}
-            onImageLimitOverridesChange={(imageLimitUserOverrides) => markSettingsDirty({ imageLimitUserOverrides })}
-            setStatus={props.setStatus}
-          />
-        ) : null}
+        </div>
       </div>
 
-      <div className="settings-page-actions settings-page-footer-actions">
+      <div className="settings-config-list">
+        <section className={`settings-config-card ${openSections.has("model") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[0])}
+          {openSections.has("model") ? (
+            <div className="settings-config-body">
+              <div className="settings-form-grid two-columns">
+                <label className="field">
+                  <span>默认文本模型</span>
+                  <select className="control" value={settingsDraft.defaultModel} onChange={(event) => markSettingsDirty({ defaultModel: event.target.value })}>
+                    {(props.config?.models || []).map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="settings-info-box">
+                  <span>模型目录</span>
+                  <strong>{props.config?.modelCatalog.source || "-"}</strong>
+                  <p>当前可用 {modelCount} 个模型。需要最新目录时可点击右上角同步。</p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("wecom") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[1])}
+          {openSections.has("wecom") ? (
+            <div className="settings-config-body">
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={settingsDraft.wecomEnabled} onChange={(event) => markSettingsDirty({ wecomEnabled: event.target.checked })} />
+                <span>
+                  <strong>启用企业微信扫码登录</strong>
+                  <em>扫码成功后会按企业微信 UserId 自动创建普通用户，用户名格式为 wxwork:UserId。</em>
+                </span>
+              </label>
+              <div className="settings-form-grid three-columns">
+                <label className="field">
+                  <span>企业 ID</span>
+                  <input className="input" value={settingsDraft.wecomCorpId} onChange={(event) => markSettingsDirty({ wecomCorpId: event.target.value })} placeholder="wwxxxxxxxxxxxxxxxx" />
+                </label>
+                <label className="field">
+                  <span>AgentID</span>
+                  <input className="input" value={settingsDraft.wecomAgentId} onChange={(event) => markSettingsDirty({ wecomAgentId: event.target.value })} placeholder="1000002" />
+                </label>
+                <label className="field">
+                  <span>Secret</span>
+                  <input className="input" type="password" value={settingsDraft.wecomSecret} onChange={(event) => markSettingsDirty({ wecomSecret: event.target.value })} placeholder="企业微信应用 Secret" />
+                </label>
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("proxy") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[2])}
+          {openSections.has("proxy") ? (
+            <div className="settings-config-body">
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={settingsDraft.proxyEnabled} onChange={(event) => markSettingsDirty({ proxyEnabled: event.target.checked })} />
+                <span>
+                  <strong>启用 OAuth、模型刷新和接口转发代理</strong>
+                  <em>适用于本机代理或内网代理场景。</em>
+                </span>
+              </label>
+              <div className="settings-form-grid two-columns">
+                <label className="field">
+                  <span>代理地址</span>
+                  <input className="input" value={settingsDraft.proxyUrl} onChange={(event) => markSettingsDirty({ proxyUrl: event.target.value })} placeholder="http://127.0.0.1:7890" />
+                </label>
+                <label className="field">
+                  <span>No Proxy</span>
+                  <input className="input" value={settingsDraft.proxyNoProxy} onChange={(event) => markSettingsDirty({ proxyNoProxy: event.target.value })} />
+                </label>
+              </div>
+              <div className="settings-inline-actions">
+                <button className="btn-secondary" type="button" onClick={testProxy} disabled={props.busy === "proxy"}>
+                  {props.busy === "proxy" ? <Loader2 className="spin" size={16} /> : <Network size={16} />}
+                  测试代理
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("server") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[3])}
+          {openSections.has("server") ? (
+            <div className="settings-config-body">
+              <div className="settings-form-grid two-columns">
+                <label className="field">
+                  <span>网关端口</span>
+                  <input className="input" inputMode="numeric" type="number" min={1} max={65535} value={settingsDraft.serverPort} onChange={(event) => markSettingsDirty({ serverPort: event.target.value })} />
+                </label>
+                <div className="settings-info-box">
+                  <span>生效方式</span>
+                  <strong>{props.config?.restartSupported ? "保存并重启网关" : "保存后手动重启"}</strong>
+                  <p>若端口被占用，启动时会自动顺延到下一个可用端口。</p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("runtime") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[4])}
+          {openSections.has("runtime") ? (
+            <div className="settings-config-body">
+              <div className="settings-toggle-grid">
+                <label className="settings-toggle-row">
+                  <input type="checkbox" checked={settingsDraft.accountRotationEnabled} onChange={(event) => markSettingsDirty({ accountRotationEnabled: event.target.checked })} />
+                  <span>
+                    <strong>按请求轮换可用账号</strong>
+                    <em>使用顺序轮询策略，并复用“不参与自动轮换名单”。</em>
+                  </span>
+                </label>
+                <label className="settings-toggle-row">
+                  <input type="checkbox" checked={settingsDraft.autoSwitchEnabled} onChange={(event) => markSettingsDirty({ autoSwitchEnabled: event.target.checked })} />
+                  <span>
+                    <strong>额度耗尽后自动切换账号</strong>
+                    <em>当前 API 账号额度耗尽后切换到下一个仍有额度的账号。</em>
+                  </span>
+                </label>
+              </div>
+              <div className="settings-form-grid two-columns">
+                <label className="field">
+                  <span>每账号最大并发数</span>
+                  <input
+                    className="input"
+                    inputMode="numeric"
+                    max={32}
+                    min={1}
+                    type="number"
+                    value={settingsDraft.accountMaxConcurrency}
+                    onChange={(event) => markSettingsDirty({ accountMaxConcurrency: event.target.value })}
+                  />
+                </label>
+                <label className="field">
+                  <span>全局额度刷新并发数</span>
+                  <input
+                    className="input"
+                    inputMode="numeric"
+                    max={32}
+                    min={1}
+                    type="number"
+                    value={settingsDraft.quotaSyncConcurrency}
+                    onChange={(event) => markSettingsDirty({ quotaSyncConcurrency: event.target.value })}
+                  />
+                </label>
+              </div>
+              {props.status ? <p className="settings-status-note">{props.status}</p> : null}
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("limits") ? "is-open" : ""}`} id="image-limits">
+          {renderSectionHeader(settingsSections[5])}
+          {openSections.has("limits") ? (
+            <div className="settings-config-body">
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={settingsDraft.imageLimitsEnabled} onChange={(event) => markSettingsDirty({ imageLimitsEnabled: event.target.checked })} />
+                <span>
+                  <strong>启用登录用户生图限额</strong>
+                  <em>对图片生成和图片编辑请求生效，0 表示不限制；未登录 API Key 请求不计入用户限额。</em>
+                </span>
+              </label>
+              <div className="settings-form-grid three-columns">
+                <label className="field">
+                  <span>每用户 24 小时上限</span>
+                  <input className="input" inputMode="numeric" min={0} type="number" value={settingsDraft.imageLimitDaily} onChange={(event) => markSettingsDirty({ imageLimitDaily: event.target.value })} />
+                </label>
+                <label className="field">
+                  <span>每用户 1 小时上限</span>
+                  <input className="input" inputMode="numeric" min={0} type="number" value={settingsDraft.imageLimitHourly} onChange={(event) => markSettingsDirty({ imageLimitHourly: event.target.value })} />
+                </label>
+                <label className="field">
+                  <span>两次生图最小间隔（秒）</span>
+                  <input className="input" inputMode="numeric" min={0} max={86400} type="number" value={settingsDraft.imageLimitMinIntervalSeconds} onChange={(event) => markSettingsDirty({ imageLimitMinIntervalSeconds: event.target.value })} />
+                </label>
+              </div>
+              <p className="settings-status-note">单个数据库用户的覆盖值可在“用户管理”页面直接编辑；留空表示继承这里的全局限额。</p>
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("rotation") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[6])}
+          {openSections.has("rotation") ? (
+            <div className="settings-config-body">
+              <div className="auto-switch-counts" aria-label="自动轮换账号统计">
+                <span className="count-pill is-included">可轮换 {autoSwitchRuntimeReadyCount} 个</span>
+                <span className="count-pill is-blocked">不可用 {autoSwitchBlockedCount} 个</span>
+                <span className="count-pill is-excluded">手动排除 {autoSwitchExcludedCount} 个</span>
+              </div>
+              <p className="settings-status-note">勾选表示手动排除。该名单同时作用于按请求轮换和额度耗尽后的自动切换。</p>
+              <label className="auto-switch-search">
+                <Search size={16} />
+                <input value={autoSwitchSearch} onChange={(event) => setAutoSwitchSearch(event.target.value)} placeholder="搜索邮箱、账号 ID 或 Profile ID" />
+              </label>
+
+              <div className="auto-switch-profile-list">
+                {autoSwitchProfiles.length === 0 ? (
+                  <div className="auto-switch-empty">还没有匹配的账号。</div>
+                ) : (
+                  autoSwitchProfiles.map((profile) => {
+                    const excluded = excludedProfileIds.has(profile.profileId);
+                    const eligibility = autoSwitchEligibility(profile);
+                    const health = profileHealth(profile);
+                    const codexActive = isCodexActiveProfile(profile, props.config?.codex.accountId);
+                    const disabledReason = eligibility.key === "ready" ? "" : eligibility.label;
+                    const stateClass = excluded ? "is-excluded" : eligibility.key === "ready" ? "is-included" : "is-blocked";
+                    const stateLabel = excluded ? "手动排除" : eligibility.label;
+                    return (
+                      <label className={`auto-switch-profile-row ${excluded ? "is-excluded" : ""}`} key={profile.profileId}>
+                        <input type="checkbox" checked={excluded} onChange={(event) => toggleAutoSwitchExcludedProfile(profile.profileId, event.target.checked)} />
+                        <span className="auto-switch-profile-main">
+                          <strong>{profileLabel(profile, props.showEmails)}</strong>
+                          <span>
+                            {getPlanType(profile)} · {health.label}
+                            {profile.isActive ? " · 当前 API 使用中" : ""}
+                            {codexActive ? " · Codex 使用中" : ""}
+                            {disabledReason ? ` · ${disabledReason}` : ""}
+                          </span>
+                        </span>
+                        <span className={`auto-switch-state-pill ${stateClass}`}>{stateLabel}</span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("display") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[7])}
+          {openSections.has("display") ? (
+            <div className="settings-config-body">
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={props.showEmails} onChange={(event) => props.setShowEmails(event.target.checked)} />
+                <span>
+                  <strong>脱敏模式</strong>
+                  <em>开启后账号邮箱将以脱敏形式展示。</em>
+                </span>
+              </label>
+            </div>
+          ) : null}
+        </section>
+      </div>
+
+      <div className={`settings-save-bar ${settingsDirty ? "is-dirty" : ""}`}>
+        <div>
+          <strong>{settingsDirty ? "有未保存的设置" : "设置已同步"}</strong>
+          <span>{settingsDirty ? "保存后才会写入网关配置。" : "展开配置卡片可继续调整策略。"}</span>
+        </div>
         <button className="btn-secondary" type="button" onClick={() => void saveSettings()} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty}>
+          {props.busy === "settings" ? <Loader2 className="spin" size={16} /> : null}
           保存设置
         </button>
         <button className="btn-primary" type="button" onClick={() => void saveSettings({ restart: true })} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty || !props.config?.restartSupported}>
+          {props.busy === "restart" ? <Loader2 className="spin" size={16} /> : null}
           保存并重启网关
         </button>
       </div>

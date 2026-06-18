@@ -92,6 +92,11 @@
   gap: 4px;
 }
 
+.nav-group {
+  display: grid;
+  gap: 3px;
+}
+
 .nav-item {
   width: 100%;
   min-height: 36px;
@@ -104,6 +109,19 @@
   background: transparent;
   color: var(--text-soft);
   text-align: left;
+}
+
+.nav-subitems {
+  display: grid;
+  gap: 3px;
+  padding-left: 22px;
+}
+
+.nav-subitem {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 9px;
+  font-size: 13px;
 }
 
 .nav-item.is-active,

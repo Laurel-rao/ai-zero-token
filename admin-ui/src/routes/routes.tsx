@@ -1,12 +1,13 @@
-import { BarChart3, BookOpenText, Home, Image, ImageUp, LayoutDashboard, ListChecks, Settings, ShieldCheck, Users, Wifi, type LucideIcon } from "lucide-react";
+import { BarChart3, BookOpenText, Home, Image, ImageUp, LayoutDashboard, ListChecks, Settings, ShieldCheck, UserCog, Users, Wifi, type LucideIcon } from "lucide-react";
 
-export type AppRoute = "launch" | "overview" | "accounts" | "generate" | "usage" | "tester" | "image-bed" | "docs" | "network" | "logs" | "settings";
+export type AppRoute = "launch" | "overview" | "accounts" | "generate" | "usage" | "tester" | "image-bed" | "docs" | "network" | "logs" | "settings" | "settings-users";
 export type UserRole = "admin" | "user";
 
 export type NavRoute = {
   id: AppRoute;
   label: string;
   icon: LucideIcon;
+  parentId?: AppRoute;
 };
 
 export const routes: NavRoute[] = [
@@ -21,6 +22,7 @@ export const routes: NavRoute[] = [
   { id: "network", label: "网络检测", icon: Wifi },
   { id: "logs", label: "请求日志", icon: ListChecks },
   { id: "settings", label: "系统设置", icon: Settings },
+  { id: "settings-users", label: "用户管理", icon: UserCog, parentId: "settings" },
 ];
 
 const userRoutes = new Set<AppRoute>(["generate", "logs"]);

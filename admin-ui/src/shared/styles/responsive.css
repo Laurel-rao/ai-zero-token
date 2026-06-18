@@ -31,6 +31,17 @@
     padding-bottom: 2px;
   }
 
+  .nav-group {
+    display: flex;
+    gap: 4px;
+  }
+
+  .nav-subitems {
+    display: flex;
+    gap: 4px;
+    padding-left: 0;
+  }
+
   .nav-item {
     justify-content: center;
   }
@@ -81,6 +92,11 @@
     grid-template-columns: none;
     grid-auto-flow: column;
     grid-auto-columns: max-content;
+  }
+
+  .nav-group,
+  .nav-subitems {
+    display: contents;
   }
 
   .nav-item {

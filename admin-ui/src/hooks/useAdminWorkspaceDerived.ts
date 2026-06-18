@@ -48,6 +48,7 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
     network: "单页总览 IPv4、IPv6、DNS、WebRTC、常用平台和版本状态。",
     logs: "查看本页快速测试产生的最近请求，包含接口、模型、状态和耗时。",
     settings: "调整本地网关、默认模型、代理和自动切换策略的桌面设置页。",
+    "settings-users": "管理数据库登录用户，并为具体用户设置生图限额覆盖。",
   };
 
   return {

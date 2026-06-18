@@ -11,6 +11,7 @@ const TesterPage = lazy(() => import("@/pages/tester").then((module) => ({ defau
 const ImageBedPage = lazy(() => import("@/pages/image-bed").then((module) => ({ default: module.ImageBedPage })));
 const NetworkDetectPage = lazy(() => import("@/pages/network-detect").then((module) => ({ default: module.NetworkDetectPage })));
 const SettingsPage = lazy(() => import("@/pages/settings").then((module) => ({ default: module.SettingsPage })));
+const SettingsUsersPage = lazy(() => import("@/pages/settings/users").then((module) => ({ default: module.SettingsUsersPage })));
 const LogsPage = lazy(() => import("@/pages/logs").then((module) => ({ default: module.LogsPage })));
 
 function RouteLoading() {
@@ -109,6 +110,15 @@ export function RouteRenderer({ workspace }: { workspace: UseAdminWorkspaceResul
         setConfig={workspace.setConfig}
         setStatus={workspace.setStatus}
         refreshConfig={refreshConfig}
+      />
+    ) : activeRoute === "settings-users" ? (
+      <SettingsUsersPage
+        currentUser={workspace.currentUser}
+        config={config}
+        busy={busy}
+        setBusy={workspace.setBusy}
+        setConfig={workspace.setConfig}
+        setStatus={workspace.setStatus}
       />
     ) : (
       <LogsPage
