@@ -13,6 +13,12 @@ type ImageRatio = "1:1" | "16:9" | "9:16" | "4:3";
 type OutputFormat = "png" | "webp" | "jpeg";
 type PreviewRatioClass = "ratio-square" | "ratio-wide" | "ratio-tall" | "ratio-classic";
 type ReferenceImageState = { src: string; previewSrc: string; name: string; size: number };
+type GenerateRunSummary = {
+  durationMs: number;
+  waitDurationMs?: number;
+  status: "idle" | "running" | "success" | "limited" | "failed";
+  message: string;
+};
 
 type ChatCompletionResponse = {
   choices?: Array<{
@@ -173,6 +179,19 @@ function generateStatusMeta(status: GenerateHistoryItem["status"]): { className:
   if (status === "queued") return { className: "is-queued", label: "排队中" };
   if (status === "running") return { className: "is-running", label: "处理中" };
   return { className: "is-failed", label: "失败" };
+}
+
+function extractErrorMessage(payload: unknown, fallback: string): string {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "error" in payload &&
+    typeof (payload as { error?: { message?: unknown } }).error?.message === "string"
+  ) {
+    return (payload as { error: { message: string } }).error.message;
+  }
+
+  return fallback;
 }
 
 function formatReportBucketLabel(value: number, bucketMs: number): string {
@@ -429,6 +448,7 @@ export function GeneratePage(props: {
   const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
   const [elapsedNow, setElapsedNow] = useState(0);
   const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
+  const [runSummary, setRunSummary] = useState<GenerateRunSummary | null>(null);
   const generatingRef = useRef(false);
 
   const selectedSize = useMemo(() => ratioOptions.find((item) => item.ratio === ratio)?.size ?? "1024x1024", [ratio]);
@@ -731,6 +751,11 @@ export function GeneratePage(props: {
     setGenerationStartedAt(startedAt);
     setElapsedNow(0);
     setLastDurationMs(null);
+    setRunSummary({
+      durationMs: 0,
+      status: "running",
+      message: "正在生成图片...",
+    });
     setResponseBody("正在生成图片...");
     setResultImages([]);
     try {
@@ -772,25 +797,34 @@ export function GeneratePage(props: {
       refreshHistory({ silent: true }).catch(() => undefined);
 
       if (!response.ok) {
-        const message =
-          parsed &&
-          typeof parsed === "object" &&
-          "error" in parsed &&
-          typeof (parsed as { error?: { message?: unknown } }).error?.message === "string"
-            ? (parsed as { error: { message: string } }).error.message
-            : `HTTP ${response.status}`;
+        const message = extractErrorMessage(parsed, `HTTP ${response.status}`);
+        setRunSummary({
+          durationMs,
+          status: response.status === 429 ? "limited" : "failed",
+          message,
+        });
         props.setStatus(`生图失败：${message}`);
         return;
       }
 
       if (parsed === null || typeof parsed === "undefined" || parsed === "") {
         setResponseBody("响应为空：服务端没有返回图片或错误详情，请查看历史/请求日志。");
+        setRunSummary({
+          durationMs,
+          status: "failed",
+          message: "服务端返回空响应。",
+        });
         props.setStatus("生图异常：服务端返回空响应，已刷新服务端历史。");
         return;
       }
 
       const images = extractPreviewImages(parsed);
       setResultImages(images);
+      setRunSummary({
+        durationMs,
+        status: images.length > 0 ? "success" : "failed",
+        message: images.length > 0 ? "生图完成。" : "请求成功，但响应里没有图片。",
+      });
       props.setRequestLogs((items) => [
         {
           id: createClientId("request"),
@@ -808,8 +842,16 @@ export function GeneratePage(props: {
       props.setStatus(images.length > 0 ? `生图完成，耗时 ${formatDuration(durationMs)}。` : "生图异常：请求成功，但响应里没有图片。");
       props.refreshConfig({ silent: true }).catch(() => undefined);
     } catch (error) {
-      setResponseBody(errorMessage(error));
-      props.setStatus(`生图失败：${errorMessage(error)}`);
+      const message = errorMessage(error);
+      const durationMs = performance.now() - startedAt;
+      setLastDurationMs(durationMs);
+      setRunSummary({
+        durationMs,
+        status: "failed",
+        message,
+      });
+      setResponseBody(message);
+      props.setStatus(`生图失败：${message}`);
     } finally {
       generatingRef.current = false;
       setGenerationStartedAt(null);
@@ -996,10 +1038,22 @@ export function GeneratePage(props: {
               {referenceImage ? <img className="reference-preview" src={referenceImage.previewSrc} alt="参考图预览" /> : null}
             </details>
 
-            {(props.busy === "test" || lastDurationMs !== null) ? (
-              <div className="generate-duration">
-                <span>{props.busy === "test" ? "已用时" : "上次耗时"}</span>
-                <strong>{formatGenerateElapsed(props.busy === "test" ? elapsedNow : lastDurationMs ?? 0)}</strong>
+            {(props.busy === "test" || runSummary || lastDurationMs !== null) ? (
+              <div className={`generate-duration ${runSummary?.status ? `is-${runSummary.status}` : ""}`}>
+                <span>排队 {formatGenerateElapsed(runSummary?.waitDurationMs ?? 0)}</span>
+                <strong>耗时 {formatGenerateElapsed(props.busy === "test" ? elapsedNow : runSummary?.durationMs ?? lastDurationMs ?? 0)}</strong>
+                <em>
+                  {props.busy === "test"
+                    ? "生成中"
+                    : runSummary?.status === "success"
+                      ? "成功"
+                      : runSummary?.status === "limited"
+                        ? "限额限制"
+                        : runSummary?.status === "failed"
+                          ? "失败"
+                          : "待开始"}
+                </em>
+                <small title={runSummary?.message || ""}>{runSummary?.message || "等待提交生图请求。"}</small>
               </div>
             ) : null}
 
