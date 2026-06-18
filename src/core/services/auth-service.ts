@@ -492,7 +492,11 @@ export class AuthService {
   private async maybeAutoSwitchProfile(profile: OAuthProfile, provider: ProviderId): Promise<OAuthProfile> {
     const settings = await this.configService.getSettings();
     const excludedProfileIds = new Set(settings.autoSwitch.excludedProfileIds);
-    if (!settings.autoSwitch.enabled || excludedProfileIds.has(profile.profileId) || !this.shouldLeaveActiveProfile(profile)) {
+    if (
+      (!settings.autoSwitch.enabled && !settings.accountRotation.enabled) ||
+      excludedProfileIds.has(profile.profileId) ||
+      !this.shouldLeaveActiveProfile(profile)
+    ) {
       return profile;
     }
 
@@ -553,10 +557,68 @@ export class AuthService {
 
     console.info("[auth] auto switched active profile", {
       provider,
-      reason: this.hasInvalidAuthStatus(profile) ? "auth_error" : "quota_exhausted",
+      reason: settings.autoSwitch.enabled
+        ? this.hasInvalidAuthStatus(profile) ? "auth_error" : "quota_exhausted"
+        : "rotation_fallback",
       fromProfileId: profile.profileId,
       toProfileId: activated.profileId,
       avoidedCodexAccount: Boolean(codexAccountId && this.resolveCodexAccountId(activated) !== codexAccountId),
+    });
+    return this.toManagedProfile(activated);
+  }
+
+  private async maybeRotateProfileForRequest(profile: OAuthProfile, provider: ProviderId): Promise<OAuthProfile> {
+    const settings = await this.configService.getSettings();
+    if (!settings.accountRotation.enabled) {
+      return profile;
+    }
+
+    const excludedProfileIds = new Set(settings.autoSwitch.excludedProfileIds);
+    const profiles = await listProfiles();
+    const currentIndex = profiles.findIndex((item) => item.profileId === profile.profileId);
+    const candidates = profiles
+      .map((item, index) => {
+        const rawDistance = currentIndex >= 0
+          ? (index - currentIndex + profiles.length) % profiles.length
+          : index + 1;
+        return {
+          profile: item,
+          index,
+          distance: rawDistance === 0 ? profiles.length : rawDistance,
+        };
+      })
+      .filter((item) => item.profile.provider === provider)
+      .filter((item) => !excludedProfileIds.has(item.profile.profileId))
+      .filter((item) => this.canEnterAutoSwitchPool(item.profile))
+      .sort((left, right) => {
+        const distanceDiff = left.distance - right.distance;
+        if (distanceDiff !== 0) {
+          return distanceDiff;
+        }
+
+        const usageDiff = this.getQuotaUsageScore(left.profile) - this.getQuotaUsageScore(right.profile);
+        if (usageDiff !== 0) {
+          return usageDiff;
+        }
+
+        return left.index - right.index;
+      });
+
+    const nextProfile = candidates[0]?.profile;
+    if (!nextProfile || nextProfile.profileId === profile.profileId) {
+      return profile;
+    }
+
+    const activated = await setActiveProfile(nextProfile.profileId);
+    if (!activated) {
+      return profile;
+    }
+
+    console.info("[auth] rotated active profile for request", {
+      provider,
+      strategy: settings.accountRotation.strategy,
+      fromProfileId: profile.profileId,
+      toProfileId: activated.profileId,
     });
     return this.toManagedProfile(activated);
   }
@@ -737,13 +799,15 @@ export class AuthService {
 
   async requireUsableProfile(
     provider: ProviderId = "openai-codex",
-    options?: { skipAutoSwitch?: boolean },
+    options?: { skipAutoSwitch?: boolean; skipRequestRotation?: boolean },
   ): Promise<OAuthProfile> {
     const activeProfile = await this.getActiveProfile(provider);
     const profile = activeProfile
       ? options?.skipAutoSwitch
         ? activeProfile
-        : await this.maybeAutoSwitchProfile(activeProfile, provider)
+        : options?.skipRequestRotation
+          ? await this.maybeAutoSwitchProfile(activeProfile, provider)
+          : await this.maybeRotateProfileForRequest(await this.maybeAutoSwitchProfile(activeProfile, provider), provider)
       : null;
     if (!profile) {
       throw new Error(`还没有登录 ${provider}。先运行 azt login`);
@@ -787,6 +851,7 @@ export class AuthService {
       try {
         profile = await this.requireUsableProfile(provider, {
           skipAutoSwitch: options?.skipAutoSwitch,
+          skipRequestRotation: attempt > 0,
         });
       } catch (error) {
         lastError = error;
@@ -873,6 +938,7 @@ export class AuthService {
     try {
       profile = await this.requireUsableProfile(provider, {
         skipAutoSwitch: options?.skipAutoSwitch,
+        skipRequestRotation: true,
       });
     } catch (error) {
       if (options?.suppressErrors) {

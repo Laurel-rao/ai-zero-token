@@ -28,6 +28,7 @@ export function createGatewayContext() {
   const imageService = new ImageService({
     authService,
     configService,
+    requestThrottleService,
   });
 
   return {

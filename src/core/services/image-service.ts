@@ -3,6 +3,7 @@ import { ConfigService } from "./config-service.js";
 import { askOpenAICodex } from "../providers/openai-codex/chat.js";
 import { generateChatGPTWebImage } from "../providers/openai-codex/chatgpt-web-image.js";
 import type { OAuthProfile } from "../types.js";
+import { RequestThrottleService } from "./request-throttle-service.js";
 type ImageRequest = {
   prompt: string;
   model?: string;
@@ -16,6 +17,12 @@ type ImageRequest = {
   outputFormat?: "png" | "webp" | "jpeg";
   outputCompression?: number;
   moderation?: "auto" | "low";
+};
+
+type ImageRequestLifecycle = {
+  requestId?: string;
+  onQueued?: () => void | Promise<void>;
+  onStart?: (profile: OAuthProfile) => void | Promise<void>;
 };
 
 type ImageResult = {
@@ -41,6 +48,7 @@ type ImageResult = {
     };
     total_tokens: number;
   };
+  _gatewayProfile?: OAuthProfile;
 };
 
 type ImageGenerationOutput = {
@@ -462,11 +470,18 @@ function isFreePlan(profile: OAuthProfile): boolean {
   return profile.quota?.planType?.toLowerCase() === "free";
 }
 
+function attachGatewayProfileToError(error: unknown, profile: OAuthProfile): void {
+  if (error && typeof error === "object") {
+    (error as { _gatewayProfile?: OAuthProfile })._gatewayProfile = profile;
+  }
+}
+
 export class ImageService {
   constructor(
     private readonly deps: {
       authService: AuthService;
       configService: ConfigService;
+      requestThrottleService: RequestThrottleService;
     },
   ) {}
 
@@ -482,10 +497,8 @@ export class ImageService {
     return model;
   }
 
-  async generate(request: ImageRequest): Promise<ImageResult> {
-    const profile = await this.deps.authService.requireUsableProfile("openai-codex", {
-      skipAutoSwitch: true,
-    });
+  async generate(request: ImageRequest, lifecycle?: ImageRequestLifecycle): Promise<ImageResult> {
+    const profile = await this.deps.authService.requireUsableProfile("openai-codex");
     const orchestratorModel = IMAGE_ORCHESTRATOR_MODEL;
     const requestedImageModel = this.resolveRequestedImageModel(request.model);
     const settings = await this.deps.configService.getSettings();
@@ -508,23 +521,37 @@ export class ImageService {
     if (isFreePlan(profile) && settings.image.freeAccountWebGenerationEnabled) {
       try {
         console.info("[gateway:image] using ChatGPT web image route for Free profile", requestSummary);
-        const response = await generateChatGPTWebImage({
+        const response = await this.deps.requestThrottleService.runForProfile(
           profile,
-          prompt: request.prompt,
-          model: requestedImageModel,
-          inputImages: request.inputImages,
-          size: request.size,
-          responseFormat: "b64_json",
-        });
+          () => generateChatGPTWebImage({
+            profile,
+            prompt: request.prompt,
+            model: requestedImageModel,
+            inputImages: request.inputImages,
+            size: request.size,
+            responseFormat: "b64_json",
+          }),
+          {
+            requestId: lifecycle?.requestId,
+            route: "images/chatgpt-web",
+            model: requestedImageModel,
+            onQueued: lifecycle?.onQueued,
+            onStart: () => lifecycle?.onStart?.(profile),
+          },
+        );
         await this.deps.authService.recordProfileRequestSuccess(profile.profileId, undefined, "openai-codex");
         console.info("[gateway:image] ChatGPT web image response", {
           ...requestSummary,
           imageCount: response.data.length,
           firstImageBase64Length: response.data[0]?.b64_json.length ?? 0,
         });
-        return response;
+        return {
+          ...response,
+          _gatewayProfile: profile,
+        };
       } catch (error) {
         await this.deps.authService.recordProfileRequestFailure(profile.profileId, error, undefined, "openai-codex");
+        attachGatewayProfileToError(error, profile);
         throw error;
       }
     }
@@ -559,37 +586,48 @@ export class ImageService {
     for (let attempt = 1; attempt <= IMAGE_GENERATION_MAX_ATTEMPTS; attempt += 1) {
       let result;
       try {
-        result = await askOpenAICodex({
+        result = await this.deps.requestThrottleService.runForProfile(
           profile,
-          model: orchestratorModel,
-          bodyOverride: {
+          () => askOpenAICodex({
+            profile,
             model: orchestratorModel,
-            input: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "input_text",
-                    text: request.prompt,
-                  },
-                  ...(request.inputImages ?? []).map((image) => ({
-                    type: "input_image",
-                    image_url: image.imageUrl,
-                  })),
-                ],
+            bodyOverride: {
+              model: orchestratorModel,
+              input: [
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "input_text",
+                      text: request.prompt,
+                    },
+                    ...(request.inputImages ?? []).map((image) => ({
+                      type: "input_image",
+                      image_url: image.imageUrl,
+                    })),
+                  ],
+                },
+              ],
+              tools: [tool],
+              tool_choice: {
+                type: "image_generation",
               },
-            ],
-            tools: [tool],
-            tool_choice: {
-              type: "image_generation",
+              include: ["reasoning.encrypted_content"],
             },
-            include: ["reasoning.encrypted_content"],
+          }),
+          {
+            requestId: lifecycle?.requestId,
+            route: request.inputImages && request.inputImages.length > 0 ? "images/edits" : "images/generations",
+            model: orchestratorModel,
+            onQueued: lifecycle?.onQueued,
+            onStart: () => lifecycle?.onStart?.(profile),
           },
-        });
+        );
         await this.deps.authService.recordProfileRequestSuccess(profile.profileId, result.quota, "openai-codex");
       } catch (error) {
         const quota = (error as { quota?: import("../types.js").CodexQuotaSnapshot }).quota;
         await this.deps.authService.recordProfileRequestFailure(profile.profileId, error, quota, "openai-codex");
+        attachGatewayProfileToError(error, profile);
         throw error;
       }
 
@@ -631,21 +669,34 @@ export class ImageService {
               attempt,
               debug: debugSummary,
             });
-            const fallbackResponse = await generateChatGPTWebImage({
+            const fallbackResponse = await this.deps.requestThrottleService.runForProfile(
               profile,
-              prompt: request.prompt,
-              model: requestedImageModel,
-              inputImages: request.inputImages,
-              size: request.size,
-              responseFormat: "b64_json",
-            });
+              () => generateChatGPTWebImage({
+                profile,
+                prompt: request.prompt,
+                model: requestedImageModel,
+                inputImages: request.inputImages,
+                size: request.size,
+                responseFormat: "b64_json",
+              }),
+              {
+                requestId: lifecycle?.requestId,
+                route: "images/chatgpt-web-fallback",
+                model: requestedImageModel,
+                onQueued: lifecycle?.onQueued,
+                onStart: () => lifecycle?.onStart?.(profile),
+              },
+            );
             await this.deps.authService.recordProfileRequestSuccess(profile.profileId, undefined, "openai-codex");
             console.info("[gateway:image] ChatGPT web image fallback response", {
               ...requestSummary,
               imageCount: fallbackResponse.data.length,
               firstImageBase64Length: fallbackResponse.data[0]?.b64_json.length ?? 0,
             });
-            return fallbackResponse;
+            return {
+              ...fallbackResponse,
+              _gatewayProfile: profile,
+            };
           } catch (fallbackError) {
             console.warn("[gateway:image] ChatGPT web image fallback failed", {
               ...requestSummary,
@@ -658,7 +709,7 @@ export class ImageService {
       }
 
       const first = images[0];
-      const imageResult = {
+      const imageResult: ImageResult = {
         created:
           typeof response?.created_at === "number"
             ? response.created_at
@@ -672,6 +723,7 @@ export class ImageService {
         quality: normalizeReturnedQuality(first.quality),
         size: normalizeReturnedSize(first.size, request.size),
         usage: extractImageUsage(raw),
+        _gatewayProfile: profile,
       };
 
       console.info("[gateway:image] upstream response", {

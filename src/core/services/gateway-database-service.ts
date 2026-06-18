@@ -48,8 +48,9 @@ export type GenerationHistoryItem = {
   id: string;
   owner?: string;
   createdAt: number;
+  startedAt?: number;
   updatedAt: number;
-  status: "running" | "success" | "failed";
+  status: "queued" | "running" | "success" | "failed";
   endpoint: string;
   account: string;
   model: string;
@@ -59,6 +60,7 @@ export type GenerationHistoryItem = {
   quality?: string;
   outputFormat?: string;
   durationMs: number;
+  waitDurationMs: number;
   request: Record<string, unknown>;
   responseSummary?: Record<string, unknown>;
   error?: string;
@@ -66,11 +68,17 @@ export type GenerationHistoryItem = {
   images: GenerationImageAsset[];
 };
 
+export type GenerationLimitUsage = {
+  sinceCount: number;
+  lastCreatedAt?: number;
+};
+
 type SaveGenerationParams = {
   id?: string;
   owner?: string;
   createdAt?: number;
-  status: "running" | "success" | "failed";
+  startedAt?: number;
+  status: "queued" | "running" | "success" | "failed";
   endpoint: string;
   account: string;
   model: string;
@@ -201,6 +209,19 @@ function clampLimit(limit: number | undefined, max: number): number {
   return Math.max(1, Math.min(limit ?? 100, max));
 }
 
+function calculateWaitDurationMs(createdAt: number, startedAt: number | undefined, status: string, now: number): number {
+  if (!Number.isFinite(createdAt)) {
+    return 0;
+  }
+  if (typeof startedAt === "number" && Number.isFinite(startedAt)) {
+    return Math.max(0, startedAt - createdAt);
+  }
+  if (status === "queued") {
+    return Math.max(0, now - createdAt);
+  }
+  return 0;
+}
+
 export class GatewayDatabaseService {
   private db: DatabaseSync | null = null;
   private initialized = false;
@@ -240,6 +261,7 @@ export class GatewayDatabaseService {
         id TEXT PRIMARY KEY,
         owner TEXT,
         created_at INTEGER NOT NULL,
+        started_at INTEGER,
         updated_at INTEGER NOT NULL,
         status TEXT NOT NULL,
         endpoint TEXT NOT NULL,
@@ -261,6 +283,7 @@ export class GatewayDatabaseService {
     `);
     this.addColumnIfMissing("request_logs", "owner", "TEXT");
     this.addColumnIfMissing("generation_history", "owner", "TEXT");
+    this.addColumnIfMissing("generation_history", "started_at", "INTEGER");
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS idx_request_logs_owner_time ON request_logs(owner, time DESC);
       CREATE INDEX IF NOT EXISTS idx_generation_history_owner_created_at ON generation_history(owner, created_at DESC);
@@ -456,7 +479,7 @@ export class GatewayDatabaseService {
     this.deleteCoveredRunningGenerations(owner);
     const rows = this.database
       .prepare(`
-        SELECT id, owner, created_at AS createdAt, updated_at AS updatedAt, status, endpoint, account, model,
+        SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
                prompt, ratio, size, quality, output_format AS outputFormat, duration_ms AS durationMs,
                request_json AS requestJson, response_summary_json AS responseSummaryJson, error,
                reference_images_json AS referenceImagesJson, images_json AS imagesJson
@@ -467,12 +490,14 @@ export class GatewayDatabaseService {
       `)
       .all(owner ?? null, owner ?? null, clampLimit(limit, MAX_GENERATION_HISTORY)) as Array<Record<string, unknown>>;
 
+    const now = Date.now();
     return rows.map((row) => ({
       id: String(row.id),
       owner: typeof row.owner === "string" ? row.owner : undefined,
       createdAt: Number(row.createdAt),
+      startedAt: typeof row.startedAt === "number" ? row.startedAt : undefined,
       updatedAt: Number(row.updatedAt),
-      status: row.status === "running" || row.status === "failed" ? row.status : "success",
+      status: row.status === "queued" || row.status === "running" || row.status === "failed" ? row.status : "success",
       endpoint: String(row.endpoint),
       account: String(row.account),
       model: String(row.model),
@@ -482,6 +507,7 @@ export class GatewayDatabaseService {
       quality: typeof row.quality === "string" ? row.quality : undefined,
       outputFormat: typeof row.outputFormat === "string" ? row.outputFormat : undefined,
       durationMs: Number(row.durationMs),
+      waitDurationMs: calculateWaitDurationMs(Number(row.createdAt), typeof row.startedAt === "number" ? row.startedAt : undefined, String(row.status), now),
       request: parseJsonObject(row.requestJson) ?? {},
       responseSummary: parseJsonObject(row.responseSummaryJson),
       error: typeof row.error === "string" ? row.error : undefined,
@@ -513,6 +539,26 @@ export class GatewayDatabaseService {
     return typeof row?.owner === "string" ? row.owner : undefined;
   }
 
+  async getGenerationLimitUsage(owner: string, since: number): Promise<GenerationLimitUsage> {
+    await this.init();
+    this.deleteCoveredRunningGenerations(owner);
+    const row = this.database
+      .prepare(`
+        SELECT COUNT(1) AS sinceCount, MAX(created_at) AS lastCreatedAt
+        FROM generation_history
+        WHERE owner = ?
+          AND created_at >= ?
+          AND status IN ('queued', 'running', 'success')
+      `)
+      .get(owner, since) as { sinceCount?: unknown; lastCreatedAt?: unknown } | undefined;
+
+    const lastCreatedAt = typeof row?.lastCreatedAt === "number" ? row.lastCreatedAt : undefined;
+    return {
+      sinceCount: Number(row?.sinceCount ?? 0),
+      lastCreatedAt,
+    };
+  }
+
   async saveGeneration(params: SaveGenerationParams): Promise<GenerationHistoryItem> {
     await this.init();
     const now = Date.now();
@@ -533,6 +579,7 @@ export class GatewayDatabaseService {
       id,
       owner: params.owner,
       createdAt: params.createdAt ?? now,
+      startedAt: params.startedAt,
       updatedAt: now,
       status: params.status,
       endpoint: params.endpoint,
@@ -544,6 +591,7 @@ export class GatewayDatabaseService {
       quality: params.response?.quality ?? params.quality,
       outputFormat,
       durationMs: params.durationMs,
+      waitDurationMs: calculateWaitDurationMs(params.createdAt ?? now, params.startedAt, params.status, now),
       request: params.request,
       responseSummary,
       error: params.error,
@@ -554,14 +602,15 @@ export class GatewayDatabaseService {
     this.database
       .prepare(`
         INSERT OR REPLACE INTO generation_history
-          (id, owner, created_at, updated_at, status, endpoint, account, model, prompt, ratio, size, quality,
+          (id, owner, created_at, started_at, updated_at, status, endpoint, account, model, prompt, ratio, size, quality,
            output_format, duration_ms, request_json, response_summary_json, error, reference_images_json, images_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         item.id,
         item.owner ?? null,
         item.createdAt,
+        item.startedAt ?? null,
         item.updatedAt,
         item.status,
         item.endpoint,
@@ -579,7 +628,7 @@ export class GatewayDatabaseService {
         JSON.stringify(item.referenceImages),
         JSON.stringify(item.images),
       );
-    if (item.status !== "running") {
+    if (item.status !== "queued" && item.status !== "running") {
       this.deleteCoveredRunningGenerations(item.owner, {
         id: item.id,
         owner: item.owner,
@@ -598,7 +647,7 @@ export class GatewayDatabaseService {
       this.database
         .prepare(`
           DELETE FROM generation_history
-          WHERE status = 'running'
+          WHERE status IN ('queued', 'running')
             AND id <> ?
             AND endpoint = ?
             AND prompt = ?
@@ -612,7 +661,7 @@ export class GatewayDatabaseService {
     this.database
       .prepare(`
         DELETE FROM generation_history
-        WHERE status = 'running'
+        WHERE status IN ('queued', 'running')
           AND (? IS NULL OR owner = ?)
           AND EXISTS (
             SELECT 1
@@ -685,7 +734,7 @@ export class GatewayDatabaseService {
       const filename = `generated-${index + 1}.${extension}`;
       const relativePath = `${id}/${filename}`;
       await fs.writeFile(path.join(dir, filename), bytes);
-      const metadata = await sharp(bytes, { failOn: "none" }).metadata().catch(() => ({}));
+      const metadata: { width?: number; height?: number } = await sharp(bytes, { failOn: "none" }).metadata().catch(() => ({}));
       const preview = await this.createImagePreview(dir, id, filename, bytes);
       assets.push({
         filename,

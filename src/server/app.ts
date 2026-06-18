@@ -99,6 +99,22 @@ type GatewayImageAsset = {
   previewSize?: number;
 };
 
+type ImageLimitCheckResult = {
+  allowed: boolean;
+  message?: string;
+  reason?: "daily" | "hourly" | "interval";
+  retryAfterSeconds?: number;
+  usage?: {
+    owner: string;
+    dailyCount: number;
+    hourlyCount: number;
+    perUserDaily: number;
+    perUserHourly: number;
+    minIntervalSeconds: number;
+    lastCreatedAt?: number;
+  };
+};
+
 type GatewayShareAddress = {
   host: string;
   label: string;
@@ -168,6 +184,8 @@ function toGatewayImageAssets(
     previewUrl?: string;
     previewMimeType?: string;
     previewSize?: number;
+    width?: number;
+    height?: number;
   }>,
 ): GatewayImageAsset[] {
   return images.map((image) => ({
@@ -519,9 +537,16 @@ const settingsUpdateSchema = z.object({
       excludedProfileIds: z.array(z.string()).optional(),
     })
     .optional(),
+  accountRotation: z
+    .object({
+      enabled: z.boolean().optional(),
+      strategy: z.literal("round_robin").optional(),
+    })
+    .optional(),
   runtime: z
     .object({
       quotaSyncConcurrency: z.number().int().min(1).max(32).optional(),
+      accountMaxConcurrency: z.number().int().min(1).max(32).optional(),
       codexRequestSerializationEnabled: z.boolean().optional(),
       codexRequestMinDelayMs: z.number().int().min(0).max(60_000).optional(),
       codexRequestJitterMs: z.number().int().min(0).max(60_000).optional(),
@@ -530,6 +555,25 @@ const settingsUpdateSchema = z.object({
   image: z
     .object({
       freeAccountWebGenerationEnabled: z.boolean().optional(),
+      limits: z
+        .object({
+          enabled: z.boolean().optional(),
+          perUserDaily: z.number().int().min(0).max(100_000).optional(),
+          perUserHourly: z.number().int().min(0).max(100_000).optional(),
+          minIntervalSeconds: z.number().int().min(0).max(86_400).optional(),
+          userOverrides: z
+            .array(
+              z.object({
+                username: z.string().min(1).max(120),
+                perUserDaily: z.number().int().min(0).max(100_000).optional(),
+                perUserHourly: z.number().int().min(0).max(100_000).optional(),
+                minIntervalSeconds: z.number().int().min(0).max(86_400).optional(),
+              }),
+            )
+            .max(500)
+            .optional(),
+        })
+        .optional(),
     })
     .optional(),
   wecom: z
@@ -1619,6 +1663,37 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+function withDeferredTimeout<T>(
+  factory: (startTimeout: () => void) => Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let started = false;
+  let rejectTimeout: ((error: Error) => void) | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const startTimeout = () => {
+    if (started) {
+      return;
+    }
+    started = true;
+    timer = setTimeout(() => {
+      const error = new Error(message) as Error & { statusCode?: number };
+      error.statusCode = 504;
+      rejectTimeout?.(error);
+    }, timeoutMs);
+    timer.unref?.();
+  };
+
+  return Promise.race([factory(startTimeout), timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
 function buildResponseApiBody(result: ChatResult, includeRaw?: boolean): Record<string, unknown> {
   const usage = buildResponsesUsagePayload(extractTokenUsage(result.raw));
   const responseBody: Record<string, unknown> = {
@@ -2263,6 +2338,140 @@ export function createApp(params?: {
       return undefined;
     }
     return requestedOwner?.trim() || currentOwner;
+  }
+
+  function resolveImageLimits(settings: GatewaySettings, owner: string): {
+    perUserDaily: number;
+    perUserHourly: number;
+    minIntervalSeconds: number;
+  } {
+    const limits = settings.image.limits;
+    const override = limits.userOverrides.find((item) => item.username === owner);
+    return {
+      perUserDaily: override?.perUserDaily ?? limits.perUserDaily,
+      perUserHourly: override?.perUserHourly ?? limits.perUserHourly,
+      minIntervalSeconds: override?.minIntervalSeconds ?? limits.minIntervalSeconds,
+    };
+  }
+
+  async function checkImageGenerationLimit(owner: string | undefined, settings: GatewaySettings): Promise<ImageLimitCheckResult> {
+    const limits = settings.image.limits;
+    if (!limits.enabled || !owner) {
+      return { allowed: true };
+    }
+
+    const effective = resolveImageLimits(settings, owner);
+    const now = Date.now();
+    const dayStart = now - 24 * 60 * 60 * 1000;
+    const hourStart = now - 60 * 60 * 1000;
+    const intervalStart = now - Math.max(effective.minIntervalSeconds, 1) * 1000;
+    const emptyUsage = { sinceCount: 0, lastCreatedAt: undefined };
+    const [dailyUsage, hourlyUsage, intervalUsage] = await Promise.all([
+      effective.perUserDaily > 0 ? ctx.gatewayDatabaseService.getGenerationLimitUsage(owner, dayStart) : Promise.resolve(emptyUsage),
+      effective.perUserHourly > 0 ? ctx.gatewayDatabaseService.getGenerationLimitUsage(owner, hourStart) : Promise.resolve(emptyUsage),
+      effective.minIntervalSeconds > 0 ? ctx.gatewayDatabaseService.getGenerationLimitUsage(owner, intervalStart) : Promise.resolve(emptyUsage),
+    ]);
+    const lastCreatedAt = intervalUsage.lastCreatedAt ?? hourlyUsage.lastCreatedAt ?? dailyUsage.lastCreatedAt;
+    const usage = {
+      owner,
+      dailyCount: dailyUsage.sinceCount,
+      hourlyCount: hourlyUsage.sinceCount,
+      perUserDaily: effective.perUserDaily,
+      perUserHourly: effective.perUserHourly,
+      minIntervalSeconds: effective.minIntervalSeconds,
+      lastCreatedAt,
+    };
+
+    if (effective.perUserDaily > 0 && dailyUsage.sinceCount >= effective.perUserDaily) {
+      return {
+        allowed: false,
+        reason: "daily",
+        message: `今日生图额度已用完（${dailyUsage.sinceCount}/${effective.perUserDaily}），请稍后再试。`,
+        retryAfterSeconds: 60 * 60,
+        usage,
+      };
+    }
+
+    if (effective.perUserHourly > 0 && hourlyUsage.sinceCount >= effective.perUserHourly) {
+      return {
+        allowed: false,
+        reason: "hourly",
+        message: `近 1 小时生图次数已达上限（${hourlyUsage.sinceCount}/${effective.perUserHourly}），请稍后再试。`,
+        retryAfterSeconds: 5 * 60,
+        usage,
+      };
+    }
+
+    if (effective.minIntervalSeconds > 0 && lastCreatedAt) {
+      const elapsedSeconds = Math.floor((now - lastCreatedAt) / 1000);
+      const retryAfterSeconds = Math.max(1, effective.minIntervalSeconds - elapsedSeconds);
+      if (retryAfterSeconds > 0) {
+        return {
+          allowed: false,
+          reason: "interval",
+          message: `生图请求过于频繁，请 ${retryAfterSeconds} 秒后再试。`,
+          retryAfterSeconds,
+          usage,
+        };
+      }
+    }
+
+    return {
+      allowed: true,
+      usage,
+    };
+  }
+
+  function sendImageLimitResponse(
+    reply: FastifyReply,
+    limit: ImageLimitCheckResult,
+    params: {
+      owner?: string;
+      method: string;
+      endpoint: string;
+      model: string;
+      startedAt: number;
+      source: string;
+      requestId: string;
+      remoteAddress: string;
+      userAgent?: string;
+      requestSummary: Record<string, unknown>;
+    },
+  ): { error: { type: string; message: string; code: string; details?: ImageLimitCheckResult["usage"] } } {
+    const retryAfterSeconds = limit.retryAfterSeconds ?? 60;
+    reply.code(429);
+    reply.header("Retry-After", String(retryAfterSeconds));
+    pushGatewayRequestLog({
+      owner: params.owner,
+      method: params.method,
+      endpoint: params.endpoint,
+      account: "-",
+      model: params.model,
+      statusCode: 429,
+      durationMs: performance.now() - params.startedAt,
+      source: params.source,
+      details: {
+        requestId: params.requestId,
+        remoteAddress: params.remoteAddress,
+        userAgent: params.userAgent,
+        request: params.requestSummary,
+        error: {
+          type: "image_limit_exceeded",
+          code: limit.reason,
+          message: limit.message,
+          retryAfterSeconds,
+          usage: limit.usage,
+        },
+      },
+    });
+    return {
+      error: {
+        type: "rate_limit_exceeded",
+        code: "image_limit_exceeded",
+        message: limit.message ?? "生图限额已达上限，请稍后再试。",
+        details: limit.usage,
+      },
+    };
   }
 
   function cleanupPendingWecomEmbedStates(): void {
@@ -3870,7 +4079,8 @@ export function createApp(params?: {
         const settings = await ctx.configService.getSettings();
         if (settings.image.freeAccountWebGenerationEnabled) {
           profile = await ctx.authService.requireUsableProfile("openai-codex", {
-            skipAutoSwitch: true,
+            skipAutoSwitch: keepProfileSticky,
+            skipRequestRotation: retryCount > 0,
           });
         }
         if (profile && isFreePlan(profile)) {
@@ -3950,6 +4160,7 @@ export function createApp(params?: {
             ? await ctx.authService.requireUsableProfileById(stickyProfileId, "openai-codex")
             : await ctx.authService.requireUsableProfile("openai-codex", {
                 skipAutoSwitch: keepProfileSticky,
+                skipRequestRotation: attempt > 0,
               });
           const selectedProfile = profile;
           upstream = await ctx.requestThrottleService.runForProfile(
@@ -4740,7 +4951,24 @@ export function createApp(params?: {
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const limit = await checkImageGenerationLimit(requestOwner, settings);
+    if (!limit.allowed) {
+      return sendImageLimitResponse(reply, limit, {
+        owner: requestOwner,
+        method: request.method,
+        endpoint: request.url,
+        model: parsed.data.model ?? "gpt-image-2",
+        startedAt,
+        source: requestSourceFromUserAgent(request.headers["user-agent"]),
+        requestId: request.id,
+        remoteAddress: request.ip,
+        userAgent: request.headers["user-agent"],
+        requestSummary,
+      });
+    }
     const generationId = request.id;
+    const generationCreatedAt = Date.now();
+    let generationStartedAt: number | undefined;
     pushGatewayRequestLog({
       id: generationId,
       owner: requestOwner,
@@ -4756,13 +4984,14 @@ export function createApp(params?: {
         remoteAddress: request.ip,
         userAgent: request.headers["user-agent"],
         request: requestSummary,
-        state: "running",
+        state: "queued",
       },
     });
     ctx.gatewayDatabaseService.saveGeneration({
       id: generationId,
       owner: requestOwner,
-      status: "running",
+      createdAt: generationCreatedAt,
+      status: "queued",
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
       model: parsed.data.model ?? "gpt-image-2",
@@ -4777,15 +5006,15 @@ export function createApp(params?: {
         prompt: parsed.data.prompt,
       },
     }).catch((persistError) => {
-      console.warn("[gateway:image] failed to persist running generation", {
+      console.warn("[gateway:image] failed to persist queued generation", {
         requestId: request.id,
         message: persistError instanceof Error ? persistError.message : String(persistError),
       });
     });
     let response: Awaited<ReturnType<typeof ctx.imageService.generate>>;
     try {
-      response = await withTimeout(
-        ctx.imageService.generate({
+      response = await withDeferredTimeout(
+        (startTimeout) => ctx.imageService.generate({
           prompt: parsed.data.prompt,
           model: parsed.data.model,
           n: parsed.data.n,
@@ -4795,6 +5024,51 @@ export function createApp(params?: {
           outputFormat: parsed.data.output_format,
           outputCompression: parsed.data.output_compression,
           moderation: parsed.data.moderation,
+        }, {
+          requestId: request.id,
+          onQueued: () => ctx.gatewayDatabaseService.saveGeneration({
+            id: generationId,
+            owner: requestOwner,
+            createdAt: generationCreatedAt,
+            status: "queued",
+            endpoint: request.url,
+            account: profileLogLabel(activeProfile),
+            model: parsed.data.model ?? "gpt-image-2",
+            prompt: parsed.data.prompt,
+            ratio: ratioFromImageSize(parsed.data.size),
+            size: parsed.data.size,
+            quality: parsed.data.quality,
+            outputFormat: parsed.data.output_format,
+            durationMs: 0,
+            request: {
+              ...requestSummary,
+              prompt: parsed.data.prompt,
+            },
+          }),
+          onStart: (profile) => {
+            startTimeout();
+            generationStartedAt ??= Date.now();
+            return ctx.gatewayDatabaseService.saveGeneration({
+              id: generationId,
+              owner: requestOwner,
+              createdAt: generationCreatedAt,
+              startedAt: generationStartedAt,
+              status: "running",
+              endpoint: request.url,
+              account: profileLogLabel(profile),
+              model: parsed.data.model ?? "gpt-image-2",
+              prompt: parsed.data.prompt,
+              ratio: ratioFromImageSize(parsed.data.size),
+              size: parsed.data.size,
+              quality: parsed.data.quality,
+              outputFormat: parsed.data.output_format,
+              durationMs: 0,
+              request: {
+                ...requestSummary,
+                prompt: parsed.data.prompt,
+              },
+            });
+          },
         }),
         IMAGE_GENERATION_TIMEOUT_MS,
         `图片生成超过 ${Math.floor(IMAGE_GENERATION_TIMEOUT_MS / 1000)} 秒仍未完成，已超时。`,
@@ -4803,12 +5077,16 @@ export function createApp(params?: {
       const normalized = normalizeError(error);
       const statusCode = getErrorStatusCode(normalized);
       const durationMs = performance.now() - startedAt;
+      const failedProfile = (error as { _gatewayProfile?: OAuthProfile })._gatewayProfile ?? activeProfile;
+      const failedImageRoute: UsageImageRoute = failedProfile && isFreePlan(failedProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : imageRoute;
       ctx.gatewayDatabaseService.saveGeneration({
         id: generationId,
         owner: requestOwner,
+        createdAt: generationCreatedAt,
+        startedAt: generationStartedAt,
         status: "failed",
         endpoint: request.url,
-        account: profileLogLabel(activeProfile),
+        account: profileLogLabel(failedProfile),
         model: parsed.data.model ?? "gpt-image-2",
         prompt: parsed.data.prompt,
         ratio: ratioFromImageSize(parsed.data.size),
@@ -4831,7 +5109,7 @@ export function createApp(params?: {
         owner: requestOwner,
         method: request.method,
         endpoint: request.url,
-        account: profileLogLabel(activeProfile),
+        account: profileLogLabel(failedProfile),
         model: parsed.data.model ?? "gpt-image-2",
         statusCode,
         durationMs,
@@ -4849,29 +5127,32 @@ export function createApp(params?: {
           },
         },
         usage: {
-          profile: activeProfile,
-          imageRoute,
+          profile: failedProfile,
+          imageRoute: failedImageRoute,
         },
       });
       throw error;
     }
 
+    const responseProfile = response._gatewayProfile ?? activeProfile;
+    const responseImageRoute: UsageImageRoute = responseProfile && isFreePlan(responseProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const { _gatewayProfile: _generationProfile, ...publicResponse } = response;
     const durationMs = performance.now() - startedAt;
     console.info("[gateway:image] response ready", {
       method: request.method,
       url: request.url,
       summary: requestSummary,
-      created: response.created,
-      imageCount: response.data.length,
-      output_format: response.output_format,
-      quality: response.quality,
-      size: response.size,
+      created: publicResponse.created,
+      imageCount: publicResponse.data.length,
+      output_format: publicResponse.output_format,
+      quality: publicResponse.quality,
+      size: publicResponse.size,
     });
     pushGatewayRequestLog({
       owner: requestOwner,
       method: request.method,
       endpoint: request.url,
-      account: profileLogLabel(activeProfile),
+      account: profileLogLabel(responseProfile),
       model: parsed.data.model ?? "gpt-image-2",
       statusCode: 200,
       durationMs,
@@ -4882,37 +5163,39 @@ export function createApp(params?: {
         userAgent: request.headers["user-agent"],
         request: requestSummary,
         response: {
-          imageCount: response.data.length,
-          outputFormat: response.output_format,
-          quality: response.quality,
-          size: response.size,
+          imageCount: publicResponse.data.length,
+          outputFormat: publicResponse.output_format,
+          quality: publicResponse.quality,
+          size: publicResponse.size,
         },
       },
       usage: {
-        profile: activeProfile,
-        tokenUsage: imageUsageToTokenUsage(response.usage),
-        imageCount: response.data.length,
-        imageRoute,
+        profile: responseProfile,
+        tokenUsage: imageUsageToTokenUsage(publicResponse.usage),
+        imageCount: publicResponse.data.length,
+        imageRoute: responseImageRoute,
       },
     });
     const savedGeneration = await ctx.gatewayDatabaseService.saveGeneration({
       id: generationId,
       owner: requestOwner,
+      createdAt: generationCreatedAt,
+      startedAt: generationStartedAt,
       status: "success",
       endpoint: request.url,
-      account: profileLogLabel(activeProfile),
+      account: profileLogLabel(responseProfile),
       model: parsed.data.model ?? "gpt-image-2",
       prompt: parsed.data.prompt,
-      ratio: ratioFromImageSize(response.size ?? parsed.data.size),
-      size: response.size ?? parsed.data.size,
-      quality: response.quality ?? parsed.data.quality,
-      outputFormat: response.output_format ?? parsed.data.output_format,
+      ratio: ratioFromImageSize(publicResponse.size ?? parsed.data.size),
+      size: publicResponse.size ?? parsed.data.size,
+      quality: publicResponse.quality ?? parsed.data.quality,
+      outputFormat: publicResponse.output_format ?? parsed.data.output_format,
       durationMs,
       request: {
         ...requestSummary,
         prompt: parsed.data.prompt,
       },
-      response,
+      response: publicResponse,
     }).catch((persistError) => {
       console.warn("[gateway:image] failed to persist generation", {
         requestId: request.id,
@@ -4921,7 +5204,7 @@ export function createApp(params?: {
       return null;
     });
 
-    return savedGeneration ? { ...response, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : response;
+    return savedGeneration ? { ...publicResponse, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : publicResponse;
   });
 
   app.post("/v1/images/edits", async (request, reply) => {
@@ -5080,7 +5363,24 @@ export function createApp(params?: {
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const limit = await checkImageGenerationLimit(requestOwner, settings);
+    if (!limit.allowed) {
+      return sendImageLimitResponse(reply, limit, {
+        owner: requestOwner,
+        method: request.method,
+        endpoint: request.url,
+        model: parsed.data.model ?? "gpt-image-2",
+        startedAt,
+        source: requestSourceFromUserAgent(request.headers["user-agent"]),
+        requestId: request.id,
+        remoteAddress: request.ip,
+        userAgent: request.headers["user-agent"],
+        requestSummary,
+      });
+    }
     const generationId = request.id;
+    const generationCreatedAt = Date.now();
+    let generationStartedAt: number | undefined;
     pushGatewayRequestLog({
       id: generationId,
       owner: requestOwner,
@@ -5096,13 +5396,14 @@ export function createApp(params?: {
         remoteAddress: request.ip,
         userAgent: request.headers["user-agent"],
         request: requestSummary,
-        state: "running",
+        state: "queued",
       },
     });
     ctx.gatewayDatabaseService.saveGeneration({
       id: generationId,
       owner: requestOwner,
-      status: "running",
+      createdAt: generationCreatedAt,
+      status: "queued",
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
       model: parsed.data.model ?? "gpt-image-2",
@@ -5118,15 +5419,15 @@ export function createApp(params?: {
       },
       referenceImages: getImageEditReferenceAssets(parsed.data),
     }).catch((persistError) => {
-      console.warn("[gateway:image:edit] failed to persist running generation", {
+      console.warn("[gateway:image:edit] failed to persist queued generation", {
         requestId: request.id,
         message: persistError instanceof Error ? persistError.message : String(persistError),
       });
     });
     let response: Awaited<ReturnType<typeof ctx.imageService.generate>>;
     try {
-      response = await withTimeout(
-        ctx.imageService.generate({
+      response = await withDeferredTimeout(
+        (startTimeout) => ctx.imageService.generate({
           prompt: parsed.data.prompt,
           inputImages: imageReferences,
           model: parsed.data.model,
@@ -5137,6 +5438,53 @@ export function createApp(params?: {
           outputFormat: parsed.data.output_format,
           outputCompression: parsed.data.output_compression,
           moderation: parsed.data.moderation,
+        }, {
+          requestId: request.id,
+          onQueued: () => ctx.gatewayDatabaseService.saveGeneration({
+            id: generationId,
+            owner: requestOwner,
+            createdAt: generationCreatedAt,
+            status: "queued",
+            endpoint: request.url,
+            account: profileLogLabel(activeProfile),
+            model: parsed.data.model ?? "gpt-image-2",
+            prompt: parsed.data.prompt,
+            ratio: ratioFromImageSize(parsed.data.size),
+            size: parsed.data.size,
+            quality: parsed.data.quality,
+            outputFormat: parsed.data.output_format,
+            durationMs: 0,
+            request: {
+              ...requestSummary,
+              prompt: parsed.data.prompt,
+            },
+            referenceImages: getImageEditReferenceAssets(parsed.data),
+          }),
+          onStart: (profile) => {
+            startTimeout();
+            generationStartedAt ??= Date.now();
+            return ctx.gatewayDatabaseService.saveGeneration({
+              id: generationId,
+              owner: requestOwner,
+              createdAt: generationCreatedAt,
+              startedAt: generationStartedAt,
+              status: "running",
+              endpoint: request.url,
+              account: profileLogLabel(profile),
+              model: parsed.data.model ?? "gpt-image-2",
+              prompt: parsed.data.prompt,
+              ratio: ratioFromImageSize(parsed.data.size),
+              size: parsed.data.size,
+              quality: parsed.data.quality,
+              outputFormat: parsed.data.output_format,
+              durationMs: 0,
+              request: {
+                ...requestSummary,
+                prompt: parsed.data.prompt,
+              },
+              referenceImages: getImageEditReferenceAssets(parsed.data),
+            });
+          },
         }),
         IMAGE_GENERATION_TIMEOUT_MS,
         `图片生成超过 ${Math.floor(IMAGE_GENERATION_TIMEOUT_MS / 1000)} 秒仍未完成，已超时。`,
@@ -5145,12 +5493,16 @@ export function createApp(params?: {
       const normalized = normalizeError(error);
       const statusCode = getErrorStatusCode(normalized);
       const durationMs = performance.now() - startedAt;
+      const failedProfile = (error as { _gatewayProfile?: OAuthProfile })._gatewayProfile ?? activeProfile;
+      const failedImageRoute: UsageImageRoute = failedProfile && isFreePlan(failedProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : imageRoute;
       ctx.gatewayDatabaseService.saveGeneration({
         id: generationId,
         owner: requestOwner,
+        createdAt: generationCreatedAt,
+        startedAt: generationStartedAt,
         status: "failed",
         endpoint: request.url,
-        account: profileLogLabel(activeProfile),
+        account: profileLogLabel(failedProfile),
         model: parsed.data.model ?? "gpt-image-2",
         prompt: parsed.data.prompt,
         ratio: ratioFromImageSize(parsed.data.size),
@@ -5174,7 +5526,7 @@ export function createApp(params?: {
         owner: requestOwner,
         method: request.method,
         endpoint: request.url,
-        account: profileLogLabel(activeProfile),
+        account: profileLogLabel(failedProfile),
         model: parsed.data.model ?? "gpt-image-2",
         statusCode,
         durationMs,
@@ -5192,29 +5544,32 @@ export function createApp(params?: {
           },
         },
         usage: {
-          profile: activeProfile,
-          imageRoute,
+          profile: failedProfile,
+          imageRoute: failedImageRoute,
         },
       });
       throw error;
     }
 
+    const responseProfile = response._gatewayProfile ?? activeProfile;
+    const responseImageRoute: UsageImageRoute = responseProfile && isFreePlan(responseProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const { _gatewayProfile: _editProfile, ...publicResponse } = response;
     const durationMs = performance.now() - startedAt;
     console.info("[gateway:image:edit] response ready", {
       method: request.method,
       url: request.url,
       summary: requestSummary,
-      created: response.created,
-      imageCount: response.data.length,
-      output_format: response.output_format,
-      quality: response.quality,
-      size: response.size,
+      created: publicResponse.created,
+      imageCount: publicResponse.data.length,
+      output_format: publicResponse.output_format,
+      quality: publicResponse.quality,
+      size: publicResponse.size,
     });
     pushGatewayRequestLog({
       owner: requestOwner,
       method: request.method,
       endpoint: request.url,
-      account: profileLogLabel(activeProfile),
+      account: profileLogLabel(responseProfile),
       model: parsed.data.model ?? "gpt-image-2",
       statusCode: 200,
       durationMs,
@@ -5225,37 +5580,39 @@ export function createApp(params?: {
         userAgent: request.headers["user-agent"],
         request: requestSummary,
         response: {
-          imageCount: response.data.length,
-          outputFormat: response.output_format,
-          quality: response.quality,
-          size: response.size,
+          imageCount: publicResponse.data.length,
+          outputFormat: publicResponse.output_format,
+          quality: publicResponse.quality,
+          size: publicResponse.size,
         },
       },
       usage: {
-        profile: activeProfile,
-        tokenUsage: imageUsageToTokenUsage(response.usage),
-        imageCount: response.data.length,
-        imageRoute,
+        profile: responseProfile,
+        tokenUsage: imageUsageToTokenUsage(publicResponse.usage),
+        imageCount: publicResponse.data.length,
+        imageRoute: responseImageRoute,
       },
     });
     const savedGeneration = await ctx.gatewayDatabaseService.saveGeneration({
       id: generationId,
       owner: requestOwner,
+      createdAt: generationCreatedAt,
+      startedAt: generationStartedAt,
       status: "success",
       endpoint: request.url,
-      account: profileLogLabel(activeProfile),
+      account: profileLogLabel(responseProfile),
       model: parsed.data.model ?? "gpt-image-2",
       prompt: parsed.data.prompt,
-      ratio: ratioFromImageSize(response.size ?? parsed.data.size),
-      size: response.size ?? parsed.data.size,
-      quality: response.quality ?? parsed.data.quality,
-      outputFormat: response.output_format ?? parsed.data.output_format,
+      ratio: ratioFromImageSize(publicResponse.size ?? parsed.data.size),
+      size: publicResponse.size ?? parsed.data.size,
+      quality: publicResponse.quality ?? parsed.data.quality,
+      outputFormat: publicResponse.output_format ?? parsed.data.output_format,
       durationMs,
       request: {
         ...requestSummary,
         prompt: parsed.data.prompt,
       },
-      response,
+      response: publicResponse,
       referenceImages: getImageEditReferenceAssets(parsed.data),
     }).catch((persistError) => {
       console.warn("[gateway:image:edit] failed to persist generation", {
@@ -5265,7 +5622,7 @@ export function createApp(params?: {
       return null;
     });
 
-    return savedGeneration ? { ...response, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : response;
+    return savedGeneration ? { ...publicResponse, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : publicResponse;
   });
 
   return app;

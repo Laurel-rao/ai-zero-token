@@ -3,6 +3,8 @@ import { getPreferredCodexModel, hasCodexModel } from "../models/openai-codex-mo
 import {
   createDefaultSettings,
   loadSettings,
+  normalizeAccountMaxConcurrency,
+  normalizeCountLimit,
   normalizeMilliseconds,
   normalizeQuotaSyncConcurrency,
   saveSettings,
@@ -56,6 +58,48 @@ function normalizeProfileIdList(value: string[] | undefined, fallback: string[] 
         .filter(Boolean),
     ),
   );
+}
+
+function normalizeImageLimitOverrides(
+  value: GatewaySettings["image"]["limits"]["userOverrides"] | undefined,
+  fallback: GatewaySettings["image"]["limits"]["userOverrides"],
+): GatewaySettings["image"]["limits"]["userOverrides"] {
+  if (!value) {
+    return fallback;
+  }
+
+  const byUsername = new Map<string, GatewaySettings["image"]["limits"]["userOverrides"][number]>();
+  for (const item of value) {
+    const username = item.username.trim();
+    if (!username) {
+      continue;
+    }
+    byUsername.set(username, {
+      username,
+      ...(item.perUserDaily === undefined ? {} : { perUserDaily: normalizeCountLimit(item.perUserDaily, 0) }),
+      ...(item.perUserHourly === undefined ? {} : { perUserHourly: normalizeCountLimit(item.perUserHourly, 0) }),
+      ...(item.minIntervalSeconds === undefined ? {} : { minIntervalSeconds: normalizeCountLimit(item.minIntervalSeconds, 0, 86_400) }),
+    });
+  }
+
+  return Array.from(byUsername.values()).sort((left, right) => left.username.localeCompare(right.username, "zh-CN"));
+}
+
+function normalizeImageLimits(
+  params: Partial<GatewaySettings["image"]["limits"]> | undefined,
+  settings: GatewaySettings["image"]["limits"],
+): GatewaySettings["image"]["limits"] {
+  if (!params) {
+    return settings;
+  }
+
+  return {
+    enabled: params.enabled ?? settings.enabled,
+    perUserDaily: normalizeCountLimit(params.perUserDaily, settings.perUserDaily),
+    perUserHourly: normalizeCountLimit(params.perUserHourly, settings.perUserHourly),
+    minIntervalSeconds: normalizeCountLimit(params.minIntervalSeconds, settings.minIntervalSeconds, 86_400),
+    userOverrides: normalizeImageLimitOverrides(params.userOverrides, settings.userOverrides),
+  };
 }
 
 export class ConfigService {
@@ -123,6 +167,7 @@ export class ConfigService {
 
   async setRuntimeConfig(params: {
     quotaSyncConcurrency?: number;
+    accountMaxConcurrency?: number;
     codexRequestSerializationEnabled?: boolean;
     codexRequestMinDelayMs?: number;
     codexRequestJitterMs?: number;
@@ -133,6 +178,7 @@ export class ConfigService {
       runtime: {
         ...settings.runtime,
         quotaSyncConcurrency: normalizeQuotaSyncConcurrency(params.quotaSyncConcurrency, settings.runtime.quotaSyncConcurrency),
+        accountMaxConcurrency: normalizeAccountMaxConcurrency(params.accountMaxConcurrency, settings.runtime.accountMaxConcurrency),
         codexRequestSerializationEnabled: params.codexRequestSerializationEnabled ?? settings.runtime.codexRequestSerializationEnabled,
         codexRequestMinDelayMs: normalizeMilliseconds(params.codexRequestMinDelayMs, settings.runtime.codexRequestMinDelayMs, 0, 60_000),
         codexRequestJitterMs: normalizeMilliseconds(params.codexRequestJitterMs, settings.runtime.codexRequestJitterMs, 0, 60_000),
@@ -164,13 +210,18 @@ export class ConfigService {
     defaultModel?: string;
     networkProxy?: NetworkProxyParams;
     autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
+    accountRotation?: { enabled?: boolean; strategy?: "round_robin" };
     runtime?: {
       quotaSyncConcurrency?: number;
+      accountMaxConcurrency?: number;
       codexRequestSerializationEnabled?: boolean;
       codexRequestMinDelayMs?: number;
       codexRequestJitterMs?: number;
     };
-    image?: { freeAccountWebGenerationEnabled?: boolean };
+    image?: {
+      freeAccountWebGenerationEnabled?: boolean;
+      limits?: Partial<GatewaySettings["image"]["limits"]>;
+    };
     wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
     server?: { port: number };
   }): Promise<GatewaySettings> {
@@ -205,12 +256,23 @@ export class ConfigService {
       };
     }
 
+    if (params.accountRotation) {
+      next = {
+        ...next,
+        accountRotation: {
+          enabled: params.accountRotation.enabled ?? next.accountRotation.enabled,
+          strategy: "round_robin",
+        },
+      };
+    }
+
     if (params.runtime) {
       next = {
         ...next,
         runtime: {
           ...next.runtime,
           quotaSyncConcurrency: normalizeQuotaSyncConcurrency(params.runtime.quotaSyncConcurrency, next.runtime.quotaSyncConcurrency),
+          accountMaxConcurrency: normalizeAccountMaxConcurrency(params.runtime.accountMaxConcurrency, next.runtime.accountMaxConcurrency),
           codexRequestSerializationEnabled: params.runtime.codexRequestSerializationEnabled ?? next.runtime.codexRequestSerializationEnabled,
           codexRequestMinDelayMs: normalizeMilliseconds(params.runtime.codexRequestMinDelayMs, next.runtime.codexRequestMinDelayMs, 0, 60_000),
           codexRequestJitterMs: normalizeMilliseconds(params.runtime.codexRequestJitterMs, next.runtime.codexRequestJitterMs, 0, 60_000),
@@ -224,6 +286,7 @@ export class ConfigService {
         image: {
           ...next.image,
           freeAccountWebGenerationEnabled: params.image.freeAccountWebGenerationEnabled ?? next.image.freeAccountWebGenerationEnabled,
+          limits: normalizeImageLimits(params.image.limits, next.image.limits),
         },
       };
     }

@@ -21,14 +21,26 @@ export function createDefaultSettings(): GatewaySettings {
       enabled: false,
       excludedProfileIds: [],
     },
+    accountRotation: {
+      enabled: false,
+      strategy: "round_robin",
+    },
     runtime: {
       quotaSyncConcurrency: 3,
+      accountMaxConcurrency: 2,
       codexRequestSerializationEnabled: true,
       codexRequestMinDelayMs: 2500,
       codexRequestJitterMs: 1500,
     },
     image: {
       freeAccountWebGenerationEnabled: false,
+      limits: {
+        enabled: false,
+        perUserDaily: 0,
+        perUserHourly: 0,
+        minIntervalSeconds: 0,
+        userOverrides: [],
+      },
     },
     wecom: {
       enabled: false,
@@ -58,14 +70,20 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
       enabled: parsed.autoSwitch?.enabled ?? defaults.autoSwitch.enabled,
       excludedProfileIds: normalizeStringList(parsed.autoSwitch?.excludedProfileIds),
     },
+    accountRotation: {
+      enabled: parsed.accountRotation?.enabled ?? defaults.accountRotation.enabled,
+      strategy: "round_robin",
+    },
     runtime: {
       quotaSyncConcurrency: normalizeQuotaSyncConcurrency(parsed.runtime?.quotaSyncConcurrency, defaults.runtime.quotaSyncConcurrency),
+      accountMaxConcurrency: normalizeAccountMaxConcurrency(parsed.runtime?.accountMaxConcurrency, defaults.runtime.accountMaxConcurrency),
       codexRequestSerializationEnabled: parsed.runtime?.codexRequestSerializationEnabled ?? defaults.runtime.codexRequestSerializationEnabled,
       codexRequestMinDelayMs: normalizeMilliseconds(parsed.runtime?.codexRequestMinDelayMs, defaults.runtime.codexRequestMinDelayMs, 0, 60_000),
       codexRequestJitterMs: normalizeMilliseconds(parsed.runtime?.codexRequestJitterMs, defaults.runtime.codexRequestJitterMs, 0, 60_000),
     },
     image: {
       freeAccountWebGenerationEnabled: parsed.image?.freeAccountWebGenerationEnabled ?? defaults.image.freeAccountWebGenerationEnabled,
+      limits: normalizeImageLimits(parsed.image?.limits, defaults.image.limits),
     },
     wecom: {
       enabled: parsed.wecom?.enabled ?? defaults.wecom.enabled,
@@ -100,6 +118,15 @@ export function normalizeQuotaSyncConcurrency(value: unknown, fallback = 3): num
   return Math.min(32, Math.max(1, Math.trunc(parsed)));
 }
 
+export function normalizeAccountMaxConcurrency(value: unknown, fallback = 2): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : fallback;
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(32, Math.max(1, Math.trunc(parsed)));
+}
+
 export function normalizeMilliseconds(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : fallback;
   if (!Number.isFinite(parsed)) {
@@ -107,6 +134,65 @@ export function normalizeMilliseconds(value: unknown, fallback: number, min: num
   }
 
   return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
+export function normalizeCountLimit(value: unknown, fallback = 0, max = 100_000): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : fallback;
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(0, Math.trunc(parsed)));
+}
+
+type ImageLimitsSettings = GatewaySettings["image"]["limits"];
+
+function normalizeImageLimitOverride(value: unknown): ImageLimitsSettings["userOverrides"][number] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const username = typeof record.username === "string" ? record.username.trim() : "";
+  if (!username) {
+    return null;
+  }
+
+  return {
+    username,
+    ...(record.perUserDaily === undefined ? {} : { perUserDaily: normalizeCountLimit(record.perUserDaily, 0) }),
+    ...(record.perUserHourly === undefined ? {} : { perUserHourly: normalizeCountLimit(record.perUserHourly, 0) }),
+    ...(record.minIntervalSeconds === undefined ? {} : { minIntervalSeconds: normalizeCountLimit(record.minIntervalSeconds, 0, 86_400) }),
+  };
+}
+
+function normalizeImageLimitOverrides(value: unknown): ImageLimitsSettings["userOverrides"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const byUsername = new Map<string, ImageLimitsSettings["userOverrides"][number]>();
+  for (const item of value) {
+    const normalized = normalizeImageLimitOverride(item);
+    if (normalized) {
+      byUsername.set(normalized.username, normalized);
+    }
+  }
+  return Array.from(byUsername.values()).sort((left, right) => left.username.localeCompare(right.username, "zh-CN"));
+}
+
+function normalizeImageLimits(value: unknown, fallback: ImageLimitsSettings): ImageLimitsSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return fallback;
+  }
+  const record = value as Record<string, unknown>;
+
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : fallback.enabled,
+    perUserDaily: normalizeCountLimit(record.perUserDaily, fallback.perUserDaily),
+    perUserHourly: normalizeCountLimit(record.perUserHourly, fallback.perUserHourly),
+    minIntervalSeconds: normalizeCountLimit(record.minIntervalSeconds, fallback.minIntervalSeconds, 86_400),
+    userOverrides: normalizeImageLimitOverrides(record.userOverrides),
+  };
 }
 
 function normalizeStringList(value: unknown): string[] {

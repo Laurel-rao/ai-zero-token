@@ -163,14 +163,31 @@ export type GatewaySettings = {
     enabled: boolean;
     excludedProfileIds: string[];
   };
+  accountRotation: {
+    enabled: boolean;
+    strategy: "round_robin";
+  };
   runtime: {
     quotaSyncConcurrency: number;
+    accountMaxConcurrency: number;
     codexRequestSerializationEnabled: boolean;
     codexRequestMinDelayMs: number;
     codexRequestJitterMs: number;
   };
   image: {
     freeAccountWebGenerationEnabled: boolean;
+    limits: {
+      enabled: boolean;
+      perUserDaily: number;
+      perUserHourly: number;
+      minIntervalSeconds: number;
+      userOverrides: Array<{
+        username: string;
+        perUserDaily?: number;
+        perUserHourly?: number;
+        minIntervalSeconds?: number;
+      }>;
+    };
   };
   wecom: {
     enabled: boolean;
