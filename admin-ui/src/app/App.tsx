@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Building2, KeyRound } from "lucide-react";
-import { createWWLoginPanel, type WWLoginInstance } from "@wecom/jssdk";
+import { createWWLoginPanel, WWLoginLangType, WWLoginPanelSizeType, WWLoginRedirectType, WWLoginType, type WWLoginInstance } from "@wecom/jssdk";
 import { AppShell } from "@/layouts/AppShell";
 import { useAdminWorkspace } from "@/hooks/useAdminWorkspace";
 import { fetchJson } from "@/shared/api";
@@ -87,14 +87,14 @@ function LoginView({ onAuthenticated, wecomLoginEnabled }: { onAuthenticated: ()
         wecomPanelInstanceRef.current = createWWLoginPanel({
           el: wecomPanelRef.current,
           params: {
-            login_type: "CorpApp",
+            login_type: WWLoginType.corpApp,
             appid: config.appid,
             agentid: config.agentid,
             redirect_uri: config.redirectUri,
             state: config.state,
-            redirect_type: "callback",
-            panel_size: "small",
-            lang: "zh",
+            redirect_type: WWLoginRedirectType.callback,
+            panel_size: WWLoginPanelSizeType.small,
+            lang: WWLoginLangType.zh,
           },
           onLoginSuccess({ code }) {
             setMessage("企业微信授权成功，正在登录。");
