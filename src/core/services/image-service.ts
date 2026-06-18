@@ -21,6 +21,7 @@ type ImageRequest = {
 
 type ImageRequestLifecycle = {
   requestId?: string;
+  priority?: number;
   onQueued?: () => void | Promise<void>;
   onStart?: (profile: OAuthProfile) => void | Promise<void>;
 };
@@ -68,6 +69,12 @@ type ImageFailureDetails = {
   message: string;
   requestId?: string;
   transient: boolean;
+};
+
+type ImageParseFailureMetadata = {
+  upstreamText?: string;
+  debug?: Record<string, unknown>;
+  raw?: unknown;
 };
 
 const SUPPORTED_IMAGE_MODELS = new Set([
@@ -226,6 +233,78 @@ function collectImageGenerationOutputs(raw: unknown): ImageGenerationOutput[] {
   }));
 }
 
+function appendUniqueText(parts: string[], value: unknown): void {
+  if (typeof value !== "string") {
+    return;
+  }
+
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized || parts.includes(normalized)) {
+    return;
+  }
+
+  parts.push(normalized);
+}
+
+function collectOutputTextParts(value: unknown, parts: string[]): void {
+  if (!isRecord(value)) {
+    return;
+  }
+
+  appendUniqueText(parts, value.output_text);
+  appendUniqueText(parts, value.text);
+
+  if (Array.isArray(value.content)) {
+    for (const part of value.content) {
+      if (!isRecord(part)) {
+        continue;
+      }
+      appendUniqueText(parts, part.text);
+      appendUniqueText(parts, part.output_text);
+    }
+  }
+
+  if (Array.isArray(value.output)) {
+    for (const output of value.output) {
+      collectOutputTextParts(output, parts);
+    }
+  }
+}
+
+function extractUpstreamOutputText(raw: unknown): string | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+
+  const parts: string[] = [];
+  const response = isRecord(raw.response) ? raw.response : null;
+  if (response) {
+    collectOutputTextParts(response, parts);
+  }
+
+  const events = Array.isArray(raw.events) ? raw.events : [];
+  for (const event of events) {
+    if (!isRecord(event)) {
+      continue;
+    }
+
+    if (typeof event.type === "string" && event.type.includes("output_text")) {
+      appendUniqueText(parts, event.delta);
+      appendUniqueText(parts, event.text);
+    }
+
+    if (isRecord(event.part)) {
+      collectOutputTextParts(event.part, parts);
+    }
+    if (isRecord(event.item)) {
+      collectOutputTextParts(event.item, parts);
+    }
+  }
+
+  const joined = parts.join(" ").replace(/\s+/g, " ").trim();
+  return joined ? truncateForLog(joined, 1000) : undefined;
+}
+
 function summarizeImageDebug(raw: unknown): Record<string, unknown> {
   if (!isRecord(raw)) {
     return {
@@ -323,6 +402,7 @@ function summarizeImageDebug(raw: unknown): Record<string, unknown> {
       .filter((event) => isRecord(event) && typeof event.type === "string")
       .slice(0, 20)
       .map((event) => (event as Record<string, unknown>).type),
+    output_text_preview: extractUpstreamOutputText(raw),
     error_events: events
       .filter((event) => isRecord(event) && (event.type === "error" || event.type === "response.failed"))
       .slice(0, 5)
@@ -424,6 +504,29 @@ function extractImageFailureDetails(raw: unknown): ImageFailureDetails | null {
 function createError(message: string, statusCode: number): Error & { statusCode: number } {
   const error = new Error(message) as Error & { statusCode: number };
   error.statusCode = statusCode;
+  return error;
+}
+
+function createImageParseError(
+  message: string,
+  statusCode: number,
+  metadata?: ImageParseFailureMetadata,
+): Error & { statusCode: number; upstreamText?: string; imageDebug?: Record<string, unknown>; upstreamRaw?: unknown } {
+  const error = createError(message, statusCode) as Error & {
+    statusCode: number;
+    upstreamText?: string;
+    imageDebug?: Record<string, unknown>;
+    upstreamRaw?: unknown;
+  };
+  if (metadata?.upstreamText) {
+    error.upstreamText = metadata.upstreamText;
+  }
+  if (metadata?.debug) {
+    error.imageDebug = metadata.debug;
+  }
+  if (typeof metadata?.raw !== "undefined") {
+    error.upstreamRaw = metadata.raw;
+  }
   return error;
 }
 
@@ -535,6 +638,7 @@ export class ImageService {
             requestId: lifecycle?.requestId,
             route: "images/chatgpt-web",
             model: requestedImageModel,
+            priority: lifecycle?.priority,
             onQueued: lifecycle?.onQueued,
             onStart: () => lifecycle?.onStart?.(profile),
           },
@@ -619,6 +723,7 @@ export class ImageService {
             requestId: lifecycle?.requestId,
             route: request.inputImages && request.inputImages.length > 0 ? "images/edits" : "images/generations",
             model: orchestratorModel,
+            priority: lifecycle?.priority,
             onQueued: lifecycle?.onQueued,
             onStart: () => lifecycle?.onStart?.(profile),
           },
@@ -635,12 +740,14 @@ export class ImageService {
       const response = isRecord(raw.response) ? raw.response : null;
       const images = collectImageGenerationOutputs(raw);
       const debugSummary = summarizeImageDebug(raw);
+      const upstreamText = extractUpstreamOutputText(raw);
       if (images.length === 0) {
         const upstreamFailure = extractImageFailureDetails(raw);
         console.error("[gateway:image] parse failure", {
           ...requestSummary,
           attempt,
           upstreamFailure,
+          upstreamText,
           debug: debugSummary,
         });
 
@@ -659,7 +766,11 @@ export class ImageService {
 
         if (upstreamFailure) {
           const reason = upstreamFailure.code ? `${upstreamFailure.code}: ${upstreamFailure.message}` : upstreamFailure.message;
-          throw createError(`上游图片生成失败: ${reason}`, upstreamFailure.transient ? 503 : 502);
+          throw createImageParseError(`上游图片生成失败: ${reason}`, upstreamFailure.transient ? 503 : 502, {
+            upstreamText,
+            debug: debugSummary,
+            raw,
+          });
         }
 
         if (request.inputImages && request.inputImages.length > 0) {
@@ -683,6 +794,7 @@ export class ImageService {
                 requestId: lifecycle?.requestId,
                 route: "images/chatgpt-web-fallback",
                 model: requestedImageModel,
+                priority: lifecycle?.priority,
                 onQueued: lifecycle?.onQueued,
                 onStart: () => lifecycle?.onStart?.(profile),
               },
@@ -705,7 +817,14 @@ export class ImageService {
             });
           }
         }
-        throw createError("图片生成请求已完成，但没有解析出 image_generation_call 结果。", 502);
+        const message = upstreamText
+          ? `图片生成请求已完成，但上游未返回图片。原始返回: ${upstreamText}`
+          : "图片生成请求已完成，但没有解析出 image_generation_call 结果。";
+        throw createImageParseError(message, 502, {
+          upstreamText,
+          debug: debugSummary,
+          raw,
+        });
       }
 
       const first = images[0];

@@ -10,7 +10,13 @@ type ThrottleSettings = {
 
 type ProfileQueueState = {
   running: number;
-  waiters: Array<() => void>;
+  waiters: ProfileQueueWaiter[];
+};
+
+type ProfileQueueWaiter = {
+  priority: number;
+  enqueuedAt: number;
+  resolve: () => void;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -68,26 +74,33 @@ export class RequestThrottleService {
   private async acquireProfileSlot(
     queueKey: string,
     maxConcurrency: number,
-    details?: { requestId?: string; route?: string; model?: string; onQueued?: () => void | Promise<void> },
+    details?: { requestId?: string; route?: string; model?: string; priority?: number; onQueued?: () => void | Promise<void> },
   ): Promise<() => void> {
     const queue = this.getProfileQueue(queueKey);
     let acquiredFromQueue = false;
+    const priority = Number.isFinite(details?.priority) ? Number(details?.priority) : 0;
     if (queue.running >= maxConcurrency) {
       console.info("[gateway:throttle] queued Codex request", {
         profileId: queueKey,
         route: details?.route,
         model: details?.model,
         requestId: details?.requestId,
+        priority,
         running: queue.running,
         queued: queue.waiters.length + 1,
         maxConcurrency,
       });
       await details?.onQueued?.();
       await new Promise<void>((resolve) => {
-        queue.waiters.push(() => {
-          acquiredFromQueue = true;
-          resolve();
+        queue.waiters.push({
+          priority,
+          enqueuedAt: Date.now(),
+          resolve: () => {
+            acquiredFromQueue = true;
+            resolve();
+          },
         });
+        queue.waiters.sort((first, second) => second.priority - first.priority || first.enqueuedAt - second.enqueuedAt);
       });
     }
 
@@ -102,7 +115,7 @@ export class RequestThrottleService {
       released = true;
       const next = queue.waiters.shift();
       if (next) {
-        next();
+        next.resolve();
         return;
       }
       queue.running = Math.max(0, queue.running - 1);
@@ -119,6 +132,7 @@ export class RequestThrottleService {
       requestId?: string;
       route?: string;
       model?: string;
+      priority?: number;
       onQueued?: () => void | Promise<void>;
       onStart?: () => void | Promise<void>;
     },

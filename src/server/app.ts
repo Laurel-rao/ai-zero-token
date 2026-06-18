@@ -115,6 +115,12 @@ type ImageLimitCheckResult = {
   };
 };
 
+type ImageOwnerPolicy = {
+  priority: number;
+  imageLimitsDisabled: boolean;
+  groupName?: string;
+};
+
 type GatewayShareAddress = {
   host: string;
   label: string;
@@ -510,15 +516,33 @@ const gatewayUserCreateSchema = z.object({
   username: z.string().trim().min(1).max(80),
   password: z.string().min(6).max(200),
   role: z.enum(["admin", "user"]).default("user"),
+  groupId: z.string().trim().min(1).optional(),
 });
 
 const gatewayUserUpdateSchema = z.object({
   password: z.string().min(6).max(200).optional(),
   role: z.enum(["admin", "user"]).optional(),
+  groupId: z.string().trim().min(1).nullable().optional(),
   disabled: z.boolean().optional(),
 });
 
 const gatewayUserParamsSchema = z.object({
+  id: z.string().min(1),
+});
+
+const gatewayUserGroupCreateSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  sortOrder: z.number().int().min(-100_000).max(100_000).default(0),
+  imageLimitsDisabled: z.boolean().default(false),
+});
+
+const gatewayUserGroupUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  sortOrder: z.number().int().min(-100_000).max(100_000).optional(),
+  imageLimitsDisabled: z.boolean().optional(),
+});
+
+const gatewayUserGroupParamsSchema = z.object({
   id: z.string().min(1),
 });
 
@@ -2096,6 +2120,29 @@ function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function getImageFailureDetails(error: unknown): {
+  upstreamText?: string;
+  imageDebug?: Record<string, unknown>;
+  raw?: unknown;
+} {
+  if (!error || typeof error !== "object") {
+    return {};
+  }
+
+  const record = error as {
+    upstreamText?: unknown;
+    imageDebug?: unknown;
+    upstreamRaw?: unknown;
+  };
+  return {
+    upstreamText: typeof record.upstreamText === "string" ? record.upstreamText : undefined,
+    imageDebug: record.imageDebug && typeof record.imageDebug === "object" && !Array.isArray(record.imageDebug)
+      ? record.imageDebug as Record<string, unknown>
+      : undefined,
+    raw: typeof record.upstreamRaw === "undefined" ? undefined : record.upstreamRaw,
+  };
+}
+
 function getErrorStatusCode(error: unknown): number {
   const normalized = normalizeError(error) as Error & { statusCode?: number };
   if (typeof normalized.statusCode === "number") {
@@ -2363,9 +2410,29 @@ export function createApp(params?: {
     };
   }
 
+  async function getImageOwnerPolicy(owner: string | undefined): Promise<ImageOwnerPolicy> {
+    if (!owner) {
+      return {
+        priority: 0,
+        imageLimitsDisabled: false,
+      };
+    }
+    const user = await ctx.gatewayDatabaseService.getUserWithGroupByUsername(owner).catch(() => null);
+    return {
+      priority: user?.groupSortOrder ?? 0,
+      imageLimitsDisabled: Boolean(user?.groupImageLimitsDisabled),
+      groupName: user?.groupName,
+    };
+  }
+
   async function checkImageGenerationLimit(owner: string | undefined, settings: GatewaySettings): Promise<ImageLimitCheckResult> {
     const limits = settings.image.limits;
     if (!owner) {
+      return { allowed: true };
+    }
+
+    const policy = await getImageOwnerPolicy(owner);
+    if (policy.imageLimitsDisabled) {
       return { allowed: true };
     }
 
@@ -2843,6 +2910,7 @@ export function createApp(params?: {
   app.setErrorHandler((error, request, reply) => {
     const normalized = normalizeError(error);
     const statusCode = getErrorStatusCode(normalized);
+    const imageFailureDetails = getImageFailureDetails(normalized);
     const isBodyTooLarge = statusCode === 413;
     const message = isBodyTooLarge
       ? `请求体过大，当前网关默认上限 ${formatBytesAsMiB(defaultBodyLimit)}，Codex compact 上限 ${formatBytesAsMiB(codexCompactBodyLimit)}。如仍不够，请用 AZT_BODY_LIMIT_MB 调大后重启网关。`
@@ -2854,6 +2922,8 @@ export function createApp(params?: {
       message,
       code: (normalized as Error & { code?: unknown }).code,
       upstreamRequestId: (normalized as Error & { requestId?: unknown }).requestId,
+      upstreamText: imageFailureDetails.upstreamText,
+      imageDebug: imageFailureDetails.imageDebug,
       stack: normalized.stack,
     });
     reply.code(statusCode);
@@ -3356,6 +3426,110 @@ export function createApp(params?: {
     users: await ctx.gatewayDatabaseService.listUsers(),
   }));
 
+  app.get("/_gateway/admin/user-groups", async () => ({
+    groups: await ctx.gatewayDatabaseService.listUserGroups(),
+  }));
+
+  app.post("/_gateway/admin/user-groups", async (request, reply) => {
+    const parsed = gatewayUserGroupCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: parsed.error.issues[0]?.message ?? "请求体格式错误",
+        },
+      };
+    }
+    try {
+      const group = await ctx.gatewayDatabaseService.createUserGroup(parsed.data);
+      return {
+        group,
+        groups: await ctx.gatewayDatabaseService.listUserGroups(),
+      };
+    } catch (error) {
+      reply.code(409);
+      return {
+        error: {
+          type: "group_conflict",
+          message: error instanceof Error && error.message ? error.message : "用户组创建失败，名称可能已存在。",
+        },
+      };
+    }
+  });
+
+  app.put("/_gateway/admin/user-groups/:id", async (request, reply) => {
+    const params = gatewayUserGroupParamsSchema.safeParse(request.params);
+    const parsed = gatewayUserGroupUpdateSchema.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      reply.code(400);
+      const validationMessage = !params.success
+        ? params.error.issues[0]?.message
+        : !parsed.success
+          ? parsed.error.issues[0]?.message
+          : undefined;
+      return {
+        error: {
+          type: "validation_error",
+          message: validationMessage ?? "请求体格式错误",
+        },
+      };
+    }
+    try {
+      const group = await ctx.gatewayDatabaseService.updateUserGroup(params.data.id, parsed.data);
+      if (!group) {
+        reply.code(404);
+        return {
+          error: {
+            type: "not_found",
+            message: "用户组不存在。",
+          },
+        };
+      }
+      return {
+        group,
+        groups: await ctx.gatewayDatabaseService.listUserGroups(),
+        users: await ctx.gatewayDatabaseService.listUsers(),
+      };
+    } catch (error) {
+      reply.code(409);
+      return {
+        error: {
+          type: "group_conflict",
+          message: error instanceof Error && error.message ? error.message : "用户组更新失败，名称可能已存在。",
+        },
+      };
+    }
+  });
+
+  app.delete("/_gateway/admin/user-groups/:id", async (request, reply) => {
+    const params = gatewayUserGroupParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: params.error.issues[0]?.message ?? "请求参数错误",
+        },
+      };
+    }
+    const deleted = await ctx.gatewayDatabaseService.deleteUserGroup(params.data.id);
+    if (!deleted) {
+      reply.code(400);
+      return {
+        error: {
+          type: "delete_group_failed",
+          message: "用户组不存在，或至少需要保留一个用户组。",
+        },
+      };
+    }
+    return {
+      ok: true,
+      groups: await ctx.gatewayDatabaseService.listUserGroups(),
+      users: await ctx.gatewayDatabaseService.listUsers(),
+    };
+  });
+
   app.post("/_gateway/admin/users", async (request, reply) => {
     const parsed = gatewayUserCreateSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -3372,6 +3546,7 @@ export function createApp(params?: {
         username: parsed.data.username,
         passwordHash: hashSecret(parsed.data.password),
         role: parsed.data.role,
+        groupId: parsed.data.groupId,
       });
       return {
         user,
@@ -3419,6 +3594,7 @@ export function createApp(params?: {
     const user = await ctx.gatewayDatabaseService.updateUser(params.data.id, {
       passwordHash: parsed.data.password ? hashSecret(parsed.data.password) : undefined,
       role: parsed.data.role,
+      groupId: parsed.data.groupId,
       disabled: parsed.data.disabled,
     });
     if (!user) {
@@ -4964,6 +5140,7 @@ export function createApp(params?: {
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const ownerPolicy = await getImageOwnerPolicy(requestOwner);
     const limit = await checkImageGenerationLimit(requestOwner, settings);
     if (!limit.allowed) {
       return sendImageLimitResponse(reply, limit, {
@@ -5039,29 +5216,32 @@ export function createApp(params?: {
           moderation: parsed.data.moderation,
         }, {
           requestId: request.id,
-          onQueued: () => ctx.gatewayDatabaseService.saveGeneration({
-            id: generationId,
-            owner: requestOwner,
-            createdAt: generationCreatedAt,
-            status: "queued",
-            endpoint: request.url,
-            account: profileLogLabel(activeProfile),
-            model: parsed.data.model ?? "gpt-image-2",
-            prompt: parsed.data.prompt,
-            ratio: ratioFromImageSize(parsed.data.size),
-            size: parsed.data.size,
-            quality: parsed.data.quality,
-            outputFormat: parsed.data.output_format,
-            durationMs: 0,
-            request: {
-              ...requestSummary,
+          priority: ownerPolicy.priority,
+          onQueued: async () => {
+            await ctx.gatewayDatabaseService.saveGeneration({
+              id: generationId,
+              owner: requestOwner,
+              createdAt: generationCreatedAt,
+              status: "queued",
+              endpoint: request.url,
+              account: profileLogLabel(activeProfile),
+              model: parsed.data.model ?? "gpt-image-2",
               prompt: parsed.data.prompt,
-            },
-          }),
-          onStart: (profile) => {
+              ratio: ratioFromImageSize(parsed.data.size),
+              size: parsed.data.size,
+              quality: parsed.data.quality,
+              outputFormat: parsed.data.output_format,
+              durationMs: 0,
+              request: {
+                ...requestSummary,
+                prompt: parsed.data.prompt,
+              },
+            });
+          },
+          onStart: async (profile) => {
             startTimeout();
             generationStartedAt ??= Date.now();
-            return ctx.gatewayDatabaseService.saveGeneration({
+            await ctx.gatewayDatabaseService.saveGeneration({
               id: generationId,
               owner: requestOwner,
               createdAt: generationCreatedAt,
@@ -5089,6 +5269,7 @@ export function createApp(params?: {
     } catch (error) {
       const normalized = normalizeError(error);
       const statusCode = getErrorStatusCode(normalized);
+      const imageFailureDetails = getImageFailureDetails(normalized);
       const durationMs = performance.now() - startedAt;
       const failedProfile = (error as { _gatewayProfile?: OAuthProfile })._gatewayProfile ?? activeProfile;
       const failedImageRoute: UsageImageRoute = failedProfile && isFreePlan(failedProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : imageRoute;
@@ -5110,6 +5291,13 @@ export function createApp(params?: {
         request: {
           ...requestSummary,
           prompt: parsed.data.prompt,
+        },
+        responseSummary: {
+          parseFailure: {
+            upstreamText: imageFailureDetails.upstreamText,
+            debug: imageFailureDetails.imageDebug,
+            raw: imageFailureDetails.raw,
+          },
         },
         error: normalized.message,
       }).catch((persistError) => {
@@ -5137,6 +5325,9 @@ export function createApp(params?: {
             upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
             upstreamErrorCode: (normalized as Error & { upstreamErrorCode?: unknown }).upstreamErrorCode,
             upstreamErrorMessage: (normalized as Error & { upstreamErrorMessage?: unknown }).upstreamErrorMessage,
+            upstreamText: imageFailureDetails.upstreamText,
+            imageDebug: imageFailureDetails.imageDebug,
+            raw: imageFailureDetails.raw,
           },
         },
         usage: {
@@ -5376,6 +5567,7 @@ export function createApp(params?: {
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const ownerPolicy = await getImageOwnerPolicy(requestOwner);
     const limit = await checkImageGenerationLimit(requestOwner, settings);
     if (!limit.allowed) {
       return sendImageLimitResponse(reply, limit, {
@@ -5453,30 +5645,33 @@ export function createApp(params?: {
           moderation: parsed.data.moderation,
         }, {
           requestId: request.id,
-          onQueued: () => ctx.gatewayDatabaseService.saveGeneration({
-            id: generationId,
-            owner: requestOwner,
-            createdAt: generationCreatedAt,
-            status: "queued",
-            endpoint: request.url,
-            account: profileLogLabel(activeProfile),
-            model: parsed.data.model ?? "gpt-image-2",
-            prompt: parsed.data.prompt,
-            ratio: ratioFromImageSize(parsed.data.size),
-            size: parsed.data.size,
-            quality: parsed.data.quality,
-            outputFormat: parsed.data.output_format,
-            durationMs: 0,
-            request: {
-              ...requestSummary,
+          priority: ownerPolicy.priority,
+          onQueued: async () => {
+            await ctx.gatewayDatabaseService.saveGeneration({
+              id: generationId,
+              owner: requestOwner,
+              createdAt: generationCreatedAt,
+              status: "queued",
+              endpoint: request.url,
+              account: profileLogLabel(activeProfile),
+              model: parsed.data.model ?? "gpt-image-2",
               prompt: parsed.data.prompt,
-            },
-            referenceImages: getImageEditReferenceAssets(parsed.data),
-          }),
-          onStart: (profile) => {
+              ratio: ratioFromImageSize(parsed.data.size),
+              size: parsed.data.size,
+              quality: parsed.data.quality,
+              outputFormat: parsed.data.output_format,
+              durationMs: 0,
+              request: {
+                ...requestSummary,
+                prompt: parsed.data.prompt,
+              },
+              referenceImages: getImageEditReferenceAssets(parsed.data),
+            });
+          },
+          onStart: async (profile) => {
             startTimeout();
             generationStartedAt ??= Date.now();
-            return ctx.gatewayDatabaseService.saveGeneration({
+            await ctx.gatewayDatabaseService.saveGeneration({
               id: generationId,
               owner: requestOwner,
               createdAt: generationCreatedAt,
@@ -5505,6 +5700,7 @@ export function createApp(params?: {
     } catch (error) {
       const normalized = normalizeError(error);
       const statusCode = getErrorStatusCode(normalized);
+      const imageFailureDetails = getImageFailureDetails(normalized);
       const durationMs = performance.now() - startedAt;
       const failedProfile = (error as { _gatewayProfile?: OAuthProfile })._gatewayProfile ?? activeProfile;
       const failedImageRoute: UsageImageRoute = failedProfile && isFreePlan(failedProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : imageRoute;
@@ -5526,6 +5722,13 @@ export function createApp(params?: {
         request: {
           ...requestSummary,
           prompt: parsed.data.prompt,
+        },
+        responseSummary: {
+          parseFailure: {
+            upstreamText: imageFailureDetails.upstreamText,
+            debug: imageFailureDetails.imageDebug,
+            raw: imageFailureDetails.raw,
+          },
         },
         error: normalized.message,
         referenceImages: getImageEditReferenceAssets(parsed.data),
@@ -5554,6 +5757,9 @@ export function createApp(params?: {
             upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
             upstreamErrorCode: (normalized as Error & { upstreamErrorCode?: unknown }).upstreamErrorCode,
             upstreamErrorMessage: (normalized as Error & { upstreamErrorMessage?: unknown }).upstreamErrorMessage,
+            upstreamText: imageFailureDetails.upstreamText,
+            imageDebug: imageFailureDetails.imageDebug,
+            raw: imageFailureDetails.raw,
           },
         },
         usage: {

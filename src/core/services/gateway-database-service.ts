@@ -110,10 +110,23 @@ type GenerationDedupTarget = {
 
 export type GatewayUserRole = "admin" | "user";
 
+export type GatewayUserGroup = {
+  id: string;
+  name: string;
+  sortOrder: number;
+  imageLimitsDisabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type GatewayUser = {
   id: string;
   username: string;
   role: GatewayUserRole;
+  groupId?: string;
+  groupName?: string;
+  groupSortOrder: number;
+  groupImageLimitsDisabled: boolean;
   createdAt: number;
   updatedAt: number;
   disabled: boolean;
@@ -127,8 +140,18 @@ export type SaveGatewayUserParams = {
   username: string;
   passwordHash: string;
   role: GatewayUserRole;
+  groupId?: string | null;
   disabled?: boolean;
 };
+
+export type SaveGatewayUserGroupParams = {
+  name: string;
+  sortOrder: number;
+  imageLimitsDisabled?: boolean;
+};
+
+const DEFAULT_USER_GROUP_ID = "default-user";
+const DEFAULT_VIP_GROUP_ID = "vip-user";
 
 type DataUrlPayload = {
   mimeType: string;
@@ -233,11 +256,21 @@ export class GatewayDatabaseService {
     await fs.mkdir(getStateDir(), { recursive: true });
     await fs.mkdir(getGenerationAssetsDir(), { recursive: true });
     this.database.exec(`
+      CREATE TABLE IF NOT EXISTS gateway_user_groups (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        image_limits_disabled INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gateway_user_groups_sort_order ON gateway_user_groups(sort_order DESC, created_at ASC);
       CREATE TABLE IF NOT EXISTS gateway_users (
         id TEXT PRIMARY KEY,
         username TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL,
+        group_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         disabled INTEGER NOT NULL DEFAULT 0
@@ -282,8 +315,10 @@ export class GatewayDatabaseService {
       CREATE INDEX IF NOT EXISTS idx_generation_history_created_at ON generation_history(created_at DESC);
     `);
     this.addColumnIfMissing("request_logs", "owner", "TEXT");
+    this.addColumnIfMissing("gateway_users", "group_id", "TEXT");
     this.addColumnIfMissing("generation_history", "owner", "TEXT");
     this.addColumnIfMissing("generation_history", "started_at", "INTEGER");
+    this.ensureDefaultUserGroups();
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS idx_request_logs_owner_time ON request_logs(owner, time DESC);
       CREATE INDEX IF NOT EXISTS idx_generation_history_owner_created_at ON generation_history(owner, created_at DESC);
@@ -297,16 +332,16 @@ export class GatewayDatabaseService {
     const existing = await this.getUserByUsername(username);
     if (existing) {
       this.database
-        .prepare("UPDATE gateway_users SET password_hash = ?, role = 'admin', disabled = 0, updated_at = ? WHERE id = ?")
-        .run(passwordHash, now, existing.id);
+        .prepare("UPDATE gateway_users SET password_hash = ?, role = 'admin', group_id = COALESCE(group_id, ?), disabled = 0, updated_at = ? WHERE id = ?")
+        .run(passwordHash, DEFAULT_USER_GROUP_ID, now, existing.id);
       return;
     }
     this.database
       .prepare(`
-        INSERT INTO gateway_users (id, username, password_hash, role, created_at, updated_at, disabled)
-        VALUES (?, ?, ?, 'admin', ?, ?, 0)
+        INSERT INTO gateway_users (id, username, password_hash, role, group_id, created_at, updated_at, disabled)
+        VALUES (?, ?, ?, 'admin', ?, ?, ?, 0)
       `)
-      .run(crypto.randomUUID(), username, passwordHash, now, now);
+      .run(crypto.randomUUID(), username, passwordHash, DEFAULT_USER_GROUP_ID, now, now);
   }
 
   async hasUsers(): Promise<boolean> {
@@ -320,9 +355,25 @@ export class GatewayDatabaseService {
     const row = this.database
       .prepare(`
         SELECT id, username, password_hash AS passwordHash, role, created_at AS createdAt,
-               updated_at AS updatedAt, disabled
+               updated_at AS updatedAt, disabled, group_id AS groupId
         FROM gateway_users
         WHERE username = ?
+      `)
+      .get(username) as Record<string, unknown> | undefined;
+    return row ? this.mapUserRecord(row) : null;
+  }
+
+  async getUserWithGroupByUsername(username: string): Promise<GatewayUserRecord | null> {
+    await this.init();
+    const row = this.database
+      .prepare(`
+        SELECT u.id, u.username, u.password_hash AS passwordHash, u.role, u.created_at AS createdAt,
+               u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId,
+               g.name AS groupName, g.sort_order AS groupSortOrder,
+               g.image_limits_disabled AS groupImageLimitsDisabled
+        FROM gateway_users u
+        LEFT JOIN gateway_user_groups g ON g.id = u.group_id
+        WHERE u.username = ?
       `)
       .get(username) as Record<string, unknown> | undefined;
     return row ? this.mapUserRecord(row) : null;
@@ -332,10 +383,13 @@ export class GatewayDatabaseService {
     await this.init();
     const rows = this.database
       .prepare(`
-        SELECT id, username, password_hash AS passwordHash, role, created_at AS createdAt,
-               updated_at AS updatedAt, disabled
-        FROM gateway_users
-        ORDER BY role = 'admin' DESC, created_at ASC
+        SELECT u.id, u.username, u.password_hash AS passwordHash, u.role, u.created_at AS createdAt,
+               u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId,
+               g.name AS groupName, g.sort_order AS groupSortOrder,
+               g.image_limits_disabled AS groupImageLimitsDisabled
+        FROM gateway_users u
+        LEFT JOIN gateway_user_groups g ON g.id = u.group_id
+        ORDER BY role = 'admin' DESC, COALESCE(g.sort_order, 0) DESC, u.created_at ASC
       `)
       .all() as Array<Record<string, unknown>>;
     return rows.map((row) => {
@@ -350,10 +404,10 @@ export class GatewayDatabaseService {
     const id = crypto.randomUUID();
     this.database
       .prepare(`
-        INSERT INTO gateway_users (id, username, password_hash, role, created_at, updated_at, disabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO gateway_users (id, username, password_hash, role, group_id, created_at, updated_at, disabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `)
-      .run(id, params.username, params.passwordHash, params.role, now, now, params.disabled ? 1 : 0);
+      .run(id, params.username, params.passwordHash, params.role, params.groupId ?? DEFAULT_USER_GROUP_ID, now, now, params.disabled ? 1 : 0);
     const created = await this.getUserByUsername(params.username);
     if (!created) {
       throw new Error("用户创建失败。");
@@ -364,13 +418,13 @@ export class GatewayDatabaseService {
 
   async updateUser(
     id: string,
-    params: Partial<Pick<SaveGatewayUserParams, "passwordHash" | "role" | "disabled">>,
+    params: Partial<Pick<SaveGatewayUserParams, "passwordHash" | "role" | "groupId" | "disabled">>,
   ): Promise<GatewayUser | null> {
     await this.init();
     const current = this.database
       .prepare(`
         SELECT id, username, password_hash AS passwordHash, role, created_at AS createdAt,
-               updated_at AS updatedAt, disabled
+               updated_at AS updatedAt, disabled, group_id AS groupId
         FROM gateway_users
         WHERE id = ?
       `)
@@ -381,20 +435,24 @@ export class GatewayDatabaseService {
     const now = Date.now();
     const record = this.mapUserRecord(current);
     this.database
-      .prepare("UPDATE gateway_users SET password_hash = ?, role = ?, disabled = ?, updated_at = ? WHERE id = ?")
+      .prepare("UPDATE gateway_users SET password_hash = ?, role = ?, group_id = ?, disabled = ?, updated_at = ? WHERE id = ?")
       .run(
         params.passwordHash ?? record.passwordHash,
         params.role ?? record.role,
+        params.groupId === undefined ? (record.groupId ?? DEFAULT_USER_GROUP_ID) : params.groupId,
         params.disabled === undefined ? (record.disabled ? 1 : 0) : (params.disabled ? 1 : 0),
         now,
         id,
       );
     const updated = this.database
       .prepare(`
-        SELECT id, username, password_hash AS passwordHash, role, created_at AS createdAt,
-               updated_at AS updatedAt, disabled
-        FROM gateway_users
-        WHERE id = ?
+        SELECT u.id, u.username, u.password_hash AS passwordHash, u.role, u.created_at AS createdAt,
+               u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId,
+               g.name AS groupName, g.sort_order AS groupSortOrder,
+               g.image_limits_disabled AS groupImageLimitsDisabled
+        FROM gateway_users u
+        LEFT JOIN gateway_user_groups g ON g.id = u.group_id
+        WHERE u.id = ?
       `)
       .get(id) as Record<string, unknown> | undefined;
     if (!updated) {
@@ -420,6 +478,89 @@ export class GatewayDatabaseService {
       `)
       .get(exceptId ?? null, exceptId ?? null) as { count?: unknown };
     return Number(row.count ?? 0);
+  }
+
+  async listUserGroups(): Promise<GatewayUserGroup[]> {
+    await this.init();
+    const rows = this.database
+      .prepare(`
+        SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
+               created_at AS createdAt, updated_at AS updatedAt
+        FROM gateway_user_groups
+        ORDER BY sort_order DESC, created_at ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapUserGroup(row));
+  }
+
+  async createUserGroup(params: SaveGatewayUserGroupParams): Promise<GatewayUserGroup> {
+    await this.init();
+    const now = Date.now();
+    const id = crypto.randomUUID();
+    this.database
+      .prepare(`
+        INSERT INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .run(id, params.name, params.sortOrder, params.imageLimitsDisabled ? 1 : 0, now, now);
+    const created = this.database
+      .prepare(`
+        SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
+               created_at AS createdAt, updated_at AS updatedAt
+        FROM gateway_user_groups
+        WHERE id = ?
+      `)
+      .get(id) as Record<string, unknown> | undefined;
+    if (!created) {
+      throw new Error("用户组创建失败。");
+    }
+    return this.mapUserGroup(created);
+  }
+
+  async updateUserGroup(id: string, params: Partial<SaveGatewayUserGroupParams>): Promise<GatewayUserGroup | null> {
+    await this.init();
+    const current = this.database
+      .prepare(`
+        SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
+               created_at AS createdAt, updated_at AS updatedAt
+        FROM gateway_user_groups
+        WHERE id = ?
+      `)
+      .get(id) as Record<string, unknown> | undefined;
+    if (!current) {
+      return null;
+    }
+    const record = this.mapUserGroup(current);
+    const now = Date.now();
+    this.database
+      .prepare("UPDATE gateway_user_groups SET name = ?, sort_order = ?, image_limits_disabled = ?, updated_at = ? WHERE id = ?")
+      .run(
+        params.name ?? record.name,
+        params.sortOrder ?? record.sortOrder,
+        params.imageLimitsDisabled === undefined ? (record.imageLimitsDisabled ? 1 : 0) : (params.imageLimitsDisabled ? 1 : 0),
+        now,
+        id,
+      );
+    const updated = this.database
+      .prepare(`
+        SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
+               created_at AS createdAt, updated_at AS updatedAt
+        FROM gateway_user_groups
+        WHERE id = ?
+      `)
+      .get(id) as Record<string, unknown> | undefined;
+    return updated ? this.mapUserGroup(updated) : null;
+  }
+
+  async deleteUserGroup(id: string): Promise<boolean> {
+    await this.init();
+    const fallbackId = await this.ensureUserGroupFallback(id);
+    if (!fallbackId) {
+      return false;
+    }
+    this.database.prepare("UPDATE gateway_users SET group_id = ? WHERE group_id = ?").run(fallbackId, id);
+    const result = this.database.prepare("DELETE FROM gateway_user_groups WHERE id = ?").run(id);
+    return result.changes > 0;
   }
 
   async listRequestLogs(limit = 100, owner?: string): Promise<PersistedRequestLog[]> {
@@ -706,12 +847,54 @@ export class GatewayDatabaseService {
     }
   }
 
+  private ensureDefaultUserGroups(): void {
+    const now = Date.now();
+    this.database
+      .prepare(`
+        INSERT OR IGNORE INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, created_at, updated_at)
+        VALUES (?, '普通用户组', 0, 0, ?, ?)
+      `)
+      .run(DEFAULT_USER_GROUP_ID, now, now);
+    this.database
+      .prepare(`
+        INSERT OR IGNORE INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, created_at, updated_at)
+        VALUES (?, 'VIP 用户组', 100, 1, ?, ?)
+      `)
+      .run(DEFAULT_VIP_GROUP_ID, now, now);
+    this.database.prepare("UPDATE gateway_users SET group_id = ? WHERE group_id IS NULL OR group_id = ''").run(DEFAULT_USER_GROUP_ID);
+  }
+
+  private async ensureUserGroupFallback(deletingId: string): Promise<string | null> {
+    const fallback = this.database
+      .prepare("SELECT id FROM gateway_user_groups WHERE id <> ? ORDER BY sort_order ASC, created_at ASC LIMIT 1")
+      .get(deletingId) as { id?: unknown } | undefined;
+    if (typeof fallback?.id === "string" && fallback.id) {
+      return fallback.id;
+    }
+    return null;
+  }
+
+  private mapUserGroup(row: Record<string, unknown>): GatewayUserGroup {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      sortOrder: Number(row.sortOrder ?? 0),
+      imageLimitsDisabled: Boolean(row.imageLimitsDisabled),
+      createdAt: Number(row.createdAt),
+      updatedAt: Number(row.updatedAt),
+    };
+  }
+
   private mapUserRecord(row: Record<string, unknown>): GatewayUserRecord {
     return {
       id: String(row.id),
       username: String(row.username),
       passwordHash: String(row.passwordHash),
       role: row.role === "admin" ? "admin" : "user",
+      groupId: typeof row.groupId === "string" ? row.groupId : undefined,
+      groupName: typeof row.groupName === "string" ? row.groupName : undefined,
+      groupSortOrder: Number(row.groupSortOrder ?? 0),
+      groupImageLimitsDisabled: Boolean(row.groupImageLimitsDisabled),
       createdAt: Number(row.createdAt),
       updatedAt: Number(row.updatedAt),
       disabled: Boolean(row.disabled),
