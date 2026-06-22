@@ -1,6 +1,6 @@
-import { BarChart3, BookOpenText, Home, Image, ImageUp, LayoutDashboard, ListChecks, Settings, ShieldCheck, UserCog, Users, Wifi, type LucideIcon } from "lucide-react";
+import { BarChart3, BookOpenText, Home, Image, ImageUp, LayoutDashboard, ListChecks, MessageSquare, Settings, ShieldCheck, UserCog, Users, UsersRound, Wifi, type LucideIcon } from "lucide-react";
 
-export type AppRoute = "launch" | "overview" | "accounts" | "generate" | "usage" | "tester" | "image-bed" | "docs" | "network" | "logs" | "settings" | "settings-users";
+export type AppRoute = "launch" | "overview" | "accounts" | "chat" | "generate" | "usage" | "tester" | "image-bed" | "docs" | "network" | "logs" | "settings" | "settings-users" | "settings-groups";
 export type UserRole = "admin" | "user";
 
 export type NavRoute = {
@@ -14,6 +14,7 @@ export const routes: NavRoute[] = [
   { id: "launch", label: "启动页", icon: Home },
   { id: "overview", label: "概览", icon: LayoutDashboard },
   { id: "accounts", label: "账号管理", icon: Users },
+  { id: "chat", label: "聊天", icon: MessageSquare },
   { id: "generate", label: "生图", icon: Image },
   { id: "usage", label: "用量统计", icon: BarChart3 },
   { id: "tester", label: "接口测试", icon: ShieldCheck },
@@ -23,9 +24,10 @@ export const routes: NavRoute[] = [
   { id: "logs", label: "请求日志", icon: ListChecks },
   { id: "settings", label: "系统设置", icon: Settings },
   { id: "settings-users", label: "用户管理", icon: UserCog, parentId: "settings" },
+  { id: "settings-groups", label: "用户组管理", icon: UsersRound, parentId: "settings" },
 ];
 
-const userRoutes = new Set<AppRoute>(["generate", "logs"]);
+const userRoutes = new Set<AppRoute>(["chat", "generate", "logs"]);
 
 export function normalizeUserRole(role?: string | null): UserRole {
   return role === "user" ? "user" : "admin";

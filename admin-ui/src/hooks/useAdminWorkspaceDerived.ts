@@ -40,6 +40,7 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
       ? `当前账号为 ${profileLabel(activeProfile, state.showEmails)}，套餐 ${getPlanType(activeProfile)}，可查看网关状态和运行摘要。`
       : "还没有激活账号。你可以新增账号、导入账号 JSON，或先查看本地 API 信息。",
     accounts: "账号池、额度、套餐、Codex 应用状态集中管理，适合横向比较多个账号。",
+    chat: "类 ChatGPT 的对话工作台，支持流式回复和服务端历史。",
     generate: "面向图片生成的专用工作台，支持参考图、比例预设和本地生图历史。",
     usage: "查看今日、本次启动和历史累计的请求、token、图片、账号、模型和错误统计。",
     tester: "独立接口测试工作区，支持 Chat、Responses、Models 和 gpt-image-2 图片接口。",
@@ -49,6 +50,7 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
     logs: "查看本页快速测试产生的最近请求，包含接口、模型、状态和耗时。",
     settings: "调整本地网关、默认模型、代理和自动切换策略的桌面设置页。",
     "settings-users": "管理数据库登录用户，并为具体用户设置生图限额覆盖。",
+    "settings-groups": "管理用户组、排队优先级和组级生图限额。",
   };
 
   return {

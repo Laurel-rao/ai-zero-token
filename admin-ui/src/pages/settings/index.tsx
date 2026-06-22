@@ -2,6 +2,7 @@ import {
   ChevronDown,
   Gauge,
   Globe2,
+  ImageIcon,
   KeyRound,
   Layers3,
   Loader2,
@@ -9,7 +10,6 @@ import {
   Network,
   RefreshCw,
   Search,
-  ServerCog,
   ShieldCheck,
   UsersRound,
   Zap,
@@ -20,9 +20,10 @@ import { fetchJson } from "@/shared/api";
 import type { AdminConfig, ProfileSummary } from "@/shared/types";
 import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
 import { errorMessage } from "@/shared/lib/app-utils";
-import { formatJson } from "@/shared/lib/format";
+import { formatDuration, formatFullTime, formatJson } from "@/shared/lib/format";
 import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
 import type { UserRole } from "@/routes/routes";
+import { normalizeBranding } from "@/shared/lib/branding";
 
 function countToDraft(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
@@ -30,8 +31,12 @@ function countToDraft(value: number | undefined): string {
 
 function createSettingsDraft(config: AdminConfig): SettingDraft {
   const imageLimits = config.settings.image?.limits;
+  const branding = normalizeBranding(config.settings.branding);
   return {
     defaultModel: config.settings.defaultModel,
+    brandingTitle: branding.title,
+    brandingAppIconUrl: branding.appIconUrl,
+    brandingFaviconUrl: branding.faviconUrl,
     proxyEnabled: config.settings.networkProxy.enabled,
     proxyUrl: config.settings.networkProxy.url,
     proxyNoProxy: config.settings.networkProxy.noProxy || "localhost,127.0.0.1,::1",
@@ -55,7 +60,6 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     wecomCorpId: config.settings.wecom?.corpId || "",
     wecomAgentId: config.settings.wecom?.agentId || "",
     wecomSecret: config.settings.wecom?.secret || "",
-    serverPort: String(config.settings.server.port || 8787),
   };
 }
 
@@ -63,7 +67,7 @@ function profileSearchText(profile: ProfileSummary): string {
   return [profileLabel(profile, true), profile.email || "", profile.accountId, profile.codexAccountId || "", profile.profileId, getPlanType(profile)].join(" ").toLowerCase();
 }
 
-type SettingSectionId = "model" | "wecom" | "proxy" | "server" | "runtime" | "limits" | "rotation" | "display";
+type SettingSectionId = "model" | "branding" | "wecom" | "proxy" | "runtime" | "limits" | "rotation" | "display";
 
 type SettingSectionMeta = {
   id: SettingSectionId;
@@ -103,6 +107,9 @@ export function SettingsPage(props: {
 }) {
   const [settingsDraft, setSettingsDraft] = useState<SettingDraft>({
     defaultModel: "",
+    brandingTitle: "AI Zero Token",
+    brandingAppIconUrl: "",
+    brandingFaviconUrl: "",
     proxyEnabled: false,
     proxyUrl: "",
     proxyNoProxy: "localhost,127.0.0.1,::1",
@@ -121,7 +128,6 @@ export function SettingsPage(props: {
     wecomCorpId: "",
     wecomAgentId: "",
     wecomSecret: "",
-    serverPort: "8787",
   });
   const [settingsDirtyFields, setSettingsDirtyFields] = useState<Set<keyof SettingDraft>>(() => new Set());
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
@@ -178,8 +184,22 @@ export function SettingsPage(props: {
   ).length;
   const autoSwitchBlockedCount = Math.max(0, autoSwitchTotalCount - autoSwitchExcludedCount - autoSwitchRuntimeReadyCount);
   const modelCount = props.config?.modelCatalog.modelCount || props.config?.models.length || 0;
+  const modelAutoRefresh = props.config?.modelAutoRefresh;
   const wecomConfigured = Boolean(settingsDraft.wecomEnabled && settingsDraft.wecomCorpId.trim() && settingsDraft.wecomAgentId.trim());
   const selectedModel = settingsDraft.defaultModel || props.config?.settings.defaultModel || "-";
+  const brandingPreviewIcon = settingsDraft.brandingAppIconUrl || settingsDraft.brandingFaviconUrl;
+  const modelAutoRefreshStatus = modelAutoRefresh?.running
+    ? "自动同步中"
+    : modelAutoRefresh?.lastError && (!modelAutoRefresh.lastSuccessAt || (modelAutoRefresh.lastFailureAt ?? 0) > modelAutoRefresh.lastSuccessAt)
+      ? "最近同步失败"
+      : modelAutoRefresh?.enabled
+        ? "每小时自动同步"
+        : "未启用自动同步";
+  const modelAutoRefreshDetail = [
+    modelAutoRefresh?.intervalMs ? `周期 ${formatDuration(modelAutoRefresh.intervalMs)}` : "",
+    modelAutoRefresh?.lastSuccessAt ? `最近成功 ${formatFullTime(modelAutoRefresh.lastSuccessAt)}` : "",
+    modelAutoRefresh?.nextRunAt ? `下次 ${formatFullTime(modelAutoRefresh.nextRunAt)}` : "",
+  ].filter(Boolean).join(" · ");
   const settingsSections: SettingSectionMeta[] = [
     {
       id: "model",
@@ -189,7 +209,17 @@ export function SettingsPage(props: {
       tone: "violet",
       status: selectedModel,
       statusTone: "success",
-      metrics: [`${modelCount} 个模型`, props.config?.modelCatalog.source ? `来源 ${props.config.modelCatalog.source}` : "来源 -"],
+      metrics: [`${modelCount} 个模型`, props.config?.modelCatalog.source ? `来源 ${props.config.modelCatalog.source}` : "来源 -", modelAutoRefreshStatus],
+    },
+    {
+      id: "branding",
+      title: "系统外观",
+      description: "设置管理台标题、侧边栏图标和网站 favicon",
+      icon: ImageIcon,
+      tone: "blue",
+      status: settingsDraft.brandingTitle || "AI Zero Token",
+      statusTone: "info",
+      metrics: [brandingPreviewIcon ? "已配置图标" : "使用默认图标"],
     },
     {
       id: "wecom",
@@ -206,20 +236,10 @@ export function SettingsPage(props: {
       title: "代理与网络",
       description: "上游代理设置与网络请求配置",
       icon: Globe2,
-      tone: "blue",
+      tone: "indigo",
       status: settingsDraft.proxyEnabled ? "代理已启用" : "未启用代理",
       statusTone: settingsDraft.proxyEnabled ? "info" : "muted",
       metrics: [settingsDraft.proxyUrl || "未填写代理地址"],
-    },
-    {
-      id: "server",
-      title: "端口与网关",
-      description: "服务端口与网关地址配置",
-      icon: ServerCog,
-      tone: "indigo",
-      status: settingsDraft.serverPort || "-",
-      statusTone: "info",
-      metrics: [props.config?.restartSupported ? "支持重启生效" : "当前环境不支持重启"],
     },
     {
       id: "runtime",
@@ -310,11 +330,6 @@ export function SettingsPage(props: {
       }
       return parsed;
     };
-    const serverPort = Number.parseInt(settingsDraft.serverPort, 10);
-    if (hasDirtyField("serverPort") && (!Number.isInteger(serverPort) || serverPort < 1 || serverPort > 65535)) {
-      props.setStatus("端口必须是 1 到 65535 之间的整数。");
-      return;
-    }
     const quotaSyncConcurrency = Number.parseInt(settingsDraft.quotaSyncConcurrency, 10);
     if (hasDirtyField("quotaSyncConcurrency") && (!Number.isInteger(quotaSyncConcurrency) || quotaSyncConcurrency < 1 || quotaSyncConcurrency > 32)) {
       props.setStatus("全局额度刷新并发数必须是 1 到 32 之间的整数。");
@@ -376,6 +391,7 @@ export function SettingsPage(props: {
 
     const payload: {
       defaultModel?: string;
+      branding?: { title?: string; appIconUrl?: string; faviconUrl?: string };
       networkProxy?: { enabled: boolean; url: string; noProxy: string };
       autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
       accountRotation?: { enabled?: boolean; strategy?: "round_robin" };
@@ -396,11 +412,22 @@ export function SettingsPage(props: {
         };
       };
       wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
-      server?: { port: number };
     } = {};
 
     if (hasDirtyField("defaultModel")) {
       payload.defaultModel = settingsDraft.defaultModel;
+    }
+    if (hasDirtyField("brandingTitle", "brandingAppIconUrl", "brandingFaviconUrl")) {
+      payload.branding = {};
+      if (hasDirtyField("brandingTitle")) {
+        payload.branding.title = settingsDraft.brandingTitle;
+      }
+      if (hasDirtyField("brandingAppIconUrl")) {
+        payload.branding.appIconUrl = settingsDraft.brandingAppIconUrl;
+      }
+      if (hasDirtyField("brandingFaviconUrl")) {
+        payload.branding.faviconUrl = settingsDraft.brandingFaviconUrl;
+      }
     }
     if (hasDirtyField("proxyEnabled", "proxyUrl", "proxyNoProxy")) {
       payload.networkProxy = {
@@ -465,12 +492,6 @@ export function SettingsPage(props: {
         ...(hasDirtyField("wecomSecret") ? { secret: settingsDraft.wecomSecret } : {}),
       };
     }
-    if (hasDirtyField("serverPort")) {
-      payload.server = {
-        port: serverPort,
-      };
-    }
-
     const busyAction: BusyAction = options?.restart ? "restart" : "settings";
     props.setBusy(busyAction);
     try {
@@ -535,58 +556,6 @@ export function SettingsPage(props: {
 
   return (
     <section className="settings-page">
-      <div className="settings-page-head">
-        <div>
-          <h3>系统设置</h3>
-          <p className="hint">按运行域管理模型、登录、网络、网关和限额策略。展开卡片即可编辑对应配置。</p>
-        </div>
-        <div className="settings-page-actions">
-          <button className="btn-secondary" type="button" onClick={refreshModels} disabled={props.busy === "models"}>
-            {props.busy === "models" ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
-            同步 Codex 模型
-          </button>
-        </div>
-      </div>
-
-      <div className="settings-overview">
-        <div className="settings-overview-card">
-          <span className="settings-overview-icon">
-            <Zap size={18} />
-          </span>
-          <div>
-            <span>默认模型</span>
-            <strong>{selectedModel}</strong>
-          </div>
-        </div>
-        <div className="settings-overview-card">
-          <span className="settings-overview-icon tone-green">
-            <Network size={18} />
-          </span>
-          <div>
-            <span>代理状态</span>
-            <strong>{settingsDraft.proxyEnabled ? "已启用" : "未启用"}</strong>
-          </div>
-        </div>
-        <div className="settings-overview-card">
-          <span className="settings-overview-icon tone-orange">
-            <Gauge size={18} />
-          </span>
-          <div>
-            <span>生成限制</span>
-            <strong>{enabledLabel(settingsDraft.imageLimitsEnabled)}</strong>
-          </div>
-        </div>
-        <div className="settings-overview-card">
-          <span className="settings-overview-icon tone-slate">
-            <ServerCog size={18} />
-          </span>
-          <div>
-            <span>网关端口</span>
-            <strong>{settingsDraft.serverPort || "-"}</strong>
-          </div>
-        </div>
-      </div>
-
       <div className="settings-config-list">
         <section className={`settings-config-card ${openSections.has("model") ? "is-open" : ""}`}>
           {renderSectionHeader(settingsSections[0])}
@@ -606,15 +575,57 @@ export function SettingsPage(props: {
                 <div className="settings-info-box">
                   <span>模型目录</span>
                   <strong>{props.config?.modelCatalog.source || "-"}</strong>
-                  <p>当前可用 {modelCount} 个模型。需要最新目录时可点击右上角同步。</p>
+                  <p>
+                    当前可用 {modelCount} 个模型。服务器每 1 小时自动同步 Codex 模型，也可手动立即同步。
+                    {modelAutoRefreshDetail ? ` ${modelAutoRefreshDetail}。` : ""}
+                    {modelAutoRefresh?.lastError ? ` 最近错误：${modelAutoRefresh.lastError}` : ""}
+                  </p>
+                  <div className="settings-inline-actions">
+                    <button className="btn-secondary" type="button" onClick={refreshModels} disabled={props.busy === "models"}>
+                      {props.busy === "models" ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                      同步 Codex 模型
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           ) : null}
         </section>
 
-        <section className={`settings-config-card ${openSections.has("wecom") ? "is-open" : ""}`}>
+        <section className={`settings-config-card ${openSections.has("branding") ? "is-open" : ""}`}>
           {renderSectionHeader(settingsSections[1])}
+          {openSections.has("branding") ? (
+            <div className="settings-config-body">
+              <div className="settings-form-grid three-columns">
+                <label className="field">
+                  <span>网站标题</span>
+                  <input className="input" value={settingsDraft.brandingTitle} onChange={(event) => markSettingsDirty({ brandingTitle: event.target.value })} placeholder="AI Zero Token" />
+                </label>
+                <label className="field">
+                  <span>设置图标 URL</span>
+                  <input className="input" value={settingsDraft.brandingAppIconUrl} onChange={(event) => markSettingsDirty({ brandingAppIconUrl: event.target.value })} placeholder="https://example.com/logo.svg" />
+                </label>
+                <label className="field">
+                  <span>网站 ico URL</span>
+                  <input className="input" value={settingsDraft.brandingFaviconUrl} onChange={(event) => markSettingsDirty({ brandingFaviconUrl: event.target.value })} placeholder="https://example.com/favicon.ico" />
+                </label>
+              </div>
+              <div className="settings-brand-preview">
+                <span className="settings-brand-preview-mark">
+                  {brandingPreviewIcon ? <img src={brandingPreviewIcon} alt="" /> : <ImageIcon size={22} />}
+                </span>
+                <div>
+                  <strong>{settingsDraft.brandingTitle || "AI Zero Token"}</strong>
+                  <span>{brandingPreviewIcon || "当前使用默认应用图标"}</span>
+                </div>
+              </div>
+              <p className="settings-status-note">支持 SVG、PNG、ICO 或可访问的图片 URL；保存后当前页面标题和图标会立即刷新。</p>
+            </div>
+          ) : null}
+        </section>
+
+        <section className={`settings-config-card ${openSections.has("wecom") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[2])}
           {openSections.has("wecom") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">
@@ -643,7 +654,7 @@ export function SettingsPage(props: {
         </section>
 
         <section className={`settings-config-card ${openSections.has("proxy") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[2])}
+          {renderSectionHeader(settingsSections[3])}
           {openSections.has("proxy") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">
@@ -668,25 +679,6 @@ export function SettingsPage(props: {
                   {props.busy === "proxy" ? <Loader2 className="spin" size={16} /> : <Network size={16} />}
                   测试代理
                 </button>
-              </div>
-            </div>
-          ) : null}
-        </section>
-
-        <section className={`settings-config-card ${openSections.has("server") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[3])}
-          {openSections.has("server") ? (
-            <div className="settings-config-body">
-              <div className="settings-form-grid two-columns">
-                <label className="field">
-                  <span>网关端口</span>
-                  <input className="input" inputMode="numeric" type="number" min={1} max={65535} value={settingsDraft.serverPort} onChange={(event) => markSettingsDirty({ serverPort: event.target.value })} />
-                </label>
-                <div className="settings-info-box">
-                  <span>生效方式</span>
-                  <strong>{props.config?.restartSupported ? "保存并重启网关" : "保存后手动重启"}</strong>
-                  <p>若端口被占用，启动时会自动顺延到下一个可用端口。</p>
-                </div>
               </div>
             </div>
           ) : null}

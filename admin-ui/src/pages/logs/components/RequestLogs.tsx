@@ -4,6 +4,7 @@ import type { AdminConfig, RequestLog } from "@/shared/types";
 import { copyText } from "@/shared/lib/app-utils";
 import { formatDuration, formatTime } from "@/shared/lib/format";
 import { formatJson } from "@/shared/lib/format";
+import { userDisplayName, userOptionLabel } from "@/shared/lib/users";
 import type { UserRole } from "@/routes/routes";
 
 export function RequestLogs(props: {
@@ -38,18 +39,22 @@ export function RequestLogs(props: {
     if (props.currentUser) {
       names.add(props.currentUser);
     }
+    for (const user of props.config?.users ?? []) {
+      names.add(user.username);
+    }
     for (const log of props.logs) {
       if (log.owner) {
         names.add(log.owner);
       }
     }
-    return Array.from(names).sort((left, right) => left.localeCompare(right, "zh-CN"));
-  }, [props.currentUser, props.logs]);
+    return Array.from(names).sort((left, right) => userDisplayName(props.config, left).localeCompare(userDisplayName(props.config, right), "zh-CN"));
+  }, [props.config, props.currentUser, props.logs]);
 
   const filteredLogs = useMemo(() => {
     const search = query.trim().toLowerCase();
     return props.logs.filter((item) => {
-      const haystack = [item.time, item.method, item.endpoint, item.model, item.statusCode, item.durationMs, item.source].join(" ").toLowerCase();
+      const ownerLabel = userDisplayName(props.config, item.owner);
+      const haystack = [item.time, item.method, item.endpoint, item.model, item.statusCode, item.durationMs, item.source, item.owner, ownerLabel].join(" ").toLowerCase();
       if (search && !haystack.includes(search)) return false;
       if (methodFilter !== "all" && item.method !== methodFilter) return false;
       if (sourceFilter !== "all" && (item.source || "管理页") !== sourceFilter) return false;
@@ -57,7 +62,7 @@ export function RequestLogs(props: {
       if (statusFilter === "error" && item.statusCode < 400) return false;
       return true;
     });
-  }, [methodFilter, props.logs, query, sourceFilter, statusFilter]);
+  }, [methodFilter, props.config, props.logs, query, sourceFilter, statusFilter]);
 
   const selectedLog = filteredLogs.find((item) => item.id === selectedId) || filteredLogs[0] || null;
 
@@ -120,7 +125,7 @@ export function RequestLogs(props: {
                 <option value="all">全部用户</option>
                 {userOptions.map((owner) => (
                   <option key={owner} value={owner}>
-                    {owner === props.currentUser ? `${owner}（我）` : owner}
+                    {userOptionLabel(props.config, owner, props.currentUser)}
                   </option>
                 ))}
               </select>
@@ -172,7 +177,7 @@ export function RequestLogs(props: {
                   <td>
                     <code>{item.endpoint}</code>
                   </td>
-                  {props.role === "admin" ? <td>{item.owner || "-"}</td> : null}
+                  {props.role === "admin" ? <td title={item.owner || undefined}>{userDisplayName(props.config, item.owner)}</td> : null}
                   <td>{item.model}</td>
                   <td>
                     <span className={`status-pill ${item.statusCode >= 400 ? "is-error" : "is-ok"}`}>{item.statusCode}</span>
@@ -200,7 +205,7 @@ export function RequestLogs(props: {
           </div>
           <div className="log-detail-grid">
             <div className="log-detail-meta">
-              {props.role === "admin" ? <div><span>用户</span><strong>{selectedLog.owner || "-"}</strong></div> : null}
+              {props.role === "admin" ? <div><span>用户</span><strong title={selectedLog.owner || undefined}>{userDisplayName(props.config, selectedLog.owner)}</strong></div> : null}
               <div><span>模型</span><strong>{selectedLog.model}</strong></div>
               <div><span>状态</span><strong>{selectedLog.statusCode}</strong></div>
               <div><span>耗时</span><strong>{formatDuration(selectedLog.durationMs)}</strong></div>

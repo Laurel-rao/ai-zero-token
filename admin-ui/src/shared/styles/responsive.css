@@ -19,10 +19,57 @@
     padding: 0 8px;
   }
 
+  .app-shell.is-sidebar-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
     position: relative;
     top: 0;
     max-height: none;
+  }
+
+  .sidebar.is-collapsed {
+    padding: 14px 2px;
+    overflow-x: visible;
+  }
+
+  .sidebar.is-collapsed .brand {
+    display: flex;
+    justify-items: initial;
+    gap: 12px;
+    padding: 2px 4px 4px;
+  }
+
+  .sidebar.is-collapsed .brand-copy {
+    display: block;
+  }
+
+  .sidebar.is-collapsed .nav-label {
+    display: inline;
+  }
+
+  .sidebar.is-collapsed .nav-group-toggle {
+    display: inline-flex;
+  }
+
+  .sidebar.is-collapsed .nav-subitems {
+    display: flex;
+  }
+
+  .sidebar.is-collapsed .nav {
+    gap: 4px;
+  }
+
+  .sidebar.is-collapsed .nav-group {
+    display: flex;
+  }
+
+  .sidebar.is-collapsed .nav-item {
+    width: auto;
+    min-height: 36px;
+    padding: 0 11px;
+    justify-content: center;
   }
 
   .nav {
@@ -40,6 +87,16 @@
     display: flex;
     gap: 4px;
     padding-left: 0;
+  }
+
+  .nav-group.has-children > .nav-item {
+    padding-right: 11px;
+  }
+
+  .nav-group-toggle {
+    position: static;
+    width: 34px;
+    height: 34px;
   }
 
   .nav-item {
@@ -97,6 +154,16 @@
   .nav-group,
   .nav-subitems {
     display: contents;
+  }
+
+  .sidebar.is-collapsed .nav-group,
+  .sidebar.is-collapsed .nav-subitems {
+    display: contents;
+  }
+
+  .nav-group-toggle,
+  .sidebar.is-collapsed .nav-group-toggle {
+    display: none;
   }
 
   .nav-item {
@@ -272,6 +339,10 @@
     padding: 0 8px;
   }
 
+  .app-shell.is-sidebar-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .sidebar {
     position: relative;
     top: 0;
@@ -279,6 +350,49 @@
     border-radius: 24px;
     padding: 14px 2px;
     gap: 14px;
+  }
+
+  .sidebar.is-collapsed {
+    padding: 14px 2px;
+    overflow-x: visible;
+  }
+
+  .sidebar.is-collapsed .brand {
+    display: flex;
+    justify-items: initial;
+    gap: 12px;
+    padding: 2px 4px 4px;
+  }
+
+  .sidebar.is-collapsed .brand-copy {
+    display: block;
+  }
+
+  .sidebar.is-collapsed .nav-label {
+    display: inline;
+  }
+
+  .sidebar.is-collapsed .nav-group-toggle {
+    display: inline-flex;
+  }
+
+  .sidebar.is-collapsed .nav-subitems {
+    display: flex;
+  }
+
+  .sidebar.is-collapsed .nav {
+    gap: 4px;
+  }
+
+  .sidebar.is-collapsed .nav-group {
+    display: flex;
+  }
+
+  .sidebar.is-collapsed .nav-item {
+    width: auto;
+    min-height: 36px;
+    padding: 0 11px;
+    justify-content: center;
   }
 
   .brand span,
@@ -297,6 +411,16 @@
   .nav-item {
     width: auto;
     justify-content: center;
+  }
+
+  .nav-group.has-children > .nav-item {
+    padding-right: 11px;
+  }
+
+  .nav-group-toggle {
+    position: static;
+    width: 34px;
+    height: 34px;
   }
 
   .topbar {

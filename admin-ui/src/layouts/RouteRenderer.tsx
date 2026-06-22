@@ -5,6 +5,7 @@ const LaunchPage = lazy(() => import("@/pages/launch").then((module) => ({ defau
 const OverviewPage = lazy(() => import("@/pages/overview").then((module) => ({ default: module.OverviewPage })));
 const DocsPage = lazy(() => import("@/pages/docs").then((module) => ({ default: module.DocsPage })));
 const AccountsPage = lazy(() => import("@/pages/accounts").then((module) => ({ default: module.AccountsPage })));
+const ChatPage = lazy(() => import("@/pages/chat").then((module) => ({ default: module.ChatPage })));
 const GeneratePage = lazy(() => import("@/pages/generate").then((module) => ({ default: module.GeneratePage })));
 const UsagePage = lazy(() => import("@/pages/usage").then((module) => ({ default: module.UsagePage })));
 const TesterPage = lazy(() => import("@/pages/tester").then((module) => ({ default: module.TesterPage })));
@@ -12,6 +13,7 @@ const ImageBedPage = lazy(() => import("@/pages/image-bed").then((module) => ({ 
 const NetworkDetectPage = lazy(() => import("@/pages/network-detect").then((module) => ({ default: module.NetworkDetectPage })));
 const SettingsPage = lazy(() => import("@/pages/settings").then((module) => ({ default: module.SettingsPage })));
 const SettingsUsersPage = lazy(() => import("@/pages/settings/users").then((module) => ({ default: module.SettingsUsersPage })));
+const SettingsGroupsPage = lazy(() => import("@/pages/settings/groups").then((module) => ({ default: module.SettingsGroupsPage })));
 const LogsPage = lazy(() => import("@/pages/logs").then((module) => ({ default: module.LogsPage })));
 
 function RouteLoading() {
@@ -65,6 +67,8 @@ export function RouteRenderer({ workspace }: { workspace: UseAdminWorkspaceResul
         refreshConfig={refreshConfig}
         logout={workspace.logout}
       />
+    ) : activeRoute === "chat" ? (
+      <ChatPage config={config} busy={busy} setBusy={workspace.setBusy} setStatus={workspace.setStatus} />
     ) : activeRoute === "generate" ? (
       <GeneratePage
         config={config}
@@ -120,6 +124,8 @@ export function RouteRenderer({ workspace }: { workspace: UseAdminWorkspaceResul
         setConfig={workspace.setConfig}
         setStatus={workspace.setStatus}
       />
+    ) : activeRoute === "settings-groups" ? (
+      <SettingsGroupsPage setStatus={workspace.setStatus} />
     ) : (
       <LogsPage
         logs={workspace.requestLogs}

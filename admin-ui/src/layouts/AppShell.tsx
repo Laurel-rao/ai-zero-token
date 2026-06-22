@@ -4,18 +4,35 @@ import { AppOverlays } from "./AppOverlays";
 import { RouteRenderer } from "./RouteRenderer";
 import type { UseAdminWorkspaceResult } from "@/hooks/useAdminWorkspace";
 import { Download, Package, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
 
 const DESKTOP_RELEASES_URL = "https://github.com/fchangjun/AI-Zero-Token/releases";
 const NPM_UPDATE_COMMAND = "npm install -g ai-zero-token";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "azt.sidebar.collapsed";
 
 export function AppShell({ workspace }: { workspace: UseAdminWorkspaceResult }) {
   const versionStatus = workspace.config?.versionStatus;
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, sidebarCollapsed ? "1" : "0");
+    } catch {
+      // Ignore localStorage failures in restricted browser contexts.
+    }
+  }, [sidebarCollapsed]);
 
   return (
-    <div className="app-shell">
-      <AppSidebar workspace={workspace} />
+    <div className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
+      <AppSidebar workspace={workspace} collapsed={sidebarCollapsed} onCollapsedChange={setSidebarCollapsed} />
 
-      <main className="main">
+      <main className={`main route-${workspace.activeRoute}`}>
         {versionStatus?.status === "update-available" && (
           <section className="update-panel strong-update-panel">
             <div className="update-mark">

@@ -256,6 +256,16 @@
   color: #047857;
 }
 
+.generate-duration.is-suggested {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.generate-duration.is-suggested strong,
+.generate-duration.is-suggested em {
+  color: #b45309;
+}
+
 .generate-duration.is-limited,
 .generate-duration.is-failed {
   border-color: #fecaca;
@@ -381,6 +391,49 @@
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+}
+
+.prompt-suggestion-card {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid #fde68a;
+  border-radius: 13px;
+  background: #fffbeb;
+}
+
+.prompt-suggestion-card > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.prompt-suggestion-card strong {
+  color: #92400e;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.prompt-suggestion-card span {
+  color: #a16207;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.prompt-suggestion-card p {
+  max-height: 164px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.prompt-suggestion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .generate-preview-card figcaption {

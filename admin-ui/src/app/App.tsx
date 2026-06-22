@@ -5,6 +5,7 @@ import { AppShell } from "@/layouts/AppShell";
 import { useAdminWorkspace } from "@/hooks/useAdminWorkspace";
 import { fetchJson } from "@/shared/api";
 import type { UserRole } from "@/routes/routes";
+import { applyBranding, getAppIconUrl, normalizeBranding, type BrandingSettings } from "@/shared/lib/branding";
 
 type AuthStatus = {
   configured: boolean;
@@ -12,6 +13,7 @@ type AuthStatus = {
   user: string | null;
   role?: UserRole;
   wecomLoginEnabled?: boolean;
+  branding?: BrandingSettings | null;
 };
 
 type WecomLoginUrl = {
@@ -33,7 +35,19 @@ function shouldSkipAutoWecomLogin(): boolean {
   return new URLSearchParams(window.location.search).get("skip_auto_wecom") === "1";
 }
 
-function LoginView({ onAuthenticated, wecomLoginEnabled }: { onAuthenticated: () => void; wecomLoginEnabled?: boolean }) {
+function AuthMark({ branding }: { branding?: BrandingSettings | null }) {
+  const normalized = normalizeBranding(branding);
+  return (
+    <div className="auth-mark">
+      <span className="auth-mark-icon">
+        <img src={getAppIconUrl(normalized)} alt="" />
+      </span>
+      <span>{normalized.title}</span>
+    </div>
+  );
+}
+
+function LoginView({ onAuthenticated, wecomLoginEnabled, branding }: { onAuthenticated: () => void; wecomLoginEnabled?: boolean; branding?: BrandingSettings | null }) {
   const [loginMode, setLoginMode] = useState<"wecom" | "password">(wecomLoginEnabled ? "wecom" : "password");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -206,7 +220,7 @@ function LoginView({ onAuthenticated, wecomLoginEnabled }: { onAuthenticated: ()
   return (
     <main className="auth-page">
       <form className="auth-panel" onSubmit={handleSubmit}>
-        <div className="auth-mark">AI Zero Token</div>
+        <AuthMark branding={branding} />
         <h1>管理访问</h1>
         <p>{message}</p>
         {wecomLoginEnabled ? (
@@ -340,11 +354,15 @@ export function App() {
     refreshAuth().catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    applyBranding(auth?.branding);
+  }, [auth?.branding]);
+
   if (authError) {
     return (
       <main className="auth-page">
         <section className="auth-panel">
-          <div className="auth-mark">AI Zero Token</div>
+          <AuthMark branding={auth?.branding} />
           <h1>访问禁止</h1>
           <p>{authError}</p>
         </section>
@@ -356,7 +374,7 @@ export function App() {
     return (
       <main className="auth-page">
         <section className="auth-panel">
-          <div className="auth-mark">AI Zero Token</div>
+          <AuthMark />
           <h1>正在检查访问权限</h1>
           <p>请稍候。</p>
         </section>
@@ -368,7 +386,7 @@ export function App() {
     return (
       <main className="auth-page">
         <section className="auth-panel">
-          <div className="auth-mark">AI Zero Token</div>
+          <AuthMark branding={auth?.branding} />
           <h1>访问未启用</h1>
           <p>请先在服务端设置 AZT_ADMIN_USER、AZT_ADMIN_PASSWORD 和 AZT_SESSION_SECRET。</p>
         </section>
@@ -377,7 +395,7 @@ export function App() {
   }
 
   if (!auth.authenticated) {
-    return <LoginView onAuthenticated={refreshAuth} wecomLoginEnabled={auth.wecomLoginEnabled} />;
+    return <LoginView onAuthenticated={refreshAuth} wecomLoginEnabled={auth.wecomLoginEnabled} branding={auth.branding} />;
   }
 
   return <AuthenticatedApp auth={auth} />;

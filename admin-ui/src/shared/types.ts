@@ -55,6 +55,11 @@ export type GatewaySettings = {
   version: number;
   defaultProvider: string;
   defaultModel: string;
+  branding: {
+    title: string;
+    appIconUrl: string;
+    faviconUrl: string;
+  };
   networkProxy: {
     enabled: boolean;
     url: string;
@@ -128,6 +133,20 @@ export type ModelCatalogInfo = {
   cachePath: string;
   fetchedAt?: string;
   modelCount: number;
+};
+
+export type ModelAutoRefreshStatus = {
+  enabled: boolean;
+  intervalMs: number;
+  running: boolean;
+  lastStartedAt?: number;
+  lastFinishedAt?: number;
+  lastSuccessAt?: number;
+  lastFailureAt?: number;
+  nextRunAt?: number;
+  lastModelCount?: number;
+  lastSource?: string;
+  lastError?: string;
 };
 
 export type VersionStatus = {
@@ -226,9 +245,14 @@ export type AdminConfig = {
   settings: GatewaySettings;
   models: ModelInfo[];
   modelCatalog: ModelCatalogInfo;
+  modelAutoRefresh?: ModelAutoRefreshStatus;
   versionStatus: VersionStatus;
   profile: ProfileSummary | null;
   profiles: ProfileSummary[];
+  users?: Array<{
+    username: string;
+    displayName?: string;
+  }>;
   codex: {
     exists: boolean;
     path: string;

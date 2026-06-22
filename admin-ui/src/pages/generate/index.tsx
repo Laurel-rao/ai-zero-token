@@ -1,4 +1,4 @@
-import { BarChart3, Copy, Download, ImagePlus, Loader2, Pencil, RotateCcw, Search, Sparkles, Trash2, Upload } from "lucide-react";
+import { BarChart3, CheckCircle2, Copy, Download, ImagePlus, Loader2, Pencil, RotateCcw, Search, Sparkles, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
@@ -6,6 +6,7 @@ import type { BusyAction, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, createClientId, errorMessage, extractPreviewImages, readFileAsDataUrl, summarizeJson } from "@/shared/lib/app-utils";
 import { formatDuration, formatFullTime, formatJson } from "@/shared/lib/format";
 import { profileLabel } from "@/shared/lib/profiles";
+import { userDisplayName, userOptionLabel } from "@/shared/lib/users";
 import type { UserRole } from "@/routes/routes";
 
 type GenerateTab = "create" | "history" | "report";
@@ -16,8 +17,14 @@ type ReferenceImageState = { src: string; previewSrc: string; name: string; size
 type GenerateRunSummary = {
   durationMs: number;
   waitDurationMs?: number;
-  status: "idle" | "running" | "success" | "limited" | "failed";
+  status: "idle" | "running" | "success" | "limited" | "failed" | "suggested";
   message: string;
+};
+
+type PromptSuggestion = {
+  title: string;
+  prompt: string;
+  source: "upstream-policy" | "parse-failure";
 };
 
 type ChatCompletionResponse = {
@@ -192,6 +199,93 @@ function extractErrorMessage(payload: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function cleanSuggestionText(value: string): string {
+  return value
+    .replace(/^[\s"'“”‘’`]+|[\s"'“”‘’`]+$/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectSuggestionText(payload: unknown, parts: string[]): void {
+  if (typeof payload === "string") {
+    parts.push(payload);
+    return;
+  }
+  if (!isRecord(payload)) {
+    return;
+  }
+
+  const keys = ["message", "upstreamText", "output_text_preview", "text", "raw"];
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string") {
+      parts.push(value);
+    }
+  }
+
+  if (isRecord(payload.error)) {
+    collectSuggestionText(payload.error, parts);
+  }
+  if (isRecord(payload.imageDebug)) {
+    collectSuggestionText(payload.imageDebug, parts);
+  }
+  if (isRecord(payload.debug)) {
+    collectSuggestionText(payload.debug, parts);
+  }
+  if (isRecord(payload.parseFailure)) {
+    collectSuggestionText(payload.parseFailure, parts);
+  }
+  if (isRecord(payload.responseSummary)) {
+    collectSuggestionText(payload.responseSummary, parts);
+  }
+}
+
+function candidateFromText(text: string): string | null {
+  const normalized = text.replace(/\\n/g, "\n").replace(/\r/g, "\n");
+  const directVersionMatch = normalized.match(/(?:我可以直接生成这个版本|可以直接生成这个版本|直接按这个[^“"]*)[：:]\s*([\s\S]+)/);
+  if (directVersionMatch?.[1]) {
+    return cleanSuggestionText(directVersionMatch[1]);
+  }
+
+  const quotedMatches = Array.from(normalized.matchAll(/(?:改成|修改为|替换为|生成这个版本|生成)[：:]\s*[“"]([\s\S]{40,}?)[”"]/g));
+  const lastQuoted = quotedMatches.at(-1)?.[1];
+  if (lastQuoted) {
+    return cleanSuggestionText(lastQuoted);
+  }
+
+  const numberedMatch = normalized.match(/(?:改成|修改为|可以帮你改成)[：:]\s*([\s\S]+)/);
+  if (numberedMatch?.[1]) {
+    return cleanSuggestionText(numberedMatch[1]);
+  }
+
+  return null;
+}
+
+function extractPromptSuggestion(payload: unknown): PromptSuggestion | null {
+  const parts: string[] = [];
+  collectSuggestionText(payload, parts);
+  const text = parts.join("\n");
+  if (!/(不能|无法|抱歉|对抗|公众人物|真实公众人物|可以.*改成|替换为|直接生成这个版本)/.test(text)) {
+    return null;
+  }
+
+  const prompt = candidateFromText(text);
+  if (!prompt || prompt.length < 24) {
+    return null;
+  }
+
+  return {
+    title: "上游给出了可采纳方案",
+    prompt,
+    source: /上游未返回图片|parseFailure|imageDebug/.test(text) ? "parse-failure" : "upstream-policy",
+  };
 }
 
 function formatReportBucketLabel(value: number, bucketMs: number): string {
@@ -449,6 +543,7 @@ export function GeneratePage(props: {
   const [elapsedNow, setElapsedNow] = useState(0);
   const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
   const [runSummary, setRunSummary] = useState<GenerateRunSummary | null>(null);
+  const [promptSuggestion, setPromptSuggestion] = useState<PromptSuggestion | null>(null);
   const generatingRef = useRef(false);
 
   const selectedSize = useMemo(() => ratioOptions.find((item) => item.ratio === ratio)?.size ?? "1024x1024", [ratio]);
@@ -483,13 +578,16 @@ export function GeneratePage(props: {
     if (props.currentUser) {
       names.add(props.currentUser);
     }
+    for (const user of props.config?.users ?? []) {
+      names.add(user.username);
+    }
     for (const item of history) {
       if (item.owner) {
         names.add(item.owner);
       }
     }
-    return Array.from(names).sort((left, right) => left.localeCompare(right, "zh-CN"));
-  }, [history, props.currentUser]);
+    return Array.from(names).sort((left, right) => userDisplayName(props.config, left).localeCompare(userDisplayName(props.config, right), "zh-CN"));
+  }, [history, props.config, props.currentUser]);
 
   const renderHistoryFilters = () => (
     <div className="generate-history-filters">
@@ -522,7 +620,7 @@ export function GeneratePage(props: {
               <option value="all">全部用户</option>
               {historyOwnerOptions.map((owner) => (
                 <option key={owner} value={owner}>
-                  {owner === props.currentUser ? `${owner}（我）` : owner}
+                  {userOptionLabel(props.config, owner, props.currentUser)}
                 </option>
               ))}
             </select>
@@ -637,7 +735,7 @@ export function GeneratePage(props: {
       setHistoryLoading(true);
     }
     try {
-      const params = new URLSearchParams({ limit: "500" });
+      const params = new URLSearchParams({ limit: "100", light: "true" });
       if (props.role === "admin" && historyOwnerFilter) {
         params.set("owner", historyOwnerFilter);
       }
@@ -691,7 +789,18 @@ export function GeneratePage(props: {
     setPrompt(example.prompt);
     setRatio(example.ratio);
     setReferenceImage(null);
+    setPromptSuggestion(null);
     props.setStatus(`已填入${example.label}示例提示词。`);
+  }
+
+  function acceptPromptSuggestion() {
+    if (!promptSuggestion) {
+      return;
+    }
+    setPrompt(promptSuggestion.prompt);
+    setPromptSuggestion(null);
+    setResultImages([]);
+    props.setStatus("已采纳上游方案，可直接重新生图。");
   }
 
   async function optimizePrompt() {
@@ -756,6 +865,7 @@ export function GeneratePage(props: {
       status: "running",
       message: "正在生成图片...",
     });
+    setPromptSuggestion(null);
     setResponseBody("正在生成图片...");
     setResultImages([]);
     try {
@@ -798,12 +908,14 @@ export function GeneratePage(props: {
 
       if (!response.ok) {
         const message = extractErrorMessage(parsed, `HTTP ${response.status}`);
+        const suggestion = extractPromptSuggestion(parsed);
+        setPromptSuggestion(suggestion);
         setRunSummary({
           durationMs,
-          status: response.status === 429 ? "limited" : "failed",
-          message,
+          status: suggestion ? "suggested" : response.status === 429 ? "limited" : "failed",
+          message: suggestion ? "上游拒绝了原请求，但返回了可替代提示词。" : message,
         });
-        props.setStatus(`生图失败：${message}`);
+        props.setStatus(suggestion ? "已提取上游给出的替代方案，可点击采纳。" : `生图失败：${message}`);
         return;
       }
 
@@ -820,10 +932,12 @@ export function GeneratePage(props: {
 
       const images = extractPreviewImages(parsed);
       setResultImages(images);
+      const suggestion = images.length > 0 ? null : extractPromptSuggestion(parsed);
+      setPromptSuggestion(suggestion);
       setRunSummary({
         durationMs,
-        status: images.length > 0 ? "success" : "failed",
-        message: images.length > 0 ? "生图完成。" : "请求成功，但响应里没有图片。",
+        status: images.length > 0 ? "success" : suggestion ? "suggested" : "failed",
+        message: images.length > 0 ? "生图完成。" : suggestion ? "上游未返回图片，但给出了可替代提示词。" : "请求成功，但响应里没有图片。",
       });
       props.setRequestLogs((items) => [
         {
@@ -839,19 +953,21 @@ export function GeneratePage(props: {
         },
         ...items,
       ].slice(0, 20));
-      props.setStatus(images.length > 0 ? `生图完成，耗时 ${formatDuration(durationMs)}。` : "生图异常：请求成功，但响应里没有图片。");
+      props.setStatus(images.length > 0 ? `生图完成，耗时 ${formatDuration(durationMs)}。` : suggestion ? "已提取上游给出的替代方案，可点击采纳。" : "生图异常：请求成功，但响应里没有图片。");
       props.refreshConfig({ silent: true }).catch(() => undefined);
     } catch (error) {
       const message = errorMessage(error);
       const durationMs = performance.now() - startedAt;
+      const suggestion = extractPromptSuggestion(message);
       setLastDurationMs(durationMs);
+      setPromptSuggestion(suggestion);
       setRunSummary({
         durationMs,
-        status: "failed",
-        message,
+        status: suggestion ? "suggested" : "failed",
+        message: suggestion ? "上游拒绝了原请求，但返回了可替代提示词。" : message,
       });
       setResponseBody(message);
-      props.setStatus(`生图失败：${message}`);
+      props.setStatus(suggestion ? "已提取上游给出的替代方案，可点击采纳。" : `生图失败：${message}`);
     } finally {
       generatingRef.current = false;
       setGenerationStartedAt(null);
@@ -922,23 +1038,6 @@ export function GeneratePage(props: {
         setManualCopyPrompt(item.prompt);
         props.setStatus("自动复制失败，已打开手动复制框。");
       });
-  }
-
-  async function clearHistory() {
-    props.setBusy("test");
-    try {
-      const params = new URLSearchParams();
-      if (props.role === "admin" && historyOwnerFilter) {
-        params.set("owner", historyOwnerFilter);
-      }
-      const next = await fetchJson<{ items: GenerateHistoryItem[] }>(`/_gateway/generations/history${params.size ? `?${params.toString()}` : ""}`, { method: "DELETE" });
-      setHistory(next.items);
-      props.setStatus("服务端生图历史已清空。");
-    } catch (error) {
-      props.setStatus(`清空失败：${errorMessage(error)}`);
-    } finally {
-      props.setBusy(null);
-    }
   }
 
   return (
@@ -1047,11 +1146,13 @@ export function GeneratePage(props: {
                     ? "生成中"
                     : runSummary?.status === "success"
                       ? "成功"
-                      : runSummary?.status === "limited"
-                        ? "限额限制"
-                        : runSummary?.status === "failed"
-                          ? "失败"
-                          : "待开始"}
+                    : runSummary?.status === "limited"
+                      ? "限额限制"
+                      : runSummary?.status === "suggested"
+                        ? "可采纳"
+                      : runSummary?.status === "failed"
+                        ? "失败"
+                        : "待开始"}
                 </em>
                 <small title={runSummary?.message || ""}>{runSummary?.message || "等待提交生图请求。"}</small>
               </div>
@@ -1104,6 +1205,33 @@ export function GeneratePage(props: {
                 <span>生成后的图片会显示在这里。</span>
               </div>
             )}
+            {promptSuggestion ? (
+              <div className="prompt-suggestion-card">
+                <div>
+                  <strong>{promptSuggestion.title}</strong>
+                  <span>{promptSuggestion.source === "parse-failure" ? "图片未返回时从上游原始说明中提取。" : "原请求触发限制时从上游建议中提取。"}</span>
+                </div>
+                <p>{promptSuggestion.prompt}</p>
+                <div className="prompt-suggestion-actions">
+                  <button className="btn-primary" type="button" onClick={acceptPromptSuggestion}>
+                    <CheckCircle2 size={16} />
+                    采纳方案
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    type="button"
+                    onClick={() => {
+                      copyText(promptSuggestion.prompt)
+                        .then((ok) => props.setStatus(ok ? "替代方案已复制。" : "复制失败，请手动复制。"))
+                        .catch(() => props.setStatus("复制失败，请手动复制。"));
+                    }}
+                  >
+                    <Copy size={16} />
+                    复制
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <details className="generate-response-details">
               <summary>响应 JSON</summary>
               <pre className="pre generate-response">{responseBody}</pre>
@@ -1117,10 +1245,6 @@ export function GeneratePage(props: {
             <button className="btn-secondary" type="button" onClick={() => refreshHistory()} disabled={historyLoading}>
               <RotateCcw size={16} />
               刷新
-            </button>
-            <button className="btn-secondary" type="button" onClick={clearHistory} disabled={history.length === 0}>
-              <Trash2 size={16} />
-              清空历史
             </button>
           </div>
           {renderHistoryFilters()}
@@ -1156,7 +1280,7 @@ export function GeneratePage(props: {
                     <span>
                       {formatFullTime(item.createdAt)} · {item.images[0]?.width && item.images[0]?.height ? `${item.images[0].width}×${item.images[0].height}` : item.ratio || item.size} · {item.referenceImages.length > 0 ? `参考图 ${item.referenceImages.length}` : "纯文本"} · {formatDuration(item.durationMs)}
                       {item.waitDurationMs && item.waitDurationMs > 0 ? ` · 等待 ${formatDuration(item.waitDurationMs)}` : ""}
-                      {props.role === "admin" ? ` · 用户 ${item.owner || "-"}` : ""}
+                      {props.role === "admin" ? ` · 用户 ${userDisplayName(props.config, item.owner)}` : ""}
                       {item.images[0]?.previewSize ? ` · 预览 ${(item.images[0].previewSize / 1024).toFixed(0)} KB` : ""}
                     </span>
                     {item.error ? <span className="generate-history-error">{item.error}</span> : null}

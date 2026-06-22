@@ -1,5 +1,5 @@
-import { Loader2, Plus, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { FileSpreadsheet, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { fetchJson } from "@/shared/api";
 import { errorMessage } from "@/shared/lib/app-utils";
 
@@ -8,11 +8,15 @@ type DatabaseUserRole = "admin" | "user";
 type DatabaseUser = {
   id: string;
   username: string;
+  displayName?: string;
   role: DatabaseUserRole;
   groupId?: string;
   groupName?: string;
   groupSortOrder?: number;
   groupImageLimitsDisabled?: boolean;
+  groupPerUserDaily?: number;
+  groupPerUserHourly?: number;
+  groupMinIntervalSeconds?: number;
   disabled?: boolean;
   createdAt?: number | string;
   updatedAt?: number | string;
@@ -23,6 +27,9 @@ type DatabaseUserGroup = {
   name: string;
   sortOrder: number;
   imageLimitsDisabled: boolean;
+  perUserDaily?: number;
+  perUserHourly?: number;
+  minIntervalSeconds?: number;
   createdAt?: number | string;
   updatedAt?: number | string;
 };
@@ -34,10 +41,13 @@ type UserDraft = {
   groupId: string;
 };
 
-type UserGroupDraft = {
-  name: string;
-  sortOrder: string;
-  imageLimitsDisabled: boolean;
+type UserEditDraft = {
+  role: DatabaseUserRole;
+  groupId: string;
+  password: string;
+  perUserDaily: string;
+  perUserHourly: string;
+  minIntervalSeconds: string;
 };
 
 type ImageLimitOverrideDraft = {
@@ -53,15 +63,22 @@ type ImageLimitDefaults = {
   minIntervalSeconds: string;
 };
 
+type UserListFilters = {
+  keyword: string;
+  role: "all" | DatabaseUserRole;
+  status: "all" | "enabled" | "disabled";
+  groupId: "all" | string;
+};
+
 type ActionState =
   | "load"
+  | "import-wecom"
   | "create"
-  | "create-group"
-  | `group:${string}`
-  | `user-group:${string}`
-  | `role:${string}`
+  | "batch-enable"
+  | "batch-disable"
+  | "batch-delete"
+  | `edit:${string}`
   | `toggle:${string}`
-  | `reset:${string}`
   | `delete:${string}`
   | null;
 
@@ -103,30 +120,128 @@ function inheritedLimitLabel(value: string): string {
   return value === "0" || !value ? "继承：不限" : `继承：${value}`;
 }
 
+function groupLimitLabel(value: number | undefined, globalValue: string): string {
+  if (value !== undefined) {
+    return String(value);
+  }
+  return inheritedLimitLabel(globalValue);
+}
+
+function userLabel(user: DatabaseUser): string {
+  return user.displayName?.trim() || user.username;
+}
+
+type WecomContactImportRow = {
+  userId: string;
+  displayName: string;
+};
+
+function normalizeCell(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
+function parseCsvLine(line: string): string[] {
+  const values: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "\"") {
+      if (quoted && line[index + 1] === "\"") {
+        current += "\"";
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === "," && !quoted) {
+      values.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  values.push(current);
+  return values.map((value) => value.trim());
+}
+
+function parseTextContacts(text: string): WecomContactImportRow[] {
+  const rows = text
+    .split(/\r?\n/g)
+    .map((line) => parseCsvLine(line).map(normalizeCell))
+    .filter((row) => row.some(Boolean));
+  return parseContactRows(rows);
+}
+
+function parseContactRows(rows: string[][]): WecomContactImportRow[] {
+  const headerIndex = rows.findIndex((row) => row.some((cell) => cell === "姓名") && row.some((cell) => cell === "账号"));
+  if (headerIndex < 0) {
+    throw new Error("没有找到企业微信通讯录表头，请确认表格包含“姓名”和“账号”列。");
+  }
+  const headers = rows[headerIndex] ?? [];
+  const nameIndex = headers.findIndex((cell) => cell === "姓名");
+  const userIdIndex = headers.findIndex((cell) => cell === "账号");
+  const contacts: WecomContactImportRow[] = [];
+  const seen = new Set<string>();
+  for (const row of rows.slice(headerIndex + 1)) {
+    const displayName = normalizeCell(row[nameIndex]);
+    const rawUserId = normalizeCell(row[userIdIndex]);
+    const userId = rawUserId.includes(":") ? rawUserId.split(":").pop()?.trim() ?? "" : rawUserId;
+    if (!displayName || !userId || seen.has(userId.toLowerCase())) {
+      continue;
+    }
+    seen.add(userId.toLowerCase());
+    contacts.push({ userId, displayName });
+  }
+  return contacts;
+}
+
+async function parseWecomContactFile(file: File): Promise<WecomContactImportRow[]> {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "csv" || extension === "txt") {
+    return parseTextContacts(await file.text());
+  }
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const worksheet = workbook.Sheets[workbook.SheetNames[0] ?? ""];
+  if (!worksheet) {
+    throw new Error("没有读取到通讯录工作表。");
+  }
+  const rows = XLSX.utils.sheet_to_json<string[]>(worksheet, { header: 1, defval: "" });
+  return parseContactRows(rows.map((row) => row.map(normalizeCell)));
+}
+
 export function DatabaseUsersPanel({
   currentUser,
   imageLimitDefaults,
   imageLimitOverrides,
   onImageLimitOverridesChange,
+  onSaveImageLimitOverrides,
   setStatus,
 }: {
   currentUser: string | null;
   imageLimitDefaults: ImageLimitDefaults;
   imageLimitOverrides: ImageLimitOverrideDraft[];
   onImageLimitOverridesChange: (overrides: ImageLimitOverrideDraft[]) => void;
+  onSaveImageLimitOverrides?: (overrides: ImageLimitOverrideDraft[]) => Promise<void>;
   setStatus: (message: string) => void;
 }) {
   const [users, setUsers] = useState<DatabaseUser[]>([]);
   const [userGroups, setUserGroups] = useState<DatabaseUserGroup[]>([]);
   const [draft, setDraft] = useState<UserDraft>({ username: "", password: "", role: "user", groupId: "" });
-  const [groupDraft, setGroupDraft] = useState<UserGroupDraft>({ name: "", sortOrder: "0", imageLimitsDisabled: false });
-  const [groupEdits, setGroupEdits] = useState<Record<string, UserGroupDraft>>({});
-  const [newPasswordByUserId, setNewPasswordByUserId] = useState<Record<string, string>>({});
+  const [filterDraft, setFilterDraft] = useState<UserListFilters>({ keyword: "", role: "all", status: "all", groupId: "all" });
+  const [filters, setFilters] = useState<UserListFilters>({ keyword: "", role: "all", status: "all", groupId: "all" });
+  const [selectedUserIds, setSelectedUserIds] = useState<Record<string, boolean>>({});
+  const [detailUserId, setDetailUserId] = useState<string | null>(null);
+  const [createUserOpen, setCreateUserOpen] = useState(false);
+  const [editUserDraft, setEditUserDraft] = useState<UserEditDraft | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [action, setAction] = useState<ActionState>("load");
   const [error, setError] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const sortedUsers = useMemo(
-    () => [...users].sort((first, second) => first.username.localeCompare(second.username, "zh-CN")),
+    () => [...users].sort((first, second) => userLabel(first).localeCompare(userLabel(second), "zh-CN") || first.username.localeCompare(second.username, "zh-CN")),
     [users],
   );
 
@@ -134,6 +249,54 @@ export function DatabaseUsersPanel({
     () => [...userGroups].sort((first, second) => second.sortOrder - first.sortOrder || first.name.localeCompare(second.name, "zh-CN")),
     [userGroups],
   );
+
+  const filteredUsers = useMemo(() => {
+    const keyword = filters.keyword.trim().toLowerCase();
+    return sortedUsers.filter((user) => {
+      const haystack = [user.username, user.displayName || "", user.groupName || ""].join(" ").toLowerCase();
+      if (keyword && !haystack.includes(keyword)) {
+        return false;
+      }
+      if (filters.role !== "all" && user.role !== filters.role) {
+        return false;
+      }
+      if (filters.status === "enabled" && !isUserEnabled(user)) {
+        return false;
+      }
+      if (filters.status === "disabled" && isUserEnabled(user)) {
+        return false;
+      }
+      if (filters.groupId !== "all" && user.groupId !== filters.groupId) {
+        return false;
+      }
+      return true;
+    });
+  }, [filters, sortedUsers]);
+
+  const pageCount = Math.max(1, Math.ceil(filteredUsers.length / pageSize));
+  const pagedUsers = useMemo(() => filteredUsers.slice((page - 1) * pageSize, page * pageSize), [filteredUsers, page, pageSize]);
+  const selectedUsers = useMemo(() => users.filter((user) => selectedUserIds[user.id]), [selectedUserIds, users]);
+  const selectablePagedUsers = useMemo(() => pagedUsers.filter((user) => user.username !== currentUser), [currentUser, pagedUsers]);
+  const allPagedSelected = selectablePagedUsers.length > 0 && selectablePagedUsers.every((user) => selectedUserIds[user.id]);
+  const detailUser = useMemo(() => users.find((user) => user.id === detailUserId) ?? null, [detailUserId, users]);
+  const editingUser = detailUser;
+
+  useEffect(() => {
+    if (page > pageCount) {
+      setPage(pageCount);
+    }
+  }, [page, pageCount]);
+
+  useEffect(() => {
+    setSelectedUserIds((current) => {
+      const valid = new Set(users.map((user) => user.id));
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => valid.has(id)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    if (detailUserId && !users.some((user) => user.id === detailUserId)) {
+      setDetailUserId(null);
+    }
+  }, [detailUserId, users]);
 
   async function loadUsers(options?: { silent?: boolean }) {
     if (!options?.silent) {
@@ -154,28 +317,6 @@ export function DatabaseUsersPanel({
     }
   }
 
-  async function loadUserGroups(options?: { silent?: boolean }) {
-    if (!options?.silent) {
-      setAction("load");
-    }
-    try {
-      const payload = await fetchJson<{ data?: DatabaseUserGroup[]; groups?: DatabaseUserGroup[] } | DatabaseUserGroup[]>("/_gateway/admin/user-groups");
-      const groups = normalizeGroups(payload);
-      setUserGroups(groups);
-      setGroupEdits({});
-      setError(null);
-      setDraft((current) => current.groupId || groups.length === 0 ? current : { ...current, groupId: groups[groups.length - 1]?.id ?? "" });
-    } catch (caught) {
-      const message = errorMessage(caught);
-      setError(message);
-      setStatus(`用户组读取失败：${message}`);
-    } finally {
-      if (!options?.silent) {
-        setAction(null);
-      }
-    }
-  }
-
   async function loadAll(options?: { silent?: boolean }) {
     if (!options?.silent) {
       setAction("load");
@@ -188,7 +329,6 @@ export function DatabaseUsersPanel({
       const groups = normalizeGroups(groupsPayload);
       setUsers(normalizeUsers(usersPayload));
       setUserGroups(groups);
-      setGroupEdits({});
       setDraft((current) => current.groupId || groups.length === 0 ? current : { ...current, groupId: groups[groups.length - 1]?.id ?? "" });
       setError(null);
     } catch (caught) {
@@ -224,6 +364,8 @@ export function DatabaseUsersPanel({
       });
       setDraft((current) => ({ username: "", password: "", role: "user", groupId: current.groupId }));
       await loadUsers({ silent: true });
+      setPage(1);
+      setCreateUserOpen(false);
       setStatus(`数据库用户 ${username} 已新增。`);
       setError(null);
     } catch (caught) {
@@ -235,111 +377,22 @@ export function DatabaseUsersPanel({
     }
   }
 
-  async function createGroup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const name = groupDraft.name.trim();
-    const sortOrder = Number.parseInt(groupDraft.sortOrder || "0", 10);
-    if (!name) {
-      setError("请填写用户组名称。");
-      return;
-    }
-    if (!Number.isInteger(sortOrder)) {
-      setError("用户组排序必须是整数。");
-      return;
-    }
-
-    setAction("create-group");
-    try {
-      await fetchJson<{ group?: DatabaseUserGroup; groups?: DatabaseUserGroup[] }>("/_gateway/admin/user-groups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, sortOrder, imageLimitsDisabled: groupDraft.imageLimitsDisabled }),
-      });
-      setGroupDraft({ name: "", sortOrder: "0", imageLimitsDisabled: false });
-      await loadUserGroups({ silent: true });
-      setStatus(`用户组 ${name} 已新增。`);
-      setError(null);
-    } catch (caught) {
-      const message = errorMessage(caught);
-      setError(message);
-      setStatus(`新增用户组失败：${message}`);
-    } finally {
-      setAction(null);
-    }
+  function openEditUser(user: DatabaseUser) {
+    const imageLimit = imageLimitOverrideFor(user.username);
+    setDetailUserId(user.id);
+    setEditUserDraft({
+      role: user.role,
+      groupId: user.groupId || sortedGroups[sortedGroups.length - 1]?.id || "",
+      password: "",
+      perUserDaily: imageLimit?.perUserDaily || "",
+      perUserHourly: imageLimit?.perUserHourly || "",
+      minIntervalSeconds: imageLimit?.minIntervalSeconds || "",
+    });
   }
 
-  function groupEditFor(group: DatabaseUserGroup): UserGroupDraft {
-    return groupEdits[group.id] ?? {
-      name: group.name,
-      sortOrder: String(group.sortOrder),
-      imageLimitsDisabled: group.imageLimitsDisabled,
-    };
-  }
-
-  function updateGroupDraft(group: DatabaseUserGroup, field: keyof UserGroupDraft, value: string | boolean) {
-    setGroupEdits((current) => ({
-      ...current,
-      [group.id]: {
-        ...groupEditFor(group),
-        [field]: value,
-      },
-    }));
-  }
-
-  function hasGroupEdit(group: DatabaseUserGroup): boolean {
-    const edit = groupEdits[group.id];
-    if (!edit) {
-      return false;
-    }
-    return edit.name.trim() !== group.name || Number.parseInt(edit.sortOrder || "0", 10) !== group.sortOrder || edit.imageLimitsDisabled !== group.imageLimitsDisabled;
-  }
-
-  async function saveGroup(group: DatabaseUserGroup) {
-    const edit = groupEditFor(group);
-    const name = edit.name.trim();
-    const sortOrder = Number.parseInt(edit.sortOrder || "0", 10);
-    if (!name || !Number.isInteger(sortOrder)) {
-      setError("用户组名称不能为空，排序必须是整数。");
-      return;
-    }
-
-    setAction(`group:${group.id}`);
-    try {
-      await fetchJson<{ group?: DatabaseUserGroup }>(`/_gateway/admin/user-groups/${encodeURIComponent(group.id)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, sortOrder, imageLimitsDisabled: edit.imageLimitsDisabled }),
-      });
-      await loadAll({ silent: true });
-      setStatus(`用户组 ${name} 已保存。`);
-      setError(null);
-    } catch (caught) {
-      const message = errorMessage(caught);
-      setError(message);
-      setStatus(`保存用户组失败：${message}`);
-    } finally {
-      setAction(null);
-    }
-  }
-
-  async function deleteGroup(group: DatabaseUserGroup) {
-    if (!window.confirm(`确认删除用户组 ${group.name}？该组下用户会自动移动到排序最低的剩余分组。`)) {
-      return;
-    }
-
-    setAction(`group:${group.id}`);
-    try {
-      await fetchJson<{ ok: boolean }>(`/_gateway/admin/user-groups/${encodeURIComponent(group.id)}`, { method: "DELETE" });
-      await loadAll({ silent: true });
-      setStatus(`用户组 ${group.name} 已删除。`);
-      setError(null);
-    } catch (caught) {
-      const message = errorMessage(caught);
-      setError(message);
-      setStatus(`删除用户组失败：${message}`);
-    } finally {
-      setAction(null);
-    }
+  function closeEditUser() {
+    setDetailUserId(null);
+    setEditUserDraft(null);
   }
 
   async function toggleUser(user: DatabaseUser) {
@@ -363,77 +416,53 @@ export function DatabaseUsersPanel({
     }
   }
 
-  async function updateUserRole(user: DatabaseUser, role: DatabaseUserRole) {
-    if (role === user.role) {
+  async function saveUserEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingUser || !editUserDraft) {
+      return;
+    }
+    const isSelf = currentUser === editingUser.username;
+    const password = editUserDraft.password.trim();
+    if (password && password.length < 6) {
+      setError("新密码至少需要 6 位。");
       return;
     }
 
-    setAction(`role:${user.id}`);
+    const nextOverride: ImageLimitOverrideDraft = {
+      username: editingUser.username,
+      perUserDaily: editUserDraft.perUserDaily.trim(),
+      perUserHourly: editUserDraft.perUserHourly.trim(),
+      minIntervalSeconds: editUserDraft.minIntervalSeconds.trim(),
+    };
+    const nextOverrides = imageLimitOverrides.filter((item) => item.username !== editingUser.username);
+    if (nextOverride.perUserDaily || nextOverride.perUserHourly || nextOverride.minIntervalSeconds) {
+      nextOverrides.push(nextOverride);
+    }
+
+    setAction(`edit:${editingUser.id}`);
     try {
-      await fetchJson<{ user?: DatabaseUser }>(`/_gateway/admin/users/${encodeURIComponent(user.id)}`, {
+      await fetchJson<{ user?: DatabaseUser }>(`/_gateway/admin/users/${encodeURIComponent(editingUser.id)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role }),
+        body: JSON.stringify({
+          ...(isSelf ? {} : { role: editUserDraft.role }),
+          groupId: editUserDraft.groupId || null,
+          ...(password ? { password } : {}),
+        }),
       });
+      if (onSaveImageLimitOverrides) {
+        await onSaveImageLimitOverrides(nextOverrides);
+      } else {
+        onImageLimitOverridesChange(nextOverrides);
+      }
       await loadUsers({ silent: true });
-      setStatus(`数据库用户 ${user.username} 已调整为${role === "admin" ? "管理员" : "普通用户"}。`);
+      closeEditUser();
+      setStatus(`数据库用户 ${editingUser.username} 已保存。`);
       setError(null);
     } catch (caught) {
       const message = errorMessage(caught);
       setError(message);
-      setStatus(`调整用户角色失败：${message}`);
-    } finally {
-      setAction(null);
-    }
-  }
-
-  async function updateUserGroup(user: DatabaseUser, groupId: string) {
-    if (groupId === user.groupId) {
-      return;
-    }
-
-    setAction(`user-group:${user.id}`);
-    try {
-      await fetchJson<{ user?: DatabaseUser }>(`/_gateway/admin/users/${encodeURIComponent(user.id)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ groupId }),
-      });
-      await loadUsers({ silent: true });
-      const groupName = userGroups.find((group) => group.id === groupId)?.name ?? "未分组";
-      setStatus(`数据库用户 ${user.username} 已移动到 ${groupName}。`);
-      setError(null);
-    } catch (caught) {
-      const message = errorMessage(caught);
-      setError(message);
-      setStatus(`调整用户组失败：${message}`);
-    } finally {
-      setAction(null);
-    }
-  }
-
-  async function resetPassword(user: DatabaseUser) {
-    const password = (newPasswordByUserId[user.id] || "").trim();
-    if (!password) {
-      setError(`请先填写 ${user.username} 的新密码。`);
-      return;
-    }
-
-    setAction(`reset:${user.id}`);
-    try {
-      await fetchJson<{ ok: boolean }>(`/_gateway/admin/users/${encodeURIComponent(user.id)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      setNewPasswordByUserId((current) => ({ ...current, [user.id]: "" }));
-      await loadUsers({ silent: true });
-      setStatus(`数据库用户 ${user.username} 的密码已重置。`);
-      setError(null);
-    } catch (caught) {
-      const message = errorMessage(caught);
-      setError(message);
-      setStatus(`重置密码失败：${message}`);
+      setStatus(`保存用户失败：${message}`);
     } finally {
       setAction(null);
     }
@@ -459,292 +488,319 @@ export function DatabaseUsersPanel({
     }
   }
 
+  async function importWecomContacts(file: File | undefined) {
+    if (!file) {
+      return;
+    }
+    setAction("import-wecom");
+    try {
+      const contacts = await parseWecomContactFile(file);
+      if (contacts.length === 0) {
+        throw new Error("没有解析到可导入的通讯录成员。");
+      }
+      const payload = await fetchJson<{ result?: { total: number; created: number; updated: number; skipped: number }; users?: DatabaseUser[] }>("/_gateway/admin/users/import-wecom-contacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contacts, groupId: draft.groupId || undefined }),
+      });
+      if (payload.users) {
+        setUsers(payload.users);
+      } else {
+        await loadUsers({ silent: true });
+      }
+      setPage(1);
+      const result = payload.result;
+      setStatus(result
+        ? `通讯录导入完成：新增 ${result.created}，更新 ${result.updated}，跳过 ${result.skipped}。`
+        : `通讯录导入完成，共处理 ${contacts.length} 人。`);
+      setError(null);
+    } catch (caught) {
+      const message = errorMessage(caught);
+      setError(message);
+      setStatus(`通讯录导入失败：${message}`);
+    } finally {
+      setAction(null);
+      if (importInputRef.current) {
+        importInputRef.current.value = "";
+      }
+    }
+  }
+
   const loading = action === "load";
+  const batchBusy = action === "batch-enable" || action === "batch-disable" || action === "batch-delete";
+
+  function applyUserFilters(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    setFilters({
+      ...filterDraft,
+      keyword: filterDraft.keyword.trim(),
+    });
+    setPage(1);
+    setSelectedUserIds({});
+  }
+
+  function resetUserFilters() {
+    const next: UserListFilters = { keyword: "", role: "all", status: "all", groupId: "all" };
+    setFilterDraft(next);
+    setFilters(next);
+    setPage(1);
+    setSelectedUserIds({});
+  }
+
+  function toggleSelectUser(user: DatabaseUser, checked: boolean) {
+    setSelectedUserIds((current) => {
+      const next = { ...current };
+      if (checked) {
+        next[user.id] = true;
+      } else {
+        delete next[user.id];
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectPage(checked: boolean) {
+    setSelectedUserIds((current) => {
+      const next = { ...current };
+      for (const user of selectablePagedUsers) {
+        if (checked) {
+          next[user.id] = true;
+        } else {
+          delete next[user.id];
+        }
+      }
+      return next;
+    });
+  }
+
+  async function batchToggleUsers(disabled: boolean) {
+    const targets = selectedUsers.filter((user) => user.username !== currentUser && isUserEnabled(user) === disabled);
+    if (targets.length === 0) {
+      setError(`请选择可${disabled ? "禁用" : "启用"}的用户。`);
+      return;
+    }
+    if (disabled && !window.confirm(`确认批量禁用 ${targets.length} 个用户？`)) {
+      return;
+    }
+    setAction(disabled ? "batch-disable" : "batch-enable");
+    try {
+      await Promise.all(targets.map((user) => fetchJson<{ user?: DatabaseUser }>(`/_gateway/admin/users/${encodeURIComponent(user.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ disabled }),
+      })));
+      setSelectedUserIds({});
+      await loadUsers({ silent: true });
+      setStatus(`已批量${disabled ? "禁用" : "启用"} ${targets.length} 个用户。`);
+      setError(null);
+    } catch (caught) {
+      const message = errorMessage(caught);
+      setError(message);
+      setStatus(`批量${disabled ? "禁用" : "启用"}失败：${message}`);
+    } finally {
+      setAction(null);
+    }
+  }
+
+  async function batchDeleteUsers() {
+    const targets = selectedUsers.filter((user) => user.username !== currentUser);
+    if (targets.length === 0) {
+      setError("请选择可删除的用户。");
+      return;
+    }
+    if (!window.confirm(`确认删除 ${targets.length} 个数据库用户？此操作不可恢复。`)) {
+      return;
+    }
+    setAction("batch-delete");
+    try {
+      await Promise.all(targets.map((user) => fetchJson<{ ok: boolean }>(`/_gateway/admin/users/${encodeURIComponent(user.id)}`, { method: "DELETE" })));
+      setSelectedUserIds({});
+      await loadUsers({ silent: true });
+      setStatus(`已批量删除 ${targets.length} 个用户。`);
+      setError(null);
+    } catch (caught) {
+      const message = errorMessage(caught);
+      setError(message);
+      setStatus(`批量删除失败：${message}`);
+    } finally {
+      setAction(null);
+    }
+  }
 
   function imageLimitOverrideFor(username: string): ImageLimitOverrideDraft | undefined {
     return imageLimitOverrides.find((item) => item.username === username);
   }
 
-  function updateUserImageLimit(username: string, field: keyof Omit<ImageLimitOverrideDraft, "username">, value: string) {
-    const normalizedValue = value.trim();
-    const nextOverrides = [...imageLimitOverrides];
-    const index = nextOverrides.findIndex((item) => item.username === username);
-    const current = index >= 0
-      ? nextOverrides[index] as ImageLimitOverrideDraft
-      : {
-          username,
-          perUserDaily: "",
-          perUserHourly: "",
-          minIntervalSeconds: "",
-        };
-    const next = {
-      ...current,
-      [field]: normalizedValue,
-    };
-    if (!next.perUserDaily && !next.perUserHourly && !next.minIntervalSeconds) {
-      if (index >= 0) {
-        nextOverrides.splice(index, 1);
-      }
-    } else if (index >= 0) {
-      nextOverrides.splice(index, 1, next);
-    } else {
-      nextOverrides.push(next);
-    }
-    onImageLimitOverridesChange(nextOverrides);
-  }
-
   return (
     <section className="settings-section database-users-section">
-      <div className="database-users-head">
-        <div>
-          <h4>数据库用户</h4>
-          <p className="hint">管理员可新增普通用户，或禁用、启用、重置密码、删除用户，并直接配置该用户的生图限额覆盖。</p>
-        </div>
-        <button className="btn-secondary" type="button" onClick={() => void loadUsers()} disabled={loading}>
-          {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
-          刷新
-        </button>
-      </div>
-
-      <div className="database-user-groups">
-        <div className="database-user-groups-head">
-          <div>
-            <h5>用户组</h5>
-            <p className="hint">排序越高，生图排队优先级越高；开启免限额后不受本地生图频率和次数限制。</p>
-          </div>
-        </div>
-        <form className="database-user-group-create" onSubmit={createGroup}>
-          <label className="field">
-            <span>分组名称</span>
-            <input className="input" value={groupDraft.name} onChange={(event) => setGroupDraft((current) => ({ ...current, name: event.target.value }))} placeholder="例如 SVIP 用户组" />
-          </label>
-          <label className="field">
-            <span>排序</span>
-            <input className="input" type="number" value={groupDraft.sortOrder} onChange={(event) => setGroupDraft((current) => ({ ...current, sortOrder: event.target.value }))} />
-          </label>
-          <label className="switch-line database-user-group-switch">
-            <input type="checkbox" checked={groupDraft.imageLimitsDisabled} onChange={(event) => setGroupDraft((current) => ({ ...current, imageLimitsDisabled: event.target.checked }))} />
-            <span>免生图限额</span>
-          </label>
-          <button className="btn-secondary database-user-create-button" type="submit" disabled={action === "create-group"}>
-            {action === "create-group" ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
-            新增分组
-          </button>
-        </form>
-
-        <div className="database-user-groups-table-wrap">
-          <table className="database-user-groups-table">
-            <thead>
-              <tr>
-                <th>分组</th>
-                <th>排序</th>
-                <th>生图限额</th>
-                <th>用户数</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedGroups.map((group) => {
-                const edit = groupEditFor(group);
-                const groupBusy = action === `group:${group.id}`;
-                const userCount = users.filter((user) => user.groupId === group.id).length;
-                return (
-                  <tr key={group.id}>
-                    <td>
-                      <input className="input" value={edit.name} onChange={(event) => updateGroupDraft(group, "name", event.target.value)} />
-                    </td>
-                    <td>
-                      <input className="input database-user-group-order" type="number" value={edit.sortOrder} onChange={(event) => updateGroupDraft(group, "sortOrder", event.target.value)} />
-                    </td>
-                    <td>
-                      <label className="switch-line database-user-group-switch">
-                        <input type="checkbox" checked={edit.imageLimitsDisabled} onChange={(event) => updateGroupDraft(group, "imageLimitsDisabled", event.target.checked)} />
-                        <span>{edit.imageLimitsDisabled ? "免限额" : "继承限额"}</span>
-                      </label>
-                    </td>
-                    <td>{userCount}</td>
-                    <td>
-                      <div className="database-user-actions">
-                        <button className="btn-secondary icon-action" type="button" onClick={() => void saveGroup(group)} disabled={groupBusy || !hasGroupEdit(group)} title="保存用户组">
-                          {groupBusy ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-                        </button>
-                        <button className="btn-secondary danger-action icon-action" type="button" onClick={() => void deleteGroup(group)} disabled={groupBusy || sortedGroups.length <= 1} title="删除用户组">
-                          {groupBusy ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <form className="database-user-create" onSubmit={createUser}>
-        <label className="field">
-          <span>用户名</span>
-          <input className="input" value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} placeholder="例如 alice" />
-        </label>
-        <label className="field">
-          <span>初始密码</span>
-          <input className="input" type="password" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} placeholder="至少 6 位" />
-        </label>
-        <label className="field">
-          <span>角色</span>
-          <select className="control" value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value as DatabaseUserRole }))}>
-            <option value="user">普通用户</option>
-            <option value="admin">管理员</option>
-          </select>
-        </label>
-        <label className="field">
-          <span>用户组</span>
-          <select className="control" value={draft.groupId} onChange={(event) => setDraft((current) => ({ ...current, groupId: event.target.value }))}>
-            {sortedGroups.map((group) => (
-              <option key={group.id} value={group.id}>{group.name}</option>
-            ))}
-          </select>
-        </label>
-        <button className="btn-primary database-user-create-button" type="submit" disabled={action === "create"}>
-          {action === "create" ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
-          新增用户
-        </button>
-      </form>
+      <input
+        ref={importInputRef}
+        className="database-user-import-input"
+        type="file"
+        accept=".xlsx,.xls,.csv,.txt"
+        onChange={(event) => void importWecomContacts(event.currentTarget.files?.[0])}
+      />
 
       {error ? <div className="database-users-error">{error}</div> : null}
+
+      <form className="database-users-query database-users-toolbar" onSubmit={applyUserFilters}>
+        <div className="database-users-filter-grid">
+          <label className="field database-users-keyword">
+            <span>搜索</span>
+            <div className="database-users-search-control">
+              <Search size={16} />
+              <input
+                className="input"
+                value={filterDraft.keyword}
+                onChange={(event) => setFilterDraft((current) => ({ ...current, keyword: event.target.value }))}
+                placeholder="姓名、用户名、用户组"
+              />
+            </div>
+          </label>
+          <label className="field">
+            <span>角色</span>
+            <select className="control" value={filterDraft.role} onChange={(event) => setFilterDraft((current) => ({ ...current, role: event.target.value as UserListFilters["role"] }))}>
+              <option value="all">全部角色</option>
+              <option value="admin">管理员</option>
+              <option value="user">普通用户</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>状态</span>
+            <select className="control" value={filterDraft.status} onChange={(event) => setFilterDraft((current) => ({ ...current, status: event.target.value as UserListFilters["status"] }))}>
+              <option value="all">全部状态</option>
+              <option value="enabled">启用</option>
+              <option value="disabled">禁用</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>用户组</span>
+            <select className="control" value={filterDraft.groupId} onChange={(event) => setFilterDraft((current) => ({ ...current, groupId: event.target.value }))}>
+              <option value="all">全部用户组</option>
+              {sortedGroups.map((group) => (
+                <option key={group.id} value={group.id}>{group.name}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="database-users-toolbar-actions">
+          <button className="btn-primary" type="submit">
+            查询
+          </button>
+          <button className="btn-secondary" type="button" onClick={resetUserFilters}>
+            重置
+          </button>
+          <button className="btn-secondary" type="button" onClick={() => void loadUsers()} disabled={loading}>
+            {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+            刷新
+          </button>
+          <button className="btn-primary" type="button" onClick={() => setCreateUserOpen(true)}>
+            <Plus size={16} />
+            新增用户
+          </button>
+          <button className="btn-secondary" type="button" onClick={() => importInputRef.current?.click()} disabled={action === "import-wecom"}>
+            {action === "import-wecom" ? <Loader2 className="spin" size={16} /> : <FileSpreadsheet size={16} />}
+            导入通讯录
+          </button>
+          {selectedUsers.length > 0 ? (
+            <>
+              <span className="database-users-count">已选 {selectedUsers.length} 条</span>
+              <button className="btn-secondary" type="button" onClick={() => void batchToggleUsers(false)} disabled={batchBusy}>
+                批量启用
+              </button>
+              <button className="btn-secondary" type="button" onClick={() => void batchToggleUsers(true)} disabled={batchBusy}>
+                批量禁用
+              </button>
+              <button className="btn-secondary danger-action" type="button" onClick={() => void batchDeleteUsers()} disabled={batchBusy}>
+                批量删除
+              </button>
+            </>
+          ) : null}
+        </div>
+      </form>
 
       <div className="database-users-table-wrap">
         <table className="database-users-table">
           <thead>
             <tr>
+              <th>
+                <input
+                  aria-label="选择当前页用户"
+                  type="checkbox"
+                  checked={allPagedSelected}
+                  disabled={selectablePagedUsers.length === 0}
+                  onChange={(event) => toggleSelectPage(event.target.checked)}
+                />
+              </th>
               <th>用户</th>
               <th>角色</th>
               <th>用户组</th>
               <th>状态</th>
               <th>生图限额</th>
               <th>创建时间</th>
-              <th>重置密码</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            {sortedUsers.length === 0 ? (
+            {loading ? (
               <tr>
                 <td className="database-users-empty" colSpan={8}>
-                  {loading ? "正在读取数据库用户..." : "暂无数据库用户。"}
+                  正在读取数据库用户...
+                </td>
+              </tr>
+            ) : filteredUsers.length === 0 ? (
+              <tr>
+                <td className="database-users-empty" colSpan={8}>
+                  没有匹配的数据库用户。
+                  <button className="btn-secondary" type="button" onClick={resetUserFilters}>重置筛选</button>
                 </td>
               </tr>
             ) : (
-              sortedUsers.map((user) => {
+              pagedUsers.map((user) => {
                 const isSelf = currentUser === user.username;
-                const roleBusy = action === `role:${user.id}`;
-                const userGroupBusy = action === `user-group:${user.id}`;
                 const toggleBusy = action === `toggle:${user.id}`;
-                const resetBusy = action === `reset:${user.id}`;
+                const editBusy = action === `edit:${user.id}`;
                 const deleteBusy = action === `delete:${user.id}`;
                 const enabled = isUserEnabled(user);
                 const imageLimit = imageLimitOverrideFor(user.username);
                 return (
-                  <tr key={user.id}>
+                  <tr key={user.id} className="database-user-row" onClick={() => openEditUser(user)}>
+                    <td onClick={(event) => event.stopPropagation()}>
+                      <input
+                        aria-label={`选择 ${userLabel(user)}`}
+                        type="checkbox"
+                        checked={Boolean(selectedUserIds[user.id])}
+                        disabled={isSelf}
+                        onChange={(event) => toggleSelectUser(user, event.target.checked)}
+                      />
+                    </td>
                     <td>
-                      <strong>{user.username}</strong>
+                      <strong>{user.displayName || user.username}</strong>
+                      {user.displayName ? <span className="database-user-username">{user.username}</span> : null}
                       {isSelf ? <span className="database-user-self">当前登录</span> : null}
                     </td>
+                    <td>{user.role === "admin" ? "管理员" : "普通用户"}</td>
                     <td>
-                      <div className="database-user-role-control">
-                        <select
-                          className="control"
-                          value={user.role}
-                          onChange={(event) => void updateUserRole(user, event.target.value as DatabaseUserRole)}
-                          disabled={roleBusy || isSelf}
-                          title={isSelf ? "不能调整当前登录用户的角色" : "调整用户角色"}
-                        >
-                          <option value="user">普通用户</option>
-                          <option value="admin">管理员</option>
-                        </select>
-                        {roleBusy ? <Loader2 className="spin" size={16} /> : null}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="database-user-role-control">
-                        <select
-                          className="control"
-                          value={user.groupId || ""}
-                          onChange={(event) => void updateUserGroup(user, event.target.value)}
-                          disabled={userGroupBusy || sortedGroups.length === 0}
-                          title="调整用户组"
-                        >
-                          {sortedGroups.map((group) => (
-                            <option key={group.id} value={group.id}>
-                              {group.name}
-                            </option>
-                          ))}
-                        </select>
-                        {userGroupBusy ? <Loader2 className="spin" size={16} /> : null}
-                      </div>
+                      {user.groupName || sortedGroups.find((group) => group.id === user.groupId)?.name || "-"}
                       {user.groupImageLimitsDisabled ? <span className="database-user-vip-note">免限额</span> : null}
                     </td>
                     <td>
                       <span className={`database-user-status ${enabled ? "is-enabled" : "is-disabled"}`}>{enabled ? "启用" : "禁用"}</span>
                     </td>
                     <td>
-                      <div className="database-user-image-limits">
-                        <label>
-                          <span>24h</span>
-                          <input
-                            className="input"
-                            inputMode="numeric"
-                            min={0}
-                            type="number"
-                            value={imageLimit?.perUserDaily || ""}
-                            onChange={(event) => updateUserImageLimit(user.username, "perUserDaily", event.target.value)}
-                            placeholder={inheritedLimitLabel(imageLimitDefaults.perUserDaily)}
-                          />
-                        </label>
-                        <label>
-                          <span>1h</span>
-                          <input
-                            className="input"
-                            inputMode="numeric"
-                            min={0}
-                            type="number"
-                            value={imageLimit?.perUserHourly || ""}
-                            onChange={(event) => updateUserImageLimit(user.username, "perUserHourly", event.target.value)}
-                            placeholder={inheritedLimitLabel(imageLimitDefaults.perUserHourly)}
-                          />
-                        </label>
-                        <label>
-                          <span>间隔</span>
-                          <input
-                            className="input"
-                            inputMode="numeric"
-                            max={86400}
-                            min={0}
-                            type="number"
-                            value={imageLimit?.minIntervalSeconds || ""}
-                            onChange={(event) => updateUserImageLimit(user.username, "minIntervalSeconds", event.target.value)}
-                            placeholder={inheritedLimitLabel(imageLimitDefaults.minIntervalSeconds)}
-                          />
-                        </label>
+                      <div className="database-user-limit-summary">
+                        <span>24h {imageLimit?.perUserDaily || groupLimitLabel(user.groupPerUserDaily, imageLimitDefaults.perUserDaily)}</span>
+                        <span>1h {imageLimit?.perUserHourly || groupLimitLabel(user.groupPerUserHourly, imageLimitDefaults.perUserHourly)}</span>
+                        <span>间隔 {imageLimit?.minIntervalSeconds || groupLimitLabel(user.groupMinIntervalSeconds, imageLimitDefaults.minIntervalSeconds)}</span>
                       </div>
                     </td>
                     <td>{formatDate(user.createdAt)}</td>
-                    <td>
-                      <div className="database-user-password">
-                        <input
-                          className="input"
-                          type="password"
-                          value={newPasswordByUserId[user.id] || ""}
-                          onChange={(event) => setNewPasswordByUserId((current) => ({ ...current, [user.id]: event.target.value }))}
-                          placeholder="新密码"
-                        />
-                        <button className="btn-secondary icon-action" type="button" onClick={() => void resetPassword(user)} disabled={resetBusy} title="重置密码">
-                          {resetBusy ? <Loader2 className="spin" size={16} /> : <RotateCcw size={16} />}
-                        </button>
-                      </div>
-                    </td>
-                    <td>
+                    <td onClick={(event) => event.stopPropagation()}>
                       <div className="database-user-actions">
+                        <button className="btn-secondary" type="button" onClick={() => openEditUser(user)} disabled={editBusy}>
+                          {editBusy ? <Loader2 className="spin" size={16} /> : <Pencil size={16} />}
+                          编辑
+                        </button>
                         <button className="btn-secondary" type="button" onClick={() => void toggleUser(user)} disabled={toggleBusy || isSelf}>
                           {toggleBusy ? <Loader2 className="spin" size={16} /> : enabled ? "禁用" : "启用"}
                         </button>
@@ -760,6 +816,186 @@ export function DatabaseUsersPanel({
           </tbody>
         </table>
       </div>
+      <div className="database-users-pagination">
+        <span>
+          共 {filteredUsers.length} 条，第 {page} / {pageCount} 页
+        </span>
+        <label>
+          每页
+          <select className="control" value={pageSize} onChange={(event) => {
+            setPageSize(Number(event.target.value));
+            setPage(1);
+          }}>
+            <option value={20}>20</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </label>
+        <div className="database-users-page-buttons">
+          <button className="btn-secondary" type="button" onClick={() => setPage(1)} disabled={page <= 1}>首页</button>
+          <button className="btn-secondary" type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page <= 1}>上一页</button>
+          <button className="btn-secondary" type="button" onClick={() => setPage((current) => Math.min(pageCount, current + 1))} disabled={page >= pageCount}>下一页</button>
+          <button className="btn-secondary" type="button" onClick={() => setPage(pageCount)} disabled={page >= pageCount}>末页</button>
+        </div>
+      </div>
+      {createUserOpen ? (
+        <div className="database-user-modal-backdrop" role="presentation" onClick={() => setCreateUserOpen(false)}>
+          <form className="database-user-modal-panel" role="dialog" aria-modal="true" aria-label="新增用户" onSubmit={createUser} onClick={(event) => event.stopPropagation()}>
+            <div className="database-user-modal-head">
+              <div>
+                <h5>新增用户</h5>
+                <p>创建数据库登录用户，后续可在列表里编辑角色、用户组和限额。</p>
+              </div>
+              <button className="btn-secondary icon-action" type="button" onClick={() => setCreateUserOpen(false)} title="关闭">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="database-user-modal-grid">
+              <label className="field">
+                <span>用户名</span>
+                <input className="input" value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} placeholder="例如 alice" />
+              </label>
+              <label className="field">
+                <span>初始密码</span>
+                <input className="input" type="password" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} placeholder="至少 6 位" />
+              </label>
+              <label className="field">
+                <span>角色</span>
+                <select className="control" value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value as DatabaseUserRole }))}>
+                  <option value="user">普通用户</option>
+                  <option value="admin">管理员</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>用户组</span>
+                <select className="control" value={draft.groupId} onChange={(event) => setDraft((current) => ({ ...current, groupId: event.target.value }))}>
+                  {sortedGroups.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="database-user-modal-actions">
+              <button className="btn-secondary" type="button" onClick={() => setCreateUserOpen(false)}>取消</button>
+              <button className="btn-primary" type="submit" disabled={action === "create"}>
+                {action === "create" ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
+                新增用户
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {editingUser && editUserDraft ? (
+        <div className="database-user-modal-backdrop" role="presentation" onClick={closeEditUser}>
+          <form className="database-user-modal-panel" role="dialog" aria-modal="true" aria-label="编辑用户" onSubmit={saveUserEdit} onClick={(event) => event.stopPropagation()}>
+            <div className="database-user-modal-head">
+              <div>
+                <h5>{userLabel(editingUser)}</h5>
+                <p>{editingUser.username}</p>
+              </div>
+              <button className="btn-secondary icon-action" type="button" onClick={closeEditUser} title="关闭">
+                <X size={16} />
+              </button>
+            </div>
+            <dl className="database-user-detail-list">
+              <div><dt>状态</dt><dd>{isUserEnabled(editingUser) ? "启用" : "禁用"}</dd></div>
+              <div><dt>创建时间</dt><dd>{formatDate(editingUser.createdAt)}</dd></div>
+              <div><dt>更新时间</dt><dd>{formatDate(editingUser.updatedAt)}</dd></div>
+            </dl>
+            <div className="database-user-modal-grid">
+              <label className="field">
+                <span>角色</span>
+                <select
+                  className="control"
+                  value={editUserDraft.role}
+                  onChange={(event) => setEditUserDraft((current) => current ? { ...current, role: event.target.value as DatabaseUserRole } : current)}
+                  disabled={editingUser.username === currentUser}
+                >
+                  <option value="user">普通用户</option>
+                  <option value="admin">管理员</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>用户组</span>
+                <select
+                  className="control"
+                  value={editUserDraft.groupId}
+                  onChange={(event) => setEditUserDraft((current) => current ? { ...current, groupId: event.target.value } : current)}
+                >
+                  {sortedGroups.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field database-user-modal-wide">
+                <span>新密码</span>
+                <input
+                  className="input"
+                  type="password"
+                  value={editUserDraft.password}
+                  onChange={(event) => setEditUserDraft((current) => current ? { ...current, password: event.target.value } : current)}
+                  placeholder="留空则不修改"
+                />
+              </label>
+            </div>
+            <div className="database-user-modal-subtitle">生图限额覆盖</div>
+            <div className="database-user-modal-grid three">
+              <label className="field">
+                <span>24 小时上限</span>
+                <input
+                  className="input"
+                  inputMode="numeric"
+                  min={0}
+                  type="number"
+                  value={editUserDraft.perUserDaily}
+                  onChange={(event) => setEditUserDraft((current) => current ? { ...current, perUserDaily: event.target.value } : current)}
+                  placeholder={`继承：${groupLimitLabel(editingUser.groupPerUserDaily, imageLimitDefaults.perUserDaily)}`}
+                />
+              </label>
+              <label className="field">
+                <span>1 小时上限</span>
+                <input
+                  className="input"
+                  inputMode="numeric"
+                  min={0}
+                  type="number"
+                  value={editUserDraft.perUserHourly}
+                  onChange={(event) => setEditUserDraft((current) => current ? { ...current, perUserHourly: event.target.value } : current)}
+                  placeholder={`继承：${groupLimitLabel(editingUser.groupPerUserHourly, imageLimitDefaults.perUserHourly)}`}
+                />
+              </label>
+              <label className="field">
+                <span>最小间隔秒数</span>
+                <input
+                  className="input"
+                  inputMode="numeric"
+                  max={86400}
+                  min={0}
+                  type="number"
+                  value={editUserDraft.minIntervalSeconds}
+                  onChange={(event) => setEditUserDraft((current) => current ? { ...current, minIntervalSeconds: event.target.value } : current)}
+                  placeholder={`继承：${groupLimitLabel(editingUser.groupMinIntervalSeconds, imageLimitDefaults.minIntervalSeconds)}`}
+                />
+              </label>
+            </div>
+            <div className="database-user-modal-actions">
+              <button className="btn-secondary" type="button" onClick={closeEditUser}>取消</button>
+              <button className="btn-secondary" type="button" onClick={() => void toggleUser(editingUser)} disabled={editingUser.username === currentUser || action === `toggle:${editingUser.id}`}>
+                {action === `toggle:${editingUser.id}` ? <Loader2 className="spin" size={16} /> : null}
+                {isUserEnabled(editingUser) ? "禁用用户" : "启用用户"}
+              </button>
+              <button className="btn-secondary danger-action" type="button" onClick={() => void deleteUser(editingUser)} disabled={editingUser.username === currentUser || action === `delete:${editingUser.id}`}>
+                {action === `delete:${editingUser.id}` ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+                删除用户
+              </button>
+              <button className="btn-primary" type="submit" disabled={action === `edit:${editingUser.id}`}>
+                {action === `edit:${editingUser.id}` ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+                保存
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </section>
   );
 }

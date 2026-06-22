@@ -16,6 +16,7 @@ export type BusyAction =
   | "models"
   | "codex-provider"
   | "codex-share"
+  | "chat"
   | "test"
   | "prompt-optimize"
   | "image-bed-save"
@@ -67,6 +68,9 @@ export type ModalImage = { src: string; meta: string; filename?: string; ratio?:
 
 export type SettingDraft = {
   defaultModel: string;
+  brandingTitle: string;
+  brandingAppIconUrl: string;
+  brandingFaviconUrl: string;
   proxyEnabled: boolean;
   proxyUrl: string;
   proxyNoProxy: string;
@@ -90,7 +94,6 @@ export type SettingDraft = {
   wecomCorpId: string;
   wecomAgentId: string;
   wecomSecret: string;
-  serverPort: string;
 };
 
 export type SelectOption<T extends string | number> = {

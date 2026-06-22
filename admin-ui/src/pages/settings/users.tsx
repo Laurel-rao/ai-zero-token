@@ -65,7 +65,7 @@ export function SettingsUsersPage(props: {
     setDirty(true);
   }
 
-  async function saveUserLimits() {
+  async function saveUserLimits(nextOverrides = imageLimitOverrides) {
     if (!props.config) {
       props.setStatus("网关配置尚未加载完成。");
       return;
@@ -73,7 +73,7 @@ export function SettingsUsersPage(props: {
 
     try {
       const seen = new Set<string>();
-      const userOverrides = imageLimitOverrides.map((item) => {
+      const userOverrides = nextOverrides.map((item) => {
         const username = item.username.trim();
         if (!username) {
           throw new Error("用户限额覆盖缺少用户名。");
@@ -107,6 +107,7 @@ export function SettingsUsersPage(props: {
         }),
       });
       props.setConfig(next);
+      setImageLimitOverrides(overridesFromConfig(next));
       setDirty(false);
       props.setStatus("用户限额设置已保存。");
     } catch (error) {
@@ -118,24 +119,21 @@ export function SettingsUsersPage(props: {
 
   return (
     <section className="settings-page settings-users-page">
-      <div className="settings-page-head">
-        <div>
-          <h3>用户管理</h3>
-          <p className="hint">管理数据库登录用户，并为具体用户设置生图限额覆盖。</p>
-        </div>
-        <div className="settings-page-actions">
-          <button className="btn-primary" type="button" onClick={() => void saveUserLimits()} disabled={props.busy === "settings" || !dirty}>
+      {dirty ? (
+        <div className="settings-page-actions settings-inline-actions">
+          <button className="btn-primary" type="button" onClick={() => void saveUserLimits()} disabled={props.busy === "settings"}>
             {props.busy === "settings" ? <Loader2 className="spin" size={16} /> : null}
             保存用户限额
           </button>
         </div>
-      </div>
+      ) : null}
 
       <DatabaseUsersPanel
         currentUser={props.currentUser}
         imageLimitDefaults={imageLimitDefaults}
         imageLimitOverrides={imageLimitOverrides}
         onImageLimitOverridesChange={updateOverrides}
+        onSaveImageLimitOverrides={saveUserLimits}
         setStatus={props.setStatus}
       />
     </section>
