@@ -154,6 +154,11 @@ export type GatewaySettings = {
   version: 1;
   defaultProvider: ProviderId;
   defaultModel: string;
+  branding: {
+    title: string;
+    appIconUrl: string;
+    faviconUrl: string;
+  };
   networkProxy: {
     enabled: boolean;
     url: string;

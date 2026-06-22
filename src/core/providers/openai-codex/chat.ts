@@ -550,6 +550,17 @@ function parseSseEvents(body: string): CodexSseEvent[] {
   return events;
 }
 
+export function extractCodexTextDeltaFromSsePayload(payload: unknown): string {
+  const event = asRecord(payload);
+  if (!event) {
+    return "";
+  }
+  if (typeof event.delta === "string") {
+    return event.delta;
+  }
+  return "";
+}
+
 function pushArtifactCandidate(
   items: ArtifactCandidate[],
   dedupe: Set<string>,

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   brotliDecompress,
   gunzip,
+  gzip,
   inflate,
   zstdDecompress,
 } from "node:zlib";
@@ -17,14 +18,14 @@ import { z } from "zod";
 import { createGatewayContext } from "../core/context.js";
 import type { ChatResult, GatewaySettings, OAuthProfile, ProfileSummary } from "../core/types.js";
 import { isTransientHttpError, requestText } from "../core/providers/http-client.js";
-import { streamOpenAICodex } from "../core/providers/openai-codex/chat.js";
+import { extractCodexTextDeltaFromSsePayload, streamOpenAICodex } from "../core/providers/openai-codex/chat.js";
 import { generateChatGPTWebImage, type ChatGPTWebImageResult } from "../core/providers/openai-codex/chatgpt-web-image.js";
 import {
   startOpenAICodexRemoteLogin,
   type OpenAICodexRemoteLoginSession,
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
-import type { GatewayUserRole } from "../core/services/gateway-database-service.js";
+import type { ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
 import { getGenerationAssetsDir } from "../core/store/state-paths.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
@@ -45,6 +46,7 @@ const WECOM_LOGIN_STATE_TTL_MS = 10 * 60 * 1000;
 const WECOM_EMBED_LOGIN_STATE_TTL_MS = 10 * 60 * 1000;
 const WECOM_EMBED_COMPLETE_TTL_MS = 60 * 1000;
 const gunzipAsync = promisify(gunzip);
+const gzipAsync = promisify(gzip);
 const inflateAsync = promisify(inflate);
 const brotliDecompressAsync = promisify(brotliDecompress);
 const zstdDecompressAsync = typeof zstdDecompress === "function" ? promisify(zstdDecompress) : null;
@@ -119,6 +121,11 @@ type ImageOwnerPolicy = {
   priority: number;
   imageLimitsDisabled: boolean;
   groupName?: string;
+  groupLimits?: {
+    perUserDaily?: number;
+    perUserHourly?: number;
+    minIntervalSeconds?: number;
+  };
 };
 
 type GatewayShareAddress = {
@@ -340,6 +347,9 @@ function isUserGatewayPath(method: string, url: string): boolean {
   if (method === "GET" && pathOnly === "/_gateway/admin/request-logs") {
     return true;
   }
+  if (pathOnly === "/_gateway/chats" || pathOnly.startsWith("/_gateway/chats/")) {
+    return true;
+  }
   if ((method === "GET" || method === "DELETE") && pathOnly === "/_gateway/generations/history") {
     return true;
   }
@@ -352,6 +362,26 @@ function isUserGatewayPath(method: string, url: string): boolean {
 function isApiPath(url: string): boolean {
   const pathOnly = url.split("?")[0] ?? "/";
   return pathOnly.startsWith("/v1/") || pathOnly.startsWith("/codex/v1/");
+}
+
+function acceptsGzip(request: FastifyRequest): boolean {
+  const encoding = request.headers["accept-encoding"];
+  return typeof encoding === "string" && /\bgzip\b/i.test(encoding);
+}
+
+function shouldCompressReply(reply: FastifyReply, payload: unknown): payload is string | Buffer {
+  if (!(typeof payload === "string" || Buffer.isBuffer(payload))) {
+    return false;
+  }
+  if (reply.getHeader("content-encoding")) {
+    return false;
+  }
+  const contentType = String(reply.getHeader("content-type") ?? "");
+  if (!/application\/json|text\/|javascript|svg/i.test(contentType)) {
+    return false;
+  }
+  const size = Buffer.isBuffer(payload) ? payload.byteLength : Buffer.byteLength(payload);
+  return size >= 1024;
 }
 
 type CodexImageGenerationRequest = {
@@ -526,6 +556,17 @@ const gatewayUserUpdateSchema = z.object({
   disabled: z.boolean().optional(),
 });
 
+const wecomContactImportSchema = z.object({
+  groupId: z.string().trim().min(1).nullable().optional(),
+  contacts: z
+    .array(z.object({
+      userId: z.string().trim().min(1).max(120),
+      displayName: z.string().trim().min(1).max(120),
+    }))
+    .min(1)
+    .max(5000),
+});
+
 const gatewayUserParamsSchema = z.object({
   id: z.string().min(1),
 });
@@ -534,12 +575,18 @@ const gatewayUserGroupCreateSchema = z.object({
   name: z.string().trim().min(1).max(80),
   sortOrder: z.number().int().min(-100_000).max(100_000).default(0),
   imageLimitsDisabled: z.boolean().default(false),
+  perUserDaily: z.number().int().min(0).max(100_000).nullable().optional(),
+  perUserHourly: z.number().int().min(0).max(100_000).nullable().optional(),
+  minIntervalSeconds: z.number().int().min(0).max(86_400).nullable().optional(),
 });
 
 const gatewayUserGroupUpdateSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   sortOrder: z.number().int().min(-100_000).max(100_000).optional(),
   imageLimitsDisabled: z.boolean().optional(),
+  perUserDaily: z.number().int().min(0).max(100_000).nullable().optional(),
+  perUserHourly: z.number().int().min(0).max(100_000).nullable().optional(),
+  minIntervalSeconds: z.number().int().min(0).max(86_400).nullable().optional(),
 });
 
 const gatewayUserGroupParamsSchema = z.object({
@@ -548,6 +595,13 @@ const gatewayUserGroupParamsSchema = z.object({
 
 const settingsUpdateSchema = z.object({
   defaultModel: z.string().min(1).optional(),
+  branding: z
+    .object({
+      title: z.string().trim().min(1).max(80).optional(),
+      appIconUrl: z.string().trim().max(500).optional(),
+      faviconUrl: z.string().trim().max(500).optional(),
+    })
+    .optional(),
   networkProxy: z
     .object({
       enabled: z.boolean(),
@@ -683,11 +737,41 @@ const githubImageBedHistoryParamsSchema = z.object({
 const generationHistoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   owner: z.string().min(1).max(120).optional(),
+  light: z.coerce.boolean().optional(),
+});
+
+const chatListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+
+const chatConversationBodySchema = z.object({
+  title: z.string().max(80).optional(),
+  model: z.string().min(1).optional(),
+});
+
+const chatConversationPatchSchema = z.object({
+  title: z.string().min(1).max(80).optional(),
+  model: z.string().min(1).optional(),
+});
+
+const chatMessageStreamBodySchema = z.object({
+  content: z.string().trim().min(1),
+  model: z.string().min(1).optional(),
+});
+
+const chatMessageRetryStreamBodySchema = z.object({
+  model: z.string().min(1).optional(),
 });
 
 const requestLogsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   owner: z.string().min(1).max(120).optional(),
+  details: z.coerce.boolean().optional(),
+});
+
+const gatewayUsersQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(5000).optional(),
+  page: z.coerce.number().int().min(1).optional(),
 });
 
 const imageGenerationsBodySchema = z
@@ -1576,6 +1660,66 @@ function createChatCompletionsCodexBody(
   return body;
 }
 
+function createGatewayChatCodexBody(params: {
+  model: string;
+  messages: ChatMessage[];
+}): Record<string, unknown> {
+  return {
+    model: params.model,
+    store: false,
+    stream: true,
+    instructions: "",
+    text: { verbosity: "medium" },
+    include: ["reasoning.encrypted_content"],
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+    input: params.messages.map((message) => ({
+      role: message.role,
+      content: [
+        {
+          type: message.role === "assistant" ? "output_text" : "input_text",
+          text: message.content,
+        },
+      ],
+    })),
+  };
+}
+
+function writeGatewayChatSse(reply: FastifyReply, event: string, payload: Record<string, unknown>): void {
+  if (reply.raw.destroyed || reply.raw.writableEnded) {
+    return;
+  }
+  reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+function extractGatewayChatDeltasFromBufferedText(bufferedText: string, flush = false): { deltas: string[]; rest: string } {
+  const deltas: string[] = [];
+  const parts = bufferedText.split("\n\n");
+  const rest = flush ? "" : parts.pop() ?? "";
+  for (const block of parts) {
+    const data = block
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(data) as unknown;
+      const delta = extractCodexTextDeltaFromSsePayload(parsed);
+      if (delta) {
+        deltas.push(delta);
+      }
+    } catch {
+      // Ignore partial or malformed SSE blocks; the next chunk may contain a complete event.
+    }
+  }
+  return { deltas, rest };
+}
+
 function summarizeImageRequestForLog(body: z.infer<typeof imageGenerationsBodySchema>): Record<string, unknown> {
   return {
     model: body.model ?? "default",
@@ -1994,6 +2138,14 @@ function serializeSettings(settings: GatewaySettings, isAdmin: boolean): Gateway
   };
 }
 
+function buildGatewayHealth(ctx: ReturnType<typeof createGatewayContext>) {
+  const modelAutoRefresh = ctx.modelService.getAutoRefreshStatus();
+  return {
+    ok: !modelAutoRefresh.lastError || (modelAutoRefresh.lastSuccessAt ?? 0) >= (modelAutoRefresh.lastFailureAt ?? 0),
+    modelAutoRefresh,
+  };
+}
+
 function resolveOrigin(request: FastifyRequest): string {
   const host = request.headers.host;
   if (host) {
@@ -2387,7 +2539,20 @@ export function createApp(params?: {
     return requestedOwner?.trim() || currentOwner;
   }
 
-  function resolveImageLimits(settings: GatewaySettings, owner: string): {
+  type ImageLimitSource = {
+    perUserDaily?: number;
+    perUserHourly?: number;
+    minIntervalSeconds?: number;
+  };
+
+  function hasPositiveImageLimit(source: ImageLimitSource | undefined): boolean {
+    return Boolean(
+      source &&
+      ((source.perUserDaily ?? 0) > 0 || (source.perUserHourly ?? 0) > 0 || (source.minIntervalSeconds ?? 0) > 0),
+    );
+  }
+
+  function resolveImageLimits(settings: GatewaySettings, owner: string, groupLimits?: ImageLimitSource): {
     perUserDaily: number;
     perUserHourly: number;
     minIntervalSeconds: number;
@@ -2395,18 +2560,14 @@ export function createApp(params?: {
   } {
     const limits = settings.image.limits;
     const override = limits.userOverrides.find((item) => item.username === owner);
-    const hasActiveOverride = Boolean(
-      override &&
-      ((override.perUserDaily ?? 0) > 0 || (override.perUserHourly ?? 0) > 0 || (override.minIntervalSeconds ?? 0) > 0),
-    );
     const inheritedDaily = limits.enabled ? limits.perUserDaily : 0;
     const inheritedHourly = limits.enabled ? limits.perUserHourly : 0;
     const inheritedMinIntervalSeconds = limits.enabled ? limits.minIntervalSeconds : 0;
     return {
-      perUserDaily: override?.perUserDaily ?? inheritedDaily,
-      perUserHourly: override?.perUserHourly ?? inheritedHourly,
-      minIntervalSeconds: override?.minIntervalSeconds ?? inheritedMinIntervalSeconds,
-      hasActiveOverride,
+      perUserDaily: override?.perUserDaily ?? groupLimits?.perUserDaily ?? inheritedDaily,
+      perUserHourly: override?.perUserHourly ?? groupLimits?.perUserHourly ?? inheritedHourly,
+      minIntervalSeconds: override?.minIntervalSeconds ?? groupLimits?.minIntervalSeconds ?? inheritedMinIntervalSeconds,
+      hasActiveOverride: hasPositiveImageLimit(override) || hasPositiveImageLimit(groupLimits),
     };
   }
 
@@ -2422,6 +2583,13 @@ export function createApp(params?: {
       priority: user?.groupSortOrder ?? 0,
       imageLimitsDisabled: Boolean(user?.groupImageLimitsDisabled),
       groupName: user?.groupName,
+      groupLimits: user
+        ? {
+            perUserDaily: user.groupPerUserDaily,
+            perUserHourly: user.groupPerUserHourly,
+            minIntervalSeconds: user.groupMinIntervalSeconds,
+          }
+        : undefined,
     };
   }
 
@@ -2436,7 +2604,7 @@ export function createApp(params?: {
       return { allowed: true };
     }
 
-    const effective = resolveImageLimits(settings, owner);
+    const effective = resolveImageLimits(settings, owner, policy.groupLimits);
     if (!limits.enabled && !effective.hasActiveOverride) {
       return { allowed: true };
     }
@@ -2832,6 +3000,15 @@ export function createApp(params?: {
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   });
 
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (!acceptsGzip(request) || !shouldCompressReply(reply, payload)) {
+      return payload;
+    }
+    reply.header("Content-Encoding", "gzip");
+    reply.removeHeader("Content-Length");
+    return gzipAsync(Buffer.isBuffer(payload) ? payload : Buffer.from(payload));
+  });
+
   app.addHook("onRequest", async (request, reply) => {
     if (isPublicPath(request.method, request.url)) {
       return;
@@ -2907,6 +3084,14 @@ export function createApp(params?: {
     }
   });
 
+  app.addHook("onReady", async () => {
+    ctx.modelService.startAutoRefresh();
+  });
+
+  app.addHook("onClose", async () => {
+    ctx.modelService.stopAutoRefresh();
+  });
+
   app.setErrorHandler((error, request, reply) => {
     const normalized = normalizeError(error);
     const statusCode = getErrorStatusCode(normalized);
@@ -2940,7 +3125,8 @@ export function createApp(params?: {
     const limit = parsed.success ? parsed.data.limit ?? MAX_PERSISTED_REQUEST_LOGS : MAX_PERSISTED_REQUEST_LOGS;
     const session = await getSessionFromRequest(request);
     const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
-    const persisted = await ctx.gatewayDatabaseService.listRequestLogs(limit, owner);
+    const includeDetails = parsed.success ? Boolean(parsed.data.details) : false;
+    const persisted = await ctx.gatewayDatabaseService.listRequestLogs(limit, owner, { includeDetails });
     return {
       data: persisted.length > 0
         ? persisted
@@ -2952,13 +3138,355 @@ export function createApp(params?: {
 
   app.post("/_gateway/admin/usage/reset", async () => ctx.usageService.backupAndReset());
 
+  app.get("/_gateway/chats", async (request) => {
+    const parsed = chatListQuerySchema.safeParse(request.query);
+    const owner = await getRequestOwner(request);
+    return {
+      items: await ctx.gatewayDatabaseService.listChatConversations(parsed.success ? parsed.data.limit : 100, owner),
+    };
+  });
+
+  app.post("/_gateway/chats", async (request, reply) => {
+    const parsed = chatConversationBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+    const owner = await getRequestOwner(request);
+    return {
+      item: await ctx.gatewayDatabaseService.createChatConversation({
+        owner,
+        title: parsed.data.title,
+        model: parsed.data.model,
+      }),
+    };
+  });
+
+  app.get("/_gateway/chats/:id", async (request, reply) => {
+    const id = String((request.params as { id?: string }).id ?? "");
+    const owner = await getRequestOwner(request);
+    const item = await ctx.gatewayDatabaseService.getChatConversation(id, owner);
+    if (!item) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+    return { item };
+  });
+
+  app.patch("/_gateway/chats/:id", async (request, reply) => {
+    const parsed = chatConversationPatchSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+    const id = String((request.params as { id?: string }).id ?? "");
+    const owner = await getRequestOwner(request);
+    const item = await ctx.gatewayDatabaseService.updateChatConversation(id, owner, parsed.data);
+    if (!item) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+    return { item };
+  });
+
+  app.delete("/_gateway/chats/:id", async (request, reply) => {
+    const id = String((request.params as { id?: string }).id ?? "");
+    const owner = await getRequestOwner(request);
+    const ok = await ctx.gatewayDatabaseService.deleteChatConversation(id, owner);
+    if (!ok) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+    return { ok: true };
+  });
+
+  async function streamGatewayChatAssistantReply(params: {
+    request: FastifyRequest;
+    reply: FastifyReply;
+    owner: string | undefined;
+    conversationId: string;
+    model: string;
+    assistantMessage: ChatMessage;
+    contextMessages: ChatMessage[];
+    promptLength: number;
+    startPayload: Record<string, unknown>;
+  }): Promise<FastifyReply> {
+    const startedAt = performance.now();
+    const abortController = new AbortController();
+    const codexBody = createGatewayChatCodexBody({ model: params.model, messages: params.contextMessages });
+    let profile: OAuthProfile | null = null;
+    let accumulated = "";
+    let sseBuffer = "";
+
+    params.reply.raw.on("close", () => {
+      abortController.abort();
+    });
+    params.reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    writeGatewayChatSse(params.reply, "message_start", params.startPayload);
+
+    try {
+      profile = await ctx.authService.requireUsableProfile("openai-codex");
+      const selectedProfile = profile;
+      const upstream = await ctx.requestThrottleService.runForProfile(
+        selectedProfile,
+        () => streamOpenAICodex({
+          profile: selectedProfile,
+          model: params.model,
+          bodyOverride: codexBody,
+          passthroughBody: true,
+          signal: abortController.signal,
+        }),
+        {
+          requestId: params.request.id,
+          route: "gateway-chat",
+          model: params.model,
+        },
+      );
+      await ctx.authService.recordProfileRequestSuccess(selectedProfile.profileId, upstream.quota, "openai-codex");
+
+      for await (const chunk of Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0])) {
+        const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+        sseBuffer += text;
+        const parsedChunk = extractGatewayChatDeltasFromBufferedText(sseBuffer);
+        sseBuffer = parsedChunk.rest;
+        for (const delta of parsedChunk.deltas) {
+          accumulated += delta;
+          writeGatewayChatSse(params.reply, "message_delta", {
+            id: params.assistantMessage.id,
+            delta,
+          });
+        }
+      }
+      const finalParsed = extractGatewayChatDeltasFromBufferedText(sseBuffer, true);
+      for (const delta of finalParsed.deltas) {
+        accumulated += delta;
+        writeGatewayChatSse(params.reply, "message_delta", { id: params.assistantMessage.id, delta });
+      }
+      const finalMessage = await ctx.gatewayDatabaseService.updateChatMessage(params.assistantMessage.id, params.owner, {
+        content: accumulated.trim(),
+        status: "success",
+        model: params.model,
+        error: null,
+        metadata: {
+          durationMs: performance.now() - startedAt,
+          account: profileLogLabel(selectedProfile),
+          requestId: params.request.id,
+        },
+      });
+      pushGatewayRequestLog({
+        id: params.request.id,
+        owner: params.owner,
+        method: params.request.method,
+        endpoint: params.request.url,
+        account: profileLogLabel(selectedProfile),
+        model: params.model,
+        statusCode: upstream.status,
+        durationMs: performance.now() - startedAt,
+        source: "聊天工作台",
+        details: {
+          requestId: params.request.id,
+          remoteAddress: params.request.ip,
+          userAgent: params.request.headers["user-agent"],
+          request: {
+            conversationId: params.conversationId,
+            promptLength: params.promptLength,
+            contextMessageCount: params.contextMessages.length,
+          },
+          response: {
+            assistantMessageId: params.assistantMessage.id,
+            textLength: accumulated.length,
+          },
+        },
+        usage: {
+          profile: selectedProfile,
+        },
+      });
+      writeGatewayChatSse(params.reply, "message_done", {
+        message: finalMessage,
+        durationMs: performance.now() - startedAt,
+      });
+      writeGatewayChatSse(params.reply, "done", { ok: true });
+      params.reply.raw.end();
+    } catch (error) {
+      const normalized = normalizeError(error);
+      if (profile) {
+        await ctx.authService.recordProfileRequestFailure(profile.profileId, error, undefined, "openai-codex").catch(() => undefined);
+      }
+      const failedMessage = await ctx.gatewayDatabaseService.updateChatMessage(params.assistantMessage.id, params.owner, {
+        content: accumulated.trim(),
+        status: "failed",
+        model: params.model,
+        error: normalized.message,
+        metadata: {
+          durationMs: performance.now() - startedAt,
+          requestId: params.request.id,
+        },
+      });
+      pushGatewayRequestLog({
+        id: params.request.id,
+        owner: params.owner,
+        method: params.request.method,
+        endpoint: params.request.url,
+        account: profileLogLabel(profile),
+        model: params.model,
+        statusCode: getErrorStatusCode(normalized),
+        durationMs: performance.now() - startedAt,
+        source: "聊天工作台",
+        details: {
+          requestId: params.request.id,
+          remoteAddress: params.request.ip,
+          userAgent: params.request.headers["user-agent"],
+          request: {
+            conversationId: params.conversationId,
+            promptLength: params.promptLength,
+            contextMessageCount: params.contextMessages.length,
+          },
+          error: {
+            message: normalized.message,
+            upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
+            upstreamRequestId: (normalized as Error & { requestId?: unknown }).requestId,
+          },
+        },
+        usage: {
+          profile,
+        },
+      });
+      writeGatewayChatSse(params.reply, "error", {
+        message: normalized.message,
+        assistantMessage: failedMessage,
+      });
+      writeGatewayChatSse(params.reply, "done", { ok: false });
+      params.reply.raw.end();
+    }
+    return params.reply;
+  }
+
+  app.post("/_gateway/chats/:id/messages/stream", async (request, reply) => {
+    const parsed = chatMessageStreamBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+
+    const id = String((request.params as { id?: string }).id ?? "");
+    const owner = await getRequestOwner(request);
+    const conversation = await ctx.gatewayDatabaseService.getChatConversation(id, owner);
+    if (!conversation) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+
+    const model = await ctx.modelService.resolveModel("openai-codex", parsed.data.model || conversation.model);
+    const userMessage = await ctx.gatewayDatabaseService.saveChatMessage({
+      conversationId: id,
+      owner,
+      role: "user",
+      content: parsed.data.content.trim(),
+      status: "success",
+      model,
+    });
+    if (conversation.title === "新对话") {
+      await ctx.gatewayDatabaseService.updateChatConversation(id, owner, {
+        title: parsed.data.content.trim().replace(/\s+/g, " ").slice(0, 30),
+        model,
+      });
+    } else if (conversation.model !== model) {
+      await ctx.gatewayDatabaseService.updateChatConversation(id, owner, { model });
+    }
+
+    const assistantMessage = await ctx.gatewayDatabaseService.saveChatMessage({
+      conversationId: id,
+      owner,
+      role: "assistant",
+      content: "",
+      status: "running",
+      model,
+    });
+    const contextMessages = await ctx.gatewayDatabaseService.listSuccessfulChatMessages(id, owner);
+    return streamGatewayChatAssistantReply({
+      request,
+      reply,
+      owner,
+      conversationId: id,
+      model,
+      assistantMessage,
+      contextMessages,
+      promptLength: parsed.data.content.length,
+      startPayload: { userMessage, assistantMessage },
+    });
+  });
+
+  app.post("/_gateway/chats/:id/messages/:messageId/retry/stream", async (request, reply) => {
+    const parsed = chatMessageRetryStreamBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+
+    const params = request.params as { id?: string; messageId?: string };
+    const id = String(params.id ?? "");
+    const messageId = String(params.messageId ?? "");
+    const owner = await getRequestOwner(request);
+    const conversation = await ctx.gatewayDatabaseService.getChatConversation(id, owner);
+    if (!conversation) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+
+    const existing = await ctx.gatewayDatabaseService.getChatMessageById(messageId, owner);
+    if (!existing || existing.conversationId !== id || existing.role !== "assistant") {
+      reply.code(404);
+      return { error: { type: "not_found", message: "要重试的回复不存在。" } };
+    }
+    if (existing.status !== "failed") {
+      reply.code(400);
+      return { error: { type: "validation_error", message: "只能重试失败的回复。" } };
+    }
+
+    const model = await ctx.modelService.resolveModel("openai-codex", parsed.data.model || existing.model || conversation.model);
+    if (conversation.model !== model) {
+      await ctx.gatewayDatabaseService.updateChatConversation(id, owner, { model });
+    }
+    const assistantMessage = await ctx.gatewayDatabaseService.updateChatMessage(existing.id, owner, {
+      content: "",
+      status: "running",
+      model,
+      error: null,
+      metadata: null,
+    });
+    if (!assistantMessage) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "要重试的回复不存在。" } };
+    }
+    const retryIndex = conversation.messages.findIndex((message) => message.id === existing.id);
+    const contextMessages = (retryIndex >= 0 ? conversation.messages.slice(0, retryIndex) : conversation.messages)
+      .filter((message) => message.status === "success");
+    const lastUserMessage = [...contextMessages].reverse().find((message) => message.role === "user");
+    return streamGatewayChatAssistantReply({
+      request,
+      reply,
+      owner,
+      conversationId: id,
+      model,
+      assistantMessage,
+      contextMessages,
+      promptLength: lastUserMessage?.content.length ?? 0,
+      startPayload: { assistantMessage },
+    });
+  });
+
   app.get("/_gateway/generations/history", async (request) => {
     const parsed = generationHistoryQuerySchema.safeParse(request.query);
     const limit = parsed.success ? parsed.data.limit ?? 100 : 100;
     const session = await getSessionFromRequest(request);
     const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
     return {
-      items: await ctx.gatewayDatabaseService.listGenerationHistory(limit, owner),
+      items: await ctx.gatewayDatabaseService.listGenerationHistory(limit, owner, { light: parsed.success ? parsed.data.light ?? true : true }),
     };
   });
 
@@ -3003,7 +3531,7 @@ export function createApp(params?: {
   async function buildAdminConfig(request: FastifyRequest) {
     const session = await getSessionFromRequest(request);
     const isAdmin = isAdminSession(session);
-    const [status, models, modelCatalog, versionStatus, settings, profile, profiles, codexStatus, usage] = await Promise.all([
+    const [status, models, modelCatalog, versionStatus, settings, profile, profiles, codexStatus, usage, users] = await Promise.all([
       ctx.authService.getStatus(),
       ctx.modelService.listModels(),
       ctx.modelService.getCatalog(),
@@ -3013,8 +3541,10 @@ export function createApp(params?: {
       ctx.authService.listProfiles(),
       ctx.authService.getCodexStatus(),
       ctx.usageService.getSummary(),
+      session ? ctx.gatewayDatabaseService.listUsers() : Promise.resolve([]),
     ]);
     const origin = resolveOrigin(request);
+    const visibleUsers = isAdmin ? users : users.filter((item) => item.username === session?.user);
 
     return {
       auth: session ? { user: session.user, role: session.role } : null,
@@ -3022,9 +3552,14 @@ export function createApp(params?: {
       settings: serializeSettings(settings, isAdmin),
       models,
       modelCatalog,
+      modelAutoRefresh: ctx.modelService.getAutoRefreshStatus(),
       versionStatus: isAdmin ? versionStatus : { ...versionStatus, latestVersion: undefined },
       profile: serializeProfile(profile),
       profiles: isAdmin ? profiles.map((item) => serializeManagedProfile(item)) : [],
+      users: visibleUsers.map((item) => ({
+        username: item.username,
+        displayName: item.displayName,
+      })),
       codex: isAdmin
         ? codexStatus
         : {
@@ -3157,11 +3692,15 @@ export function createApp(params?: {
   });
 
   app.get("/favicon.ico", async (_request, reply) => {
+    const settings = ensureSecurityConfigured() ? await ctx.configService.getSettings() : null;
+    if (settings?.branding.faviconUrl) {
+      return reply.redirect(settings.branding.faviconUrl);
+    }
     reply.code(204);
     return "";
   });
 
-  app.get("/_gateway/health", async () => ({ ok: true }));
+  app.get("/_gateway/health", async () => buildGatewayHealth(ctx));
 
   app.get("/_gateway/auth/status", async (request) => {
     const configured = ensureSecurityConfigured();
@@ -3175,6 +3714,7 @@ export function createApp(params?: {
       authenticated: Boolean(session),
       user: session?.user ?? null,
       role: session?.role ?? null,
+      branding: settings?.branding ?? null,
       wecomLoginEnabled: Boolean(settings?.wecom.enabled && settings.wecom.corpId && settings.wecom.agentId && settings.wecom.secret),
     };
   });
@@ -3422,9 +3962,22 @@ export function createApp(params?: {
     return { ok: true };
   });
 
-  app.get("/_gateway/admin/users", async () => ({
-    users: await ctx.gatewayDatabaseService.listUsers(),
-  }));
+  app.get("/_gateway/admin/users", async (request) => {
+    const parsed = gatewayUsersQuerySchema.safeParse(request.query);
+    const users = await ctx.gatewayDatabaseService.listUsers();
+    const limit = parsed.success ? parsed.data.limit : undefined;
+    const page = parsed.success ? parsed.data.page ?? 1 : 1;
+    if (!limit) {
+      return { users };
+    }
+    const start = (page - 1) * limit;
+    return {
+      users: users.slice(start, start + limit),
+      total: users.length,
+      page,
+      pageSize: limit,
+    };
+  });
 
   app.get("/_gateway/admin/user-groups", async () => ({
     groups: await ctx.gatewayDatabaseService.listUserGroups(),
@@ -3563,6 +4116,27 @@ export function createApp(params?: {
     }
   });
 
+  app.post("/_gateway/admin/users/import-wecom-contacts", async (request, reply) => {
+    const parsed = wecomContactImportSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: parsed.error.issues[0]?.message ?? "通讯录导入数据格式错误",
+        },
+      };
+    }
+    const result = await ctx.gatewayDatabaseService.importWecomContacts({
+      contacts: parsed.data.contacts,
+      groupId: parsed.data.groupId,
+    });
+    return {
+      result,
+      users: await ctx.gatewayDatabaseService.listUsers(),
+    };
+  });
+
   app.put("/_gateway/admin/users/:id", async (request, reply) => {
     const params = gatewayUserParamsSchema.safeParse(request.params);
     const parsed = gatewayUserUpdateSchema.safeParse(request.body);
@@ -3608,7 +4182,6 @@ export function createApp(params?: {
     }
     return {
       user,
-      users: await ctx.gatewayDatabaseService.listUsers(),
     };
   });
 

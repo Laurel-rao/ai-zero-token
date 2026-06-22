@@ -1,17 +1,28 @@
-import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import type { GatewaySettings } from "../types.js";
 import {
   ensureStateMigrated,
+  getDatabasePath,
   getSettingsPath,
   getStateDir,
 } from "./state-paths.js";
+
+const SETTINGS_ROW_ID = "gateway";
+
+let settingsDb: DatabaseSync | null = null;
+let settingsDbReady = false;
 
 export function createDefaultSettings(): GatewaySettings {
   return {
     version: 1,
     defaultProvider: "openai-codex",
     defaultModel: "gpt-5.4",
+    branding: {
+      title: "AI Zero Token",
+      appIconUrl: "",
+      faviconUrl: "",
+    },
     networkProxy: {
       enabled: false,
       url: "",
@@ -61,6 +72,7 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
     version: 1,
     defaultProvider: parsed.defaultProvider ?? defaults.defaultProvider,
     defaultModel: parsed.defaultModel ?? defaults.defaultModel,
+    branding: normalizeBranding(parsed.branding, defaults.branding),
     networkProxy: {
       enabled: parsed.networkProxy?.enabled ?? defaults.networkProxy.enabled,
       url: parsed.networkProxy?.url ?? defaults.networkProxy.url,
@@ -100,10 +112,19 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
 
 export async function loadSettings(): Promise<GatewaySettings> {
   try {
-    await ensureStateMigrated();
-    const raw = await fs.readFile(getSettingsPath(), "utf8");
-    const parsed = JSON.parse(raw) as Partial<GatewaySettings>;
-    return normalizeSettings(parsed);
+    await ensureSettingsDatabase();
+    const database = getSettingsDatabase();
+    const row = database
+      .prepare("SELECT value_json AS valueJson FROM gateway_settings WHERE id = ?")
+      .get(SETTINGS_ROW_ID) as { valueJson?: unknown } | undefined;
+    if (typeof row?.valueJson === "string" && row.valueJson) {
+      const parsed = JSON.parse(row.valueJson) as Partial<GatewaySettings>;
+      return normalizeSettings(parsed);
+    }
+
+    const imported = await importLegacySettings();
+    await writeSettingsToDatabase(imported);
+    return imported;
   } catch {
     return createDefaultSettings();
   }
@@ -146,6 +167,26 @@ export function normalizeCountLimit(value: unknown, fallback = 0, max = 100_000)
 }
 
 type ImageLimitsSettings = GatewaySettings["image"]["limits"];
+type BrandingSettings = GatewaySettings["branding"];
+
+function normalizeBranding(value: unknown, fallback: BrandingSettings): BrandingSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return fallback;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    title: normalizeTrimmedString(record.title, fallback.title, 80),
+    appIconUrl: normalizeTrimmedString(record.appIconUrl, fallback.appIconUrl, 500),
+    faviconUrl: normalizeTrimmedString(record.faviconUrl, fallback.faviconUrl, 500),
+  };
+}
+
+function normalizeTrimmedString(value: unknown, fallback: string, maxLength: number): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  return value.trim().slice(0, maxLength);
+}
 
 function normalizeImageLimitOverride(value: unknown): ImageLimitsSettings["userOverrides"][number] | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -211,24 +252,60 @@ function normalizeStringList(value: unknown): string[] {
 
 let settingsSaveQueue = Promise.resolve();
 
-async function writeSettingsAtomic(settings: GatewaySettings): Promise<void> {
+async function ensureSettingsDatabase(): Promise<void> {
   await ensureStateMigrated();
   await fs.mkdir(getStateDir(), { recursive: true });
+  if (!settingsDb) {
+    settingsDb = new DatabaseSync(getDatabasePath());
+  }
+  if (settingsDbReady) {
+    return;
+  }
 
-  const settingsPath = getSettingsPath();
-  const tempPath = `${settingsPath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+  getSettingsDatabase().exec(`
+    CREATE TABLE IF NOT EXISTS gateway_settings (
+      id TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  settingsDbReady = true;
+}
 
+function getSettingsDatabase(): DatabaseSync {
+  if (!settingsDb) {
+    settingsDb = new DatabaseSync(getDatabasePath());
+  }
+  return settingsDb;
+}
+
+async function importLegacySettings(): Promise<GatewaySettings> {
   try {
-    await fs.writeFile(tempPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-    await fs.rename(tempPath, settingsPath);
-  } catch (error) {
-    await fs.rm(tempPath, { force: true }).catch(() => undefined);
-    throw error;
+    const raw = await fs.readFile(getSettingsPath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<GatewaySettings>;
+    return normalizeSettings(parsed);
+  } catch {
+    return createDefaultSettings();
   }
 }
 
+async function writeSettingsToDatabase(settings: GatewaySettings): Promise<void> {
+  await ensureSettingsDatabase();
+  const now = Date.now();
+  getSettingsDatabase()
+    .prepare(`
+      INSERT INTO gateway_settings (id, value_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        value_json = excluded.value_json,
+        updated_at = excluded.updated_at
+    `)
+    .run(SETTINGS_ROW_ID, JSON.stringify(normalizeSettings(settings)), now, now);
+}
+
 export async function saveSettings(settings: GatewaySettings): Promise<void> {
-  const nextSave = settingsSaveQueue.then(() => writeSettingsAtomic(settings), () => writeSettingsAtomic(settings));
+  const nextSave = settingsSaveQueue.then(() => writeSettingsToDatabase(settings), () => writeSettingsToDatabase(settings));
   settingsSaveQueue = nextSave.catch(() => undefined);
   await nextSave;
 }

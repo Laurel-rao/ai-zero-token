@@ -16,6 +16,21 @@ type NetworkProxyParams = {
   noProxy?: string;
 };
 
+type BrandingParams = Partial<GatewaySettings["branding"]>;
+
+function normalizeBranding(params: BrandingParams | undefined, settings: GatewaySettings["branding"]): GatewaySettings["branding"] {
+  if (!params) {
+    return settings;
+  }
+
+  const title = params.title?.trim() ?? settings.title;
+  return {
+    title: title || "AI Zero Token",
+    appIconUrl: params.appIconUrl?.trim() ?? settings.appIconUrl,
+    faviconUrl: params.faviconUrl?.trim() ?? settings.faviconUrl,
+  };
+}
+
 function normalizeNetworkProxy(settings: GatewaySettings, params: NetworkProxyParams): GatewaySettings["networkProxy"] {
   const requestedUrl = params.url?.trim() ?? "";
   const url = requestedUrl || (!params.enabled ? settings.networkProxy.url : "");
@@ -208,6 +223,7 @@ export class ConfigService {
 
   async updateSettings(params: {
     defaultModel?: string;
+    branding?: BrandingParams;
     networkProxy?: NetworkProxyParams;
     autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
     accountRotation?: { enabled?: boolean; strategy?: "round_robin" };
@@ -243,6 +259,13 @@ export class ConfigService {
       next = {
         ...next,
         networkProxy: normalizeNetworkProxy(next, params.networkProxy),
+      };
+    }
+
+    if (params.branding) {
+      next = {
+        ...next,
+        branding: normalizeBranding(params.branding, next.branding),
       };
     }
 
