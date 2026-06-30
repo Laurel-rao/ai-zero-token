@@ -875,6 +875,11 @@ const chatMessageRetryStreamBodySchema = z.object({
   model: z.string().min(1).optional(),
 });
 
+const chatMessageRewriteStreamBodySchema = z.object({
+  content: z.string().trim().min(1).max(MAX_CHAT_MESSAGE_CHARS),
+  model: z.string().min(1).optional(),
+});
+
 const requestLogsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   owner: z.string().min(1).max(120).optional(),
@@ -3711,6 +3716,85 @@ export function createApp(params?: {
       contextMessages,
       promptLength: lastUserMessage?.content.length ?? 0,
       startPayload: { assistantMessage },
+    });
+  });
+
+  app.patch("/_gateway/chats/:id/messages/:messageId/rewrite/stream", async (request, reply) => {
+    const parsed = chatMessageRewriteStreamBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+
+    const params = request.params as { id?: string; messageId?: string };
+    const id = String(params.id ?? "");
+    const messageId = String(params.messageId ?? "");
+    const owner = await getRequestOwner(request);
+    const conversation = await ctx.gatewayDatabaseService.getChatConversation(id, owner);
+    if (!conversation) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+
+    if (conversation.messages.some((message) => message.status === "running")) {
+      reply.code(409);
+      return { error: { type: "conflict", message: "当前对话仍有消息生成中，请稍后再编辑。" } };
+    }
+
+    const existing = conversation.messages.find((message) => message.id === messageId);
+    if (!existing || existing.role !== "user") {
+      reply.code(404);
+      return { error: { type: "not_found", message: "要编辑的用户消息不存在。" } };
+    }
+
+    const model = await ctx.modelService.resolveModel("openai-codex", parsed.data.model || conversation.model || existing.model);
+    if (conversation.model !== model || conversation.title === "新对话") {
+      await ctx.gatewayDatabaseService.updateChatConversation(id, owner, {
+        model,
+        ...(conversation.title === "新对话" ? { title: chatMessageTitle(parsed.data.content, existing.attachments) } : {}),
+      });
+    }
+
+    const userMessage = await ctx.gatewayDatabaseService.updateChatMessage(existing.id, owner, {
+      content: parsed.data.content,
+      status: "success",
+      model,
+      error: null,
+      metadata: existing.metadata ?? null,
+    });
+    if (!userMessage) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "要编辑的用户消息不存在。" } };
+    }
+
+    await ctx.gatewayDatabaseService.deleteChatMessagesAfter(id, userMessage.id, owner);
+    const assistantMessage = await ctx.gatewayDatabaseService.saveChatMessage({
+      conversationId: id,
+      owner,
+      role: "assistant",
+      content: "",
+      status: "running",
+      model,
+    });
+    const updatedConversation = await ctx.gatewayDatabaseService.getChatConversation(id, owner);
+    const messageIndex = updatedConversation?.messages.findIndex((message) => message.id === userMessage.id) ?? -1;
+    const contextMessages = (updatedConversation && messageIndex >= 0 ? updatedConversation.messages.slice(0, messageIndex + 1) : [userMessage])
+      .filter((message) => message.status === "success");
+
+    return streamGatewayChatAssistantReply({
+      request,
+      reply,
+      owner,
+      conversationId: id,
+      model,
+      assistantMessage,
+      contextMessages,
+      promptLength: parsed.data.content.length,
+      startPayload: {
+        userMessage,
+        assistantMessage,
+        replacedAfterMessageId: userMessage.id,
+      },
     });
   });
 

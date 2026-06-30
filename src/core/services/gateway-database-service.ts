@@ -1114,7 +1114,7 @@ export class GatewayDatabaseService {
                created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
         FROM chat_messages
         WHERE conversation_id = ? AND (? IS NULL OR owner = ?)
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, rowid ASC
       `)
       .all(id, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
 
@@ -1223,6 +1223,37 @@ export class GatewayDatabaseService {
     return this.getChatMessage(id, owner);
   }
 
+  async deleteChatMessagesAfter(conversationId: string, messageId: string, owner?: string): Promise<number | null> {
+    await this.init();
+    const rows = this.database
+      .prepare(`
+        SELECT id
+        FROM chat_messages
+        WHERE conversation_id = ? AND (? IS NULL OR owner = ?)
+        ORDER BY created_at ASC, rowid ASC
+      `)
+      .all(conversationId, owner ?? null, owner ?? null) as Array<{ id?: unknown }>;
+    const targetIndex = rows.findIndex((row) => row.id === messageId);
+    if (targetIndex < 0) {
+      return null;
+    }
+
+    const staleIds = rows
+      .slice(targetIndex + 1)
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (staleIds.length === 0) {
+      return 0;
+    }
+
+    const deleteMessage = this.database.prepare("DELETE FROM chat_messages WHERE id = ? AND (? IS NULL OR owner = ?)");
+    for (const id of staleIds) {
+      deleteMessage.run(id, owner ?? null, owner ?? null);
+    }
+    this.touchChatConversation(conversationId);
+    return staleIds.length;
+  }
+
   async getChatMessageById(id: string, owner?: string): Promise<ChatMessage | null> {
     await this.init();
     return this.getChatMessage(id, owner);
@@ -1238,7 +1269,7 @@ export class GatewayDatabaseService {
         WHERE conversation_id = ?
           AND (? IS NULL OR owner = ?)
           AND status = 'success'
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, rowid ASC
       `)
       .all(conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
     return rows.map((row) => this.mapChatMessage(row));

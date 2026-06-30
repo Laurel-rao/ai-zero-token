@@ -1,5 +1,5 @@
-import { Check, ChevronDown, ChevronUp, Copy, FileText, Image as ImageIcon, Loader2, Menu, MessageSquarePlus, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, X } from "lucide-react";
-import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactElement, type ReactNode } from "react";
+import { Check, ChevronDown, ChevronUp, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, Maximize2, Menu, MessageSquarePlus, Minimize2, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, X } from "lucide-react";
+import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { fetchJson } from "@/shared/api";
@@ -13,6 +13,9 @@ const MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const COLLAPSED_MESSAGE_HEIGHT = 420;
 const COPY_FEEDBACK_MS = 1400;
+const CHAT_BOTTOM_THRESHOLD = 96;
+const COMPOSER_MAX_HEIGHT = 150;
+const HTML_PREVIEW_CSP = "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src data: blob:; child-src data: blob:; form-action 'none'; base-uri 'none'";
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -97,6 +100,22 @@ type HtmlPreview = {
   html: string;
   title: string;
   openedAt: number;
+};
+
+type HtmlPreviewPosition = {
+  left: number;
+  top: number;
+};
+
+type HtmlPreviewDragState = HtmlPreviewPosition & {
+  pointerId: number;
+  startX: number;
+  startY: number;
+};
+
+type EditingMessage = {
+  id: string;
+  content: string;
 };
 
 function parseSseBuffer(value: string, flush = false): { events: ChatSseEvent[]; rest: string } {
@@ -192,6 +211,29 @@ function isHtmlCode(code: string, language: string): boolean {
   const normalizedCode = code.trim();
   return /^<!doctype html/i.test(normalizedCode) ||
     /<\/?(html|head|body|main|section|article|div|style|script|canvas|iframe)(\s|>|\/)/i.test(normalizedCode);
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function withHtmlPreviewCsp(html: string): string {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(HTML_PREVIEW_CSP)}">`;
+  if (/<head(\s[^>]*)?>/i.test(html)) {
+    return html.replace(/<head(\s[^>]*)?>/i, (match) => `${match}${meta}`);
+  }
+  if (/<!doctype html/i.test(html) || /<html(\s[^>]*)?>/i.test(html)) {
+    return html.replace(/<html(\s[^>]*)?>/i, (match) => `${match}<head>${meta}</head>`);
+  }
+  return `<!doctype html><html><head>${meta}</head><body>${html}</body></html>`;
+}
+
+function htmlPreviewBlobUrl(html: string): string {
+  return URL.createObjectURL(new Blob([withHtmlPreviewCsp(html)], { type: "text/html;charset=utf-8" }));
 }
 
 function MarkdownPre({ children, onPreviewHtml }: MarkdownPreProps) {
@@ -337,16 +379,24 @@ export function ChatPage(props: {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
+  const [editingMessage, setEditingMessage] = useState<EditingMessage | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [htmlPreview, setHtmlPreview] = useState<HtmlPreview | null>(null);
+  const [htmlPreviewPosition, setHtmlPreviewPosition] = useState<HtmlPreviewPosition | null>(null);
+  const [htmlPreviewMaximized, setHtmlPreviewMaximized] = useState(false);
+  const [copiedHtmlPreview, setCopiedHtmlPreview] = useState(false);
+  const [isNearBottom, setIsNearBottom] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const copyMessageTimerRef = useRef<number | null>(null);
+  const copyHtmlTimerRef = useRef<number | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const previewDragRef = useRef<HtmlPreviewDragState | null>(null);
 
   const activeConversation = useMemo(() => conversations.find((item) => item.id === activeId) ?? null, [activeId, conversations]);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
@@ -367,6 +417,9 @@ export function ChatPage(props: {
       if (copyMessageTimerRef.current) {
         window.clearTimeout(copyMessageTimerRef.current);
       }
+      if (copyHtmlTimerRef.current) {
+        window.clearTimeout(copyHtmlTimerRef.current);
+      }
     };
   }, []);
 
@@ -374,8 +427,27 @@ export function ChatPage(props: {
     if (!shouldStickToBottomRef.current) {
       return;
     }
-    messageEndRef.current?.scrollIntoView({ block: "end" });
+    scrollMessagesToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    adjustComposerHeight();
+  }, [input, attachments.length]);
+
+  useEffect(() => {
+    const node = messagesScrollRef.current;
+    if (!node || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (shouldStickToBottomRef.current) {
+        scrollMessagesToBottom();
+      }
+      updateStickToBottom();
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     function hasDraggedFiles(event: DragEvent): boolean {
@@ -408,6 +480,30 @@ export function ChatPage(props: {
     }, 0);
   }
 
+  function adjustComposerHeight() {
+    const node = composerRef.current;
+    if (!node) {
+      return;
+    }
+    node.style.height = "auto";
+    const nextHeight = Math.max(48, Math.min(node.scrollHeight, COMPOSER_MAX_HEIGHT));
+    node.style.height = `${nextHeight}px`;
+    node.style.overflowY = node.scrollHeight > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
+  }
+
+  function scrollMessagesToBottom(behavior: ScrollBehavior = "auto") {
+    const node = messagesScrollRef.current;
+    if (!node) {
+      return;
+    }
+    shouldStickToBottomRef.current = true;
+    setIsNearBottom(true);
+    requestAnimationFrame(() => {
+      node.scrollTo({ top: node.scrollHeight, behavior });
+      lastScrollTopRef.current = node.scrollTop;
+    });
+  }
+
   async function loadConversations(selectId?: string, options?: { loadActive?: boolean }) {
     setLoading(true);
     try {
@@ -433,6 +529,8 @@ export function ChatPage(props: {
     try {
       const result = await fetchJson<{ item: ChatConversation & { messages: ChatMessage[] } }>(`/_gateway/chats/${encodeURIComponent(id)}`);
       shouldStickToBottomRef.current = true;
+      setIsNearBottom(true);
+      setEditingMessage(null);
       setActiveId(id);
       setMessages(result.item.messages);
       setModel(result.item.model || props.config?.settings.defaultModel || model);
@@ -453,6 +551,7 @@ export function ChatPage(props: {
       setConversations((items) => [result.item, ...items.filter((item) => item.id !== result.item.id)]);
       setActiveId(result.item.id);
       setMessages([]);
+      setEditingMessage(null);
       if (options?.clearInput !== false) {
         setInput("");
         setAttachments([]);
@@ -661,12 +760,24 @@ export function ChatPage(props: {
     if (event.event === "message_start") {
       const userMessage = data.userMessage as ChatMessage | undefined;
       const assistantMessage = data.assistantMessage as ChatMessage | undefined;
+      const replacedAfterMessageId = typeof data.replacedAfterMessageId === "string" ? data.replacedAfterMessageId : "";
       setMessages((items) => {
-        const next = items.map((item) => item.id === assistantMessage?.id ? assistantMessage : item);
-        const hasAssistant = Boolean(assistantMessage && items.some((item) => item.id === assistantMessage.id));
+        const replacedIndex = replacedAfterMessageId ? items.findIndex((item) => item.id === replacedAfterMessageId) : -1;
+        const baseItems = replacedIndex >= 0 ? items.slice(0, replacedIndex + 1) : items;
+        const next = baseItems.map((item) => {
+          if (item.id === userMessage?.id) {
+            return userMessage;
+          }
+          if (item.id === assistantMessage?.id) {
+            return assistantMessage;
+          }
+          return item;
+        });
+        const hasAssistant = Boolean(assistantMessage && next.some((item) => item.id === assistantMessage.id));
+        const hasUser = Boolean(userMessage && next.some((item) => item.id === userMessage.id));
         return [
           ...next,
-          ...(userMessage ? [userMessage] : []),
+          ...(userMessage && !hasUser ? [userMessage] : []),
           ...(assistantMessage && !hasAssistant ? [assistantMessage] : []),
         ];
       });
@@ -803,6 +914,42 @@ export function ChatPage(props: {
     }
   }
 
+  async function rewriteFromMessage(message: ChatMessage) {
+    const content = editingMessage?.id === message.id ? editingMessage.content.trim() : "";
+    if (!activeId || !content || message.role !== "user" || sending || props.busy === "chat") {
+      return;
+    }
+    shouldStickToBottomRef.current = true;
+    setIsNearBottom(true);
+    setSending(true);
+    setEditingMessage(null);
+    props.setBusy("chat");
+    props.setStatus("正在根据编辑后的消息重新生成...");
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const response = await fetch(`/_gateway/chats/${encodeURIComponent(activeId)}/messages/${encodeURIComponent(message.id)}/rewrite/stream`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, model: model || props.config?.settings.defaultModel }),
+        signal: controller.signal,
+      });
+      await readChatStream(response, activeId);
+      props.setStatus("已从编辑位置重新生成。");
+    } catch (error) {
+      if ((error as { name?: string }).name !== "AbortError") {
+        setEditingMessage({ id: message.id, content });
+        props.setStatus(`重新生成失败：${errorMessage(error)}`);
+      }
+    } finally {
+      abortRef.current = null;
+      setSending(false);
+      props.setBusy(null);
+      focusComposer();
+    }
+  }
+
   function stopMessage() {
     abortRef.current?.abort();
     props.setStatus("已停止当前回复。");
@@ -827,9 +974,15 @@ export function ChatPage(props: {
     const node = messagesScrollRef.current;
     if (!node) {
       shouldStickToBottomRef.current = true;
+      setIsNearBottom(true);
       return;
     }
-    shouldStickToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+    const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
+    const nearBottom = distance < CHAT_BOTTOM_THRESHOLD;
+    const scrollingUp = node.scrollTop < lastScrollTopRef.current - 2;
+    shouldStickToBottomRef.current = nearBottom && !scrollingUp;
+    setIsNearBottom(nearBottom);
+    lastScrollTopRef.current = node.scrollTop;
   }
 
   function openHtmlPreview(html: string, title = "HTML 预览") {
@@ -838,6 +991,98 @@ export function ChatPage(props: {
       title,
       openedAt: Date.now(),
     });
+    setHtmlPreviewMaximized(false);
+    setHtmlPreviewPosition(null);
+    setCopiedHtmlPreview(false);
+  }
+
+  async function copyHtmlPreview() {
+    if (!htmlPreview) {
+      return;
+    }
+    const ok = await copyText(htmlPreview.html);
+    if (!ok) {
+      props.setStatus("复制 HTML 失败。");
+      return;
+    }
+    setCopiedHtmlPreview(true);
+    props.setStatus("HTML 已复制。");
+    if (copyHtmlTimerRef.current) {
+      window.clearTimeout(copyHtmlTimerRef.current);
+    }
+    copyHtmlTimerRef.current = window.setTimeout(() => {
+      setCopiedHtmlPreview(false);
+      copyHtmlTimerRef.current = null;
+    }, COPY_FEEDBACK_MS);
+  }
+
+  function openHtmlPreviewInWindow() {
+    if (!htmlPreview) {
+      return;
+    }
+    const url = htmlPreviewBlobUrl(htmlPreview.html);
+    window.open(url, "_blank", "noopener,noreferrer");
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
+
+  function downloadHtmlPreview() {
+    if (!htmlPreview) {
+      return;
+    }
+    const url = htmlPreviewBlobUrl(htmlPreview.html);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${htmlPreview.title.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "preview"}.html`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function startHtmlPreviewDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (htmlPreviewMaximized || event.button !== 0) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest("button")) {
+      return;
+    }
+    const frame = event.currentTarget.closest(".chat-html-preview-window") as HTMLDivElement | null;
+    if (!frame) {
+      return;
+    }
+    const rect = frame.getBoundingClientRect();
+    const left = htmlPreviewPosition?.left ?? rect.left;
+    const top = htmlPreviewPosition?.top ?? rect.top;
+    previewDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left,
+      top,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveHtmlPreview(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = previewDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    const frame = event.currentTarget.closest(".chat-html-preview-window") as HTMLDivElement | null;
+    const width = frame?.offsetWidth ?? Math.min(760, window.innerWidth - 44);
+    const height = frame?.offsetHeight ?? Math.min(620, window.innerHeight - 44);
+    const maxLeft = Math.max(12, window.innerWidth - width - 12);
+    const maxTop = Math.max(12, window.innerHeight - height - 12);
+    setHtmlPreviewPosition({
+      left: Math.min(maxLeft, Math.max(12, drag.left + event.clientX - drag.startX)),
+      top: Math.min(maxTop, Math.max(12, drag.top + event.clientY - drag.startY)),
+    });
+  }
+
+  function endHtmlPreviewDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (previewDragRef.current?.pointerId === event.pointerId) {
+      previewDragRef.current = null;
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   }
 
   return (
@@ -914,62 +1159,110 @@ export function ChatPage(props: {
           </select>
         </div>
 
-        <div className="chat-messages" ref={messagesScrollRef} onScroll={updateStickToBottom}>
-          {messages.length === 0 ? (
-            <div className="chat-empty">
-              <MessageSquarePlus size={34} />
-              <strong>开始一场新聊天</strong>
-              <span>直接输入问题即可创建聊天。</span>
-            </div>
-          ) : null}
-          {messages.map((message) => (
-            <div className={`chat-message is-${message.role}`} key={message.id}>
-              <div className="chat-message-avatar">{message.role === "assistant" ? "AI" : "我"}</div>
-              <div className="chat-message-body">
-                <div className="chat-message-meta">
-                  <strong>{message.role === "assistant" ? "AI Zero Token" : "你"}</strong>
-                  <span>{formatFullTime(message.createdAt)}</span>
-                  {message.status === "running" ? <em>生成中</em> : null}
-                  {message.status === "failed" ? <em className="is-error">失败</em> : null}
-                  <button
-                    className="chat-message-copy"
-                    type="button"
-                    onClick={() => void copyMessage(message)}
-                    disabled={!message.content}
-                    title="复制整条消息"
-                    aria-label="复制整条消息"
-                  >
-                    {copiedMessageId === message.id ? <Check size={14} /> : <Copy size={14} />}
-                    {copiedMessageId === message.id ? "已复制" : "复制"}
-                  </button>
-                  {message.role === "assistant" && message.status === "failed" ? (
-                    <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={sending || props.busy === "chat"} title="重新生成">
-                      <RefreshCw size={14} />
-                      重发
-                    </button>
-                  ) : null}
-                </div>
-                <ChatMessageContent id={message.id} content={message.content} status={message.status} onPreviewHtml={openHtmlPreview} />
-                {(message.attachments ?? []).length > 0 ? (
-                  <div className="chat-message-attachments" aria-label="消息附件">
-                    {(message.attachments ?? []).map((attachment) => (
-                      <div className={`chat-message-attachment is-${attachment.kind}`} key={attachment.id}>
-                        {attachment.kind === "image" && attachment.dataUrl ? (
-                          <img src={attachment.dataUrl} alt={attachment.name} />
-                        ) : (
-                          <FileText size={16} />
-                        )}
-                        <span>{attachment.name}</span>
-                        <em>{formatFileSize(attachment.size)}</em>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                {message.error ? <span className="chat-message-error">{message.error}</span> : null}
+        <div className="chat-messages-wrap">
+          <div className="chat-messages" ref={messagesScrollRef} onScroll={updateStickToBottom}>
+            {messages.length === 0 ? (
+              <div className="chat-empty">
+                <MessageSquarePlus size={34} />
+                <strong>开始一场新聊天</strong>
+                <span>直接输入问题即可创建聊天。</span>
               </div>
-            </div>
-          ))}
-          <div ref={messageEndRef} />
+            ) : null}
+            {messages.map((message) => (
+              <div className={`chat-message is-${message.role}`} key={message.id}>
+                <div className="chat-message-avatar">{message.role === "assistant" ? "AI" : "我"}</div>
+                <div className="chat-message-body">
+                  <div className="chat-message-meta">
+                    <strong>{message.role === "assistant" ? "AI Zero Token" : "你"}</strong>
+                    <span>{formatFullTime(message.createdAt)}</span>
+                    {message.status === "running" ? <em>生成中</em> : null}
+                    {message.status === "failed" ? <em className="is-error">失败</em> : null}
+                    <button
+                      className="chat-message-copy"
+                      type="button"
+                      onClick={() => void copyMessage(message)}
+                      disabled={!message.content}
+                      title="复制整条消息"
+                      aria-label="复制整条消息"
+                    >
+                      {copiedMessageId === message.id ? <Check size={14} /> : <Copy size={14} />}
+                      {copiedMessageId === message.id ? "已复制" : "复制"}
+                    </button>
+                    {message.role === "assistant" && message.status === "failed" ? (
+                      <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={sending || props.busy === "chat"} title="重新生成">
+                        <RefreshCw size={14} />
+                        重发
+                      </button>
+                    ) : null}
+                    {message.role === "user" && message.status === "success" ? (
+                      <button
+                        className="chat-retry-btn"
+                        type="button"
+                        onClick={() => setEditingMessage({ id: message.id, content: message.content })}
+                        disabled={sending || props.busy === "chat"}
+                        title="编辑并从此处重新生成"
+                      >
+                        <Pencil size={14} />
+                        编辑
+                      </button>
+                    ) : null}
+                  </div>
+                  {editingMessage?.id === message.id ? (
+                    <div className="chat-message-edit">
+                      <textarea
+                        value={editingMessage.content}
+                        onChange={(event) => setEditingMessage({ id: message.id, content: event.target.value })}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            setEditingMessage(null);
+                          }
+                          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                            event.preventDefault();
+                            void rewriteFromMessage(message);
+                          }
+                        }}
+                        autoFocus
+                      />
+                      <div className="chat-message-edit-actions">
+                        <button className="btn-secondary" type="button" onClick={() => setEditingMessage(null)}>
+                          取消
+                        </button>
+                        <button className="btn-primary" type="button" onClick={() => void rewriteFromMessage(message)} disabled={!editingMessage.content.trim() || sending || props.busy === "chat"}>
+                          <RefreshCw size={15} />
+                          重新生成
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <ChatMessageContent id={message.id} content={message.content} status={message.status} onPreviewHtml={openHtmlPreview} />
+                  )}
+                  {(message.attachments ?? []).length > 0 ? (
+                    <div className="chat-message-attachments" aria-label="消息附件">
+                      {(message.attachments ?? []).map((attachment) => (
+                        <div className={`chat-message-attachment is-${attachment.kind}`} key={attachment.id}>
+                          {attachment.kind === "image" && attachment.dataUrl ? (
+                            <img src={attachment.dataUrl} alt={attachment.name} />
+                          ) : (
+                            <FileText size={16} />
+                          )}
+                          <span>{attachment.name}</span>
+                          <em>{formatFileSize(attachment.size)}</em>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {message.error ? <span className="chat-message-error">{message.error}</span> : null}
+                </div>
+              </div>
+            ))}
+            <div ref={messageEndRef} />
+          </div>
+          {!isNearBottom && messages.length > 0 ? (
+            <button className="chat-scroll-bottom" type="button" onClick={() => scrollMessagesToBottom("smooth")} aria-label="回到底部">
+              <ChevronDown size={16} />
+              回到底部
+            </button>
+          ) : null}
         </div>
 
         <div className="chat-composer">
@@ -1047,18 +1340,45 @@ export function ChatPage(props: {
         </div>
       </div>
       {htmlPreview ? (
-        <div className="chat-html-preview-window" role="dialog" aria-modal="false" aria-label={htmlPreview.title}>
-          <div className="chat-html-preview-head">
+        <div
+          className={`chat-html-preview-window ${htmlPreviewMaximized ? "is-maximized" : ""}`}
+          role="dialog"
+          aria-modal="false"
+          aria-label={htmlPreview.title}
+          style={htmlPreviewPosition && !htmlPreviewMaximized ? { left: htmlPreviewPosition.left, top: htmlPreviewPosition.top, right: "auto", bottom: "auto" } : undefined}
+        >
+          <div
+            className="chat-html-preview-head"
+            onPointerDown={startHtmlPreviewDrag}
+            onPointerMove={moveHtmlPreview}
+            onPointerUp={endHtmlPreviewDrag}
+            onPointerCancel={endHtmlPreviewDrag}
+          >
             <strong>{htmlPreview.title}</strong>
-            <button className="chat-html-preview-close" type="button" onClick={() => setHtmlPreview(null)} title="关闭" aria-label="关闭 HTML 预览">
-              <X size={16} />
-            </button>
+            <div className="chat-html-preview-actions">
+              <button className="chat-html-preview-action" type="button" onClick={() => void copyHtmlPreview()} title="复制 HTML" aria-label="复制 HTML">
+                {copiedHtmlPreview ? <Check size={15} /> : <Copy size={15} />}
+              </button>
+              <button className="chat-html-preview-action" type="button" onClick={downloadHtmlPreview} title="下载 HTML" aria-label="下载 HTML">
+                <Download size={15} />
+              </button>
+              <button className="chat-html-preview-action" type="button" onClick={openHtmlPreviewInWindow} title="新窗口打开" aria-label="新窗口打开 HTML 预览">
+                <ExternalLink size={15} />
+              </button>
+              <button className="chat-html-preview-action" type="button" onClick={() => setHtmlPreviewMaximized((value) => !value)} title={htmlPreviewMaximized ? "还原" : "最大化"} aria-label={htmlPreviewMaximized ? "还原 HTML 预览" : "最大化 HTML 预览"}>
+                {htmlPreviewMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+              </button>
+              <button className="chat-html-preview-action" type="button" onClick={() => setHtmlPreview(null)} title="关闭" aria-label="关闭 HTML 预览">
+                <X size={16} />
+              </button>
+            </div>
           </div>
           <iframe
             key={htmlPreview.openedAt}
             title={htmlPreview.title}
-            sandbox="allow-forms allow-modals allow-scripts"
-            srcDoc={htmlPreview.html}
+            referrerPolicy="no-referrer"
+            sandbox="allow-modals allow-scripts"
+            srcDoc={withHtmlPreviewCsp(htmlPreview.html)}
           />
         </div>
       ) : null}
