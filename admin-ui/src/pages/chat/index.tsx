@@ -1,16 +1,65 @@
-import { Check, Loader2, Menu, MessageSquarePlus, Pencil, RefreshCw, Send, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Check, ChevronDown, ChevronUp, Copy, FileText, Image as ImageIcon, Loader2, Menu, MessageSquarePlus, Paperclip, Pencil, RefreshCw, Send, Trash2, X } from "lucide-react";
+import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactElement, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
 import type { BusyAction } from "@/shared/lib/app-types";
-import { errorMessage } from "@/shared/lib/app-utils";
-import { formatFullTime } from "@/shared/lib/format";
+import { copyText, errorMessage } from "@/shared/lib/app-utils";
+import { formatFileSize, formatFullTime } from "@/shared/lib/format";
+
+const MAX_ATTACHMENTS = 8;
+const MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
+const COLLAPSED_MESSAGE_HEIGHT = 420;
+const COPY_FEEDBACK_MS = 1400;
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "markdown",
+  "json",
+  "jsonl",
+  "csv",
+  "tsv",
+  "log",
+  "xml",
+  "yaml",
+  "yml",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "css",
+  "scss",
+  "html",
+  "vue",
+  "svelte",
+  "py",
+  "java",
+  "go",
+  "rs",
+  "php",
+  "rb",
+  "sh",
+  "sql",
+]);
+
+type ChatAttachment = {
+  id: string;
+  kind: "image" | "text";
+  name: string;
+  mimeType: string;
+  size: number;
+  dataUrl?: string;
+  text?: string;
+};
 
 type ChatMessage = {
   id: string;
   conversationId: string;
   role: "user" | "assistant";
   content: string;
+  attachments?: ChatAttachment[];
   status: "success" | "running" | "failed";
   model?: string;
   error?: string;
@@ -32,6 +81,15 @@ type ChatConversation = {
 type ChatSseEvent = {
   event: string;
   data: unknown;
+};
+
+type MarkdownCodeProps = {
+  className?: string;
+  children?: ReactNode;
+};
+
+type MarkdownPreProps = {
+  children?: ReactNode;
 };
 
 function parseSseBuffer(value: string, flush = false): { events: ChatSseEvent[]; rest: string } {
@@ -65,6 +123,176 @@ function conversationTimestamp(item?: ChatConversation | null): string {
   return item?.updatedAt ? formatFullTime(item.updatedAt) : "-";
 }
 
+function fileExtension(name: string): string {
+  const index = name.lastIndexOf(".");
+  return index >= 0 ? name.slice(index + 1).toLowerCase() : "";
+}
+
+function isTextAttachment(file: File): boolean {
+  return file.type.startsWith("text/") ||
+    file.type === "application/json" ||
+    file.type === "application/xml" ||
+    file.type === "application/x-yaml" ||
+    file.type === "application/yaml" ||
+    file.type === "application/javascript" ||
+    TEXT_ATTACHMENT_EXTENSIONS.has(fileExtension(file.name));
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("文件读取结果不是字符串。"));
+    };
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败。"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败。"));
+    reader.readAsText(file);
+  });
+}
+
+function markdownText(children: ReactNode): string {
+  if (typeof children === "string" || typeof children === "number") {
+    return String(children);
+  }
+  if (Array.isArray(children)) {
+    return children.map(markdownText).join("");
+  }
+  return "";
+}
+
+function codeElementFromPre(children: ReactNode): ReactElement<MarkdownCodeProps> | null {
+  const child = Children.toArray(children).find((item) => isValidElement<MarkdownCodeProps>(item));
+  return child && isValidElement<MarkdownCodeProps>(child) && child.type === "code" ? child : null;
+}
+
+function MarkdownPre({ children }: MarkdownPreProps) {
+  const [copied, setCopied] = useState(false);
+  const codeElement = codeElementFromPre(children);
+  const className = codeElement?.props.className;
+  const code = markdownText(codeElement?.props.children ?? children).replace(/\n$/, "");
+  const language = /language-([\w-]+)/.exec(className || "")?.[1] ?? "";
+
+  async function handleCopy() {
+    const ok = await copyText(code);
+    if (!ok) {
+      return;
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+  }
+
+  return (
+    <div className="chat-code-block">
+      <div className="chat-code-head">
+        <span>{language || "code"}</span>
+        <button className="chat-code-copy" type="button" onClick={handleCopy} aria-label="复制代码块">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? "已复制" : "复制"}
+        </button>
+      </div>
+      <pre>{children}</pre>
+    </div>
+  );
+}
+
+const markdownComponents: Components = {
+  a({ children, href }) {
+    return (
+      <a href={href} target="_blank" rel="noreferrer">
+        {children}
+      </a>
+    );
+  },
+  table({ children }) {
+    return (
+      <div className="chat-table-scroll">
+        <table>{children}</table>
+      </div>
+    );
+  },
+  pre(props) {
+    return <MarkdownPre {...props} />;
+  },
+};
+
+function ChatMessageContent(props: {
+  id: string;
+  content: string;
+  status: ChatMessage["status"];
+}) {
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [canCollapse, setCanCollapse] = useState(false);
+  const displayContent = props.content || (props.status === "running" ? "正在思考..." : "");
+  const collapsed = canCollapse && !expanded && props.status !== "running";
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [props.id]);
+
+  useEffect(() => {
+    if (props.status === "running") {
+      setCanCollapse(false);
+      return;
+    }
+
+    const node = contentRef.current;
+    if (!node) {
+      return;
+    }
+
+    const measure = () => {
+      setCanCollapse(node.scrollHeight > COLLAPSED_MESSAGE_HEIGHT + 24);
+    };
+
+    measure();
+    const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resizeObserver?.observe(node);
+    return () => resizeObserver?.disconnect();
+  }, [displayContent, props.status]);
+
+  if (!displayContent) {
+    return null;
+  }
+
+  return (
+    <div className={`chat-markdown-shell ${collapsed ? "is-collapsed" : ""}`}>
+      <div
+        ref={contentRef}
+        className="chat-markdown"
+        style={collapsed ? { maxHeight: COLLAPSED_MESSAGE_HEIGHT } : undefined}
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} skipHtml>
+          {displayContent}
+        </ReactMarkdown>
+      </div>
+      {canCollapse && props.status !== "running" ? (
+        <button
+          className="chat-expand-btn"
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+        >
+          {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+          {expanded ? "收起" : "展开全文"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatPage(props: {
   config: AdminConfig | null;
   busy: BusyAction;
@@ -75,20 +303,25 @@ export function ChatPage(props: {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [model, setModel] = useState(props.config?.settings.defaultModel || "");
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const copyMessageTimerRef = useRef<number | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
 
   const activeConversation = useMemo(() => conversations.find((item) => item.id === activeId) ?? null, [activeId, conversations]);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
-  const canSend = input.trim().length > 0 && !sending && props.busy !== "chat";
+  const canSend = (input.trim().length > 0 || attachments.length > 0) && !sending && props.busy !== "chat";
 
   useEffect(() => {
     if (!model && props.config?.settings.defaultModel) {
@@ -101,8 +334,39 @@ export function ChatPage(props: {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (copyMessageTimerRef.current) {
+        window.clearTimeout(copyMessageTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     messageEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
+
+  useEffect(() => {
+    function hasDraggedFiles(event: DragEvent): boolean {
+      return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    }
+
+    function preventFileNavigation(event: DragEvent) {
+      if (!hasDraggedFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "copy";
+      }
+    }
+
+    window.addEventListener("dragover", preventFileNavigation);
+    window.addEventListener("drop", preventFileNavigation);
+    return () => {
+      window.removeEventListener("dragover", preventFileNavigation);
+      window.removeEventListener("drop", preventFileNavigation);
+    };
+  }, []);
 
   function focusComposer() {
     window.setTimeout(() => {
@@ -155,6 +419,7 @@ export function ChatPage(props: {
       setMessages([]);
       if (options?.clearInput !== false) {
         setInput("");
+        setAttachments([]);
       }
       setHistoryOpen(false);
       if (!options?.silent) {
@@ -207,6 +472,152 @@ export function ChatPage(props: {
     } catch (error) {
       props.setStatus(`删除失败：${errorMessage(error)}`);
     }
+  }
+
+  async function filesToAttachments(files: File[]): Promise<ChatAttachment[]> {
+    const room = MAX_ATTACHMENTS - attachments.length;
+    if (room <= 0) {
+      props.setStatus(`一次消息最多携带 ${MAX_ATTACHMENTS} 个附件。`);
+      return [];
+    }
+
+    const selected = files.slice(0, room);
+    if (files.length > room) {
+      props.setStatus(`已达到上限，仅添加前 ${room} 个附件。`);
+    }
+
+    const next: ChatAttachment[] = [];
+    const skipped: string[] = [];
+    for (const file of selected) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      if (file.type.startsWith("image/")) {
+        if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+          skipped.push(`${file.name} 超过 ${formatFileSize(MAX_IMAGE_ATTACHMENT_BYTES)}`);
+          continue;
+        }
+        next.push({
+          id,
+          kind: "image",
+          name: file.name || "clipboard-image.png",
+          mimeType: file.type || "image/png",
+          size: file.size,
+          dataUrl: await readFileAsDataUrl(file),
+        });
+        continue;
+      }
+
+      if (isTextAttachment(file)) {
+        if (file.size > MAX_TEXT_ATTACHMENT_BYTES) {
+          skipped.push(`${file.name} 超过 ${formatFileSize(MAX_TEXT_ATTACHMENT_BYTES)}`);
+          continue;
+        }
+        next.push({
+          id,
+          kind: "text",
+          name: file.name || "clipboard-text.txt",
+          mimeType: file.type || "text/plain",
+          size: file.size,
+          text: await readFileAsText(file),
+        });
+        continue;
+      }
+
+      skipped.push(`${file.name || "未命名文件"} 暂不支持`);
+    }
+
+    if (skipped.length > 0) {
+      props.setStatus(`部分附件未添加：${skipped.slice(0, 3).join("；")}${skipped.length > 3 ? "..." : ""}`);
+    } else if (next.length > 0) {
+      props.setStatus(`已添加 ${next.length} 个附件。`);
+    }
+    return next;
+  }
+
+  async function addFiles(files: File[]) {
+    if (files.length === 0) {
+      return;
+    }
+    try {
+      const next = await filesToAttachments(files);
+      if (next.length > 0) {
+        setAttachments((items) => [...items, ...next]);
+      }
+    } catch (error) {
+      props.setStatus(`读取附件失败：${errorMessage(error)}`);
+    } finally {
+      focusComposer();
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((items) => items.filter((item) => item.id !== id));
+  }
+
+  async function copyMessage(message: ChatMessage) {
+    const ok = await copyText(message.content);
+    if (!ok) {
+      props.setStatus("复制失败。");
+      return;
+    }
+    setCopiedMessageId(message.id);
+    props.setStatus("消息已复制。");
+    if (copyMessageTimerRef.current) {
+      window.clearTimeout(copyMessageTimerRef.current);
+    }
+    copyMessageTimerRef.current = window.setTimeout(() => {
+      setCopiedMessageId(null);
+      copyMessageTimerRef.current = null;
+    }, COPY_FEEDBACK_MS);
+  }
+
+  function handleInputPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const itemFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter(Boolean) as File[];
+    const files = Array.from(event.clipboardData.files);
+    const pastedFiles = itemFiles.length > 0 ? itemFiles : files;
+    if (pastedFiles.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    void addFiles(pastedFiles);
+  }
+
+  function hasEventFiles(event: ReactDragEvent<HTMLElement>): boolean {
+    return Array.from(event.dataTransfer.types).includes("Files");
+  }
+
+  function handleFileDragOver(event: ReactDragEvent<HTMLElement>) {
+    if (!hasEventFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    setDraggingFiles(true);
+  }
+
+  function handleFileDragLeave(event: ReactDragEvent<HTMLElement>) {
+    if (!hasEventFiles(event)) {
+      return;
+    }
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    setDraggingFiles(false);
+  }
+
+  function handleFileDrop(event: ReactDragEvent<HTMLElement>) {
+    if (!hasEventFiles(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDraggingFiles(false);
+    const droppedFiles = Array.from(event.dataTransfer.files);
+    void addFiles(droppedFiles);
   }
 
   function applyStreamEvent(event: ChatSseEvent, conversationId = activeId) {
@@ -275,10 +686,12 @@ export function ChatPage(props: {
 
   async function sendMessage() {
     const content = input.trim();
-    if (!canSend || !content) {
+    const sendingAttachments = attachments;
+    if (!canSend || (!content && sendingAttachments.length === 0)) {
       return;
     }
     setInput((value) => value.trim() === content ? "" : value);
+    setAttachments([]);
     setSending(true);
     props.setBusy("chat");
     props.setStatus(activeId ? "正在等待回复..." : "正在创建聊天...");
@@ -291,6 +704,7 @@ export function ChatPage(props: {
       setSending(false);
       props.setBusy(null);
       setInput((value) => value || content);
+      setAttachments((items) => items.length > 0 ? items : sendingAttachments);
       return;
     }
     const controller = new AbortController();
@@ -301,7 +715,7 @@ export function ChatPage(props: {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, model: model || props.config?.settings.defaultModel }),
+        body: JSON.stringify({ content, attachments: sendingAttachments, model: model || props.config?.settings.defaultModel }),
         signal: controller.signal,
       });
       await readChatStream(response, targetId);
@@ -309,6 +723,8 @@ export function ChatPage(props: {
     } catch (error) {
       if ((error as { name?: string }).name !== "AbortError") {
         props.setStatus(`聊天失败：${errorMessage(error)}`);
+        setInput((value) => value || content);
+        setAttachments((items) => items.length > 0 ? items : sendingAttachments);
       }
     } finally {
       abortRef.current = null;
@@ -414,7 +830,20 @@ export function ChatPage(props: {
         </div>
       </aside>
 
-      <div className="chat-main">
+      <div
+        className={`chat-main ${draggingFiles ? "is-dragging-files" : ""}`}
+        onDragOver={handleFileDragOver}
+        onDragEnter={handleFileDragOver}
+        onDragLeave={handleFileDragLeave}
+        onDrop={handleFileDrop}
+      >
+        {draggingFiles ? (
+          <div className="chat-drop-overlay" aria-live="polite">
+            <Paperclip size={22} />
+            <strong>松开添加附件</strong>
+            <span>支持图片、文本、代码、JSON 和 CSV 文件</span>
+          </div>
+        ) : null}
         <div className="chat-topbar">
           <button className="btn-secondary icon-only chat-history-toggle" type="button" onClick={() => setHistoryOpen((value) => !value)} title="聊天历史">
             <Menu size={17} />
@@ -447,6 +876,17 @@ export function ChatPage(props: {
                   <span>{formatFullTime(message.createdAt)}</span>
                   {message.status === "running" ? <em>生成中</em> : null}
                   {message.status === "failed" ? <em className="is-error">失败</em> : null}
+                  <button
+                    className="chat-message-copy"
+                    type="button"
+                    onClick={() => void copyMessage(message)}
+                    disabled={!message.content}
+                    title="复制整条消息"
+                    aria-label="复制整条消息"
+                  >
+                    {copiedMessageId === message.id ? <Check size={14} /> : <Copy size={14} />}
+                    {copiedMessageId === message.id ? "已复制" : "复制"}
+                  </button>
                   {message.role === "assistant" && message.status === "failed" ? (
                     <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={sending || props.busy === "chat"} title="重新生成">
                       <RefreshCw size={14} />
@@ -454,7 +894,22 @@ export function ChatPage(props: {
                     </button>
                   ) : null}
                 </div>
-                <p>{message.content || (message.status === "running" ? "正在思考..." : "")}</p>
+                <ChatMessageContent id={message.id} content={message.content} status={message.status} />
+                {(message.attachments ?? []).length > 0 ? (
+                  <div className="chat-message-attachments" aria-label="消息附件">
+                    {(message.attachments ?? []).map((attachment) => (
+                      <div className={`chat-message-attachment is-${attachment.kind}`} key={attachment.id}>
+                        {attachment.kind === "image" && attachment.dataUrl ? (
+                          <img src={attachment.dataUrl} alt={attachment.name} />
+                        ) : (
+                          <FileText size={16} />
+                        )}
+                        <span>{attachment.name}</span>
+                        <em>{formatFileSize(attachment.size)}</em>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {message.error ? <span className="chat-message-error">{message.error}</span> : null}
               </div>
             </div>
@@ -463,19 +918,66 @@ export function ChatPage(props: {
         </div>
 
         <div className="chat-composer">
-          <textarea
-            ref={composerRef}
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onCompositionStart={() => {
-              composingRef.current = true;
+          <input
+            ref={fileInputRef}
+            className="chat-file-input"
+            type="file"
+            multiple
+            accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.xml,.yaml,.yml,.js,.jsx,.ts,.tsx,.css,.scss,.html,.vue,.svelte,.py,.java,.go,.rs,.php,.rb,.sh,.sql"
+            onChange={(event) => {
+              void addFiles(Array.from(event.target.files ?? []));
+              event.target.value = "";
             }}
-            onCompositionEnd={() => {
-              composingRef.current = false;
-            }}
-            onKeyDown={handleInputKeyDown}
-            placeholder="发送消息，Enter 发送，Shift+Enter 换行"
           />
+          <div className="chat-composer-input">
+            {attachments.length > 0 ? (
+              <div className="chat-attachment-tray" aria-label="待发送附件">
+                {attachments.map((attachment) => (
+                  <div className={`chat-attachment-chip is-${attachment.kind}`} key={attachment.id}>
+                    <div className="chat-attachment-thumb">
+                      {attachment.kind === "image" && attachment.dataUrl ? (
+                        <img src={attachment.dataUrl} alt={attachment.name} />
+                      ) : attachment.kind === "image" ? (
+                        <ImageIcon size={16} />
+                      ) : (
+                        <FileText size={16} />
+                      )}
+                    </div>
+                    <div>
+                      <strong>{attachment.name}</strong>
+                      <span>{attachment.kind === "image" ? "图片" : "文本"} · {formatFileSize(attachment.size)}</span>
+                    </div>
+                    <button className="chat-remove-attachment" type="button" onClick={() => removeAttachment(attachment.id)} title="移除附件" aria-label={`移除 ${attachment.name}`}>
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <div className="chat-composer-row">
+              <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} title="添加附件" aria-label="添加附件">
+                <Paperclip size={18} />
+              </button>
+              <textarea
+                ref={composerRef}
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onPaste={handleInputPaste}
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                }}
+                onDragOver={handleFileDragOver}
+                onDragEnter={handleFileDragOver}
+                onDragLeave={handleFileDragLeave}
+                onDrop={handleFileDrop}
+                onKeyDown={handleInputKeyDown}
+                placeholder="发送消息，Enter 发送，Shift+Enter 换行，可粘贴或拖入附件"
+              />
+            </div>
+          </div>
           {sending ? (
             <button className="btn-secondary" type="button" onClick={stopMessage}>
               <X size={16} />
