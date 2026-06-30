@@ -92,6 +92,11 @@ type ChatSseEvent = {
   data: unknown;
 };
 
+type ClipboardLike = {
+  items?: DataTransferItemList;
+  files?: FileList;
+};
+
 type MarkdownCodeProps = {
   className?: string;
   children?: ReactNode;
@@ -192,6 +197,15 @@ function readFileAsText(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error || new Error("文件读取失败。"));
     reader.readAsText(file);
   });
+}
+
+function filesFromClipboardData(clipboardData: ClipboardLike): File[] {
+  const itemFiles = Array.from(clipboardData.items ?? [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter(Boolean) as File[];
+  const files = Array.from(clipboardData.files ?? []);
+  return itemFiles.length > 0 ? itemFiles : files;
 }
 
 function markdownText(children: ReactNode): string {
@@ -493,6 +507,29 @@ export function ChatPage(props: {
       window.removeEventListener("drop", preventFileNavigation);
     };
   }, []);
+
+  useEffect(() => {
+    function handleWindowPaste(event: ClipboardEvent) {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest(".chat-message-edit")) {
+        return;
+      }
+      if (!event.clipboardData) {
+        return;
+      }
+      const pastedFiles = filesFromClipboardData(event.clipboardData);
+      if (pastedFiles.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      void addFiles(pastedFiles);
+    }
+
+    window.addEventListener("paste", handleWindowPaste);
+    return () => {
+      window.removeEventListener("paste", handleWindowPaste);
+    };
+  }, [attachments.length]);
 
   function focusComposer() {
     window.setTimeout(() => {
@@ -917,16 +954,12 @@ export function ChatPage(props: {
   }
 
   function handleInputPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
-    const itemFiles = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file")
-      .map((item) => item.getAsFile())
-      .filter(Boolean) as File[];
-    const files = Array.from(event.clipboardData.files);
-    const pastedFiles = itemFiles.length > 0 ? itemFiles : files;
+    const pastedFiles = filesFromClipboardData(event.clipboardData);
     if (pastedFiles.length === 0) {
       return;
     }
     event.preventDefault();
+    event.stopPropagation();
     void addFiles(pastedFiles);
   }
 
