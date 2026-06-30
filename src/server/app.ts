@@ -2299,9 +2299,14 @@ function serializeManagedProfile(profile: ProfileSummary): Record<string, unknow
   };
 }
 
-function serializeSettings(settings: GatewaySettings, isAdmin: boolean): GatewaySettings {
+function serializeSettings(settings: GatewaySettings, isAdmin: boolean, envApiKeyConfigured = false, userApiKeyConfigured = false): GatewaySettings {
   return {
     ...settings,
+    security: {
+      apiKeyConfigured: Boolean(settings.security.apiKeyHash || envApiKeyConfigured),
+      apiKeySource: settings.security.apiKeyHash ? "database" : envApiKeyConfigured ? "environment" : undefined,
+      userApiKeyConfigured,
+    } as unknown as GatewaySettings["security"],
     wecom: {
       ...settings.wecom,
       secret: isAdmin ? settings.wecom.secret : "",
@@ -4771,7 +4776,56 @@ export function createApp(params?: {
       };
     }
 
-    await ctx.configService.updateSettings(parsed.data);
+    const { security: securityUpdate, ...settingsUpdate } = parsed.data;
+    const session = await getSessionFromRequest(request);
+    const hasGlobalSettingsUpdate = Object.values(settingsUpdate).some((value) => value !== undefined);
+    if (!isAdminSession(session) && hasGlobalSettingsUpdate) {
+      reply.code(403);
+      return {
+        error: {
+          type: "forbidden",
+          message: "普通用户只能管理自己的 API Key。",
+        },
+      };
+    }
+    const owner = requestOwnerFromSession(session);
+    if (securityUpdate) {
+      if (!owner) {
+        reply.code(401);
+        return {
+          error: {
+            type: "unauthorized",
+            message: "Login required.",
+          },
+        };
+      }
+      if (securityUpdate.clearApiKey || securityUpdate.apiKey) {
+        const nextApiKeyHash = securityUpdate.clearApiKey
+          ? null
+          : securityUpdate.apiKey
+            ? hashSecret(securityUpdate.apiKey)
+            : null;
+        const updated = await ctx.gatewayDatabaseService.setUserApiKey(
+          owner,
+          nextApiKeyHash,
+        );
+        if (!updated) {
+          reply.code(404);
+          return {
+            error: {
+              type: "not_found",
+              message: "当前用户不存在或已禁用。",
+            },
+          };
+        }
+      }
+    }
+    if (!hasGlobalSettingsUpdate) {
+      return buildAdminConfig(request);
+    }
+    await ctx.configService.updateSettings({
+      ...settingsUpdate,
+    });
     return buildAdminConfig(request);
   });
 
