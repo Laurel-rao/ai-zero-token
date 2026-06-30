@@ -11,6 +11,7 @@ import { formatFileSize, formatFullTime } from "@/shared/lib/format";
 const MAX_ATTACHMENTS = 8;
 const MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
+const MAX_SPREADSHEET_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const COLLAPSED_MESSAGE_HEIGHT = 420;
 const COPY_FEEDBACK_MS = 1400;
 const CHAT_BOTTOM_THRESHOLD = 96;
@@ -49,6 +50,12 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "sh",
   "sql",
 ]);
+const SPREADSHEET_ATTACHMENT_EXTENSIONS = new Set([
+  "xls",
+  "xlsx",
+  "xlsm",
+  "xlsb",
+]);
 const IMAGE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -58,7 +65,7 @@ const IMAGE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
   bmp: "image/bmp",
   svg: "image/svg+xml",
 };
-const SUPPORTED_ATTACHMENT_HINT = "支持常见图片、文本、代码、Markdown、JSON 和 CSV 等小文件";
+const SUPPORTED_ATTACHMENT_HINT = "支持常见图片、文本、代码、Markdown、JSON、CSV 和 Excel 等小文件";
 
 type ChatAttachment = {
   id: string;
@@ -185,6 +192,14 @@ function isTextAttachment(file: File): boolean {
     TEXT_ATTACHMENT_EXTENSIONS.has(fileExtension(file.name));
 }
 
+function isSpreadsheetAttachment(file: File): boolean {
+  return SPREADSHEET_ATTACHMENT_EXTENSIONS.has(fileExtension(file.name));
+}
+
+function isSpreadsheetAttachmentName(name: string): boolean {
+  return SPREADSHEET_ATTACHMENT_EXTENSIONS.has(fileExtension(name));
+}
+
 function imageMimeTypeForFile(file: File): string | null {
   if (file.type.startsWith("image/")) {
     return file.type;
@@ -194,6 +209,30 @@ function imageMimeTypeForFile(file: File): string | null {
 
 function normalizeDataUrlMimeType(dataUrl: string, mimeType: string): string {
   return dataUrl.replace(/^data:[^,]*;base64,/i, `data:${mimeType};base64,`);
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function truncateUtf8Text(value: string, maxBytes: number): string {
+  if (utf8ByteLength(value) <= maxBytes) {
+    return value;
+  }
+  const suffix = "\n\n[内容过长，已截断到聊天附件上限。]";
+  const suffixBytes = utf8ByteLength(suffix);
+  const targetBytes = Math.max(0, maxBytes - suffixBytes);
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (utf8ByteLength(value.slice(0, mid)) <= targetBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return `${value.slice(0, low)}${suffix}`;
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -218,6 +257,26 @@ function readFileAsText(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error || new Error("文件读取失败。"));
     reader.readAsText(file);
   });
+}
+
+async function readSpreadsheetAsText(file: File): Promise<string> {
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+  const sections: string[] = [
+    `Excel 附件: ${file.name || "workbook.xlsx"}`,
+    `原始文件大小: ${formatFileSize(file.size)}`,
+  ];
+
+  for (const sheetName of workbook.SheetNames) {
+    const worksheet = workbook.Sheets[sheetName];
+    if (!worksheet) {
+      continue;
+    }
+    const csv = XLSX.utils.sheet_to_csv(worksheet, { FS: ",", RS: "\n", blankrows: false }).trim();
+    sections.push(`\n## Sheet: ${sheetName}\n${csv || "[空表]"}`);
+  }
+
+  return truncateUtf8Text(sections.join("\n"), MAX_TEXT_ATTACHMENT_BYTES);
 }
 
 function filesFromClipboardData(clipboardData: ClipboardLike): File[] {
@@ -962,6 +1021,22 @@ export function ChatPage(props: {
         continue;
       }
 
+      if (isSpreadsheetAttachment(file)) {
+        if (file.size > MAX_SPREADSHEET_ATTACHMENT_BYTES) {
+          skipped.push(`${file.name} 超过 ${formatFileSize(MAX_SPREADSHEET_ATTACHMENT_BYTES)}`);
+          continue;
+        }
+        next.push({
+          id,
+          kind: "text",
+          name: file.name || "workbook.xlsx",
+          mimeType: file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          size: file.size,
+          text: await readSpreadsheetAsText(file),
+        });
+        continue;
+      }
+
       if (isTextAttachment(file)) {
         if (file.size > MAX_TEXT_ATTACHMENT_BYTES) {
           skipped.push(`${file.name} 超过 ${formatFileSize(MAX_TEXT_ATTACHMENT_BYTES)}`);
@@ -1572,7 +1647,7 @@ export function ChatPage(props: {
                             <FileText size={16} />
                           )}
                           <span>{attachment.name}</span>
-                          <em>{formatFileSize(attachment.size)}</em>
+                          <em>{isSpreadsheetAttachmentName(attachment.name) ? "Excel · " : ""}{formatFileSize(attachment.size)}</em>
                         </div>
                       ))}
                     </div>
@@ -1608,7 +1683,7 @@ export function ChatPage(props: {
                     </div>
                     <div>
                       <strong>{attachment.name}</strong>
-                      <span>{attachment.kind === "image" ? "图片" : "文本"} · {formatFileSize(attachment.size)}</span>
+                      <span>{attachment.kind === "image" ? "图片" : isSpreadsheetAttachmentName(attachment.name) ? "Excel" : "文本"} · {formatFileSize(attachment.size)}</span>
                     </div>
                     <button className="chat-remove-attachment" type="button" onClick={() => removeAttachment(attachment.id)} title="移除附件" aria-label={`移除 ${attachment.name}`}>
                       <X size={14} />
