@@ -198,12 +198,65 @@
   gap: 6px;
 }
 
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 8px;
+}
+
+.reference-card {
+  position: relative;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
 .reference-preview {
   width: 100%;
-  max-height: 150px;
+  aspect-ratio: 1 / 1;
   object-fit: contain;
-  border-radius: 12px;
-  border: 1px solid var(--line);
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+
+.reference-card figcaption {
+  min-width: 0;
+  padding: 7px 8px 8px;
+  display: grid;
+  gap: 2px;
+}
+
+.reference-card figcaption strong,
+.reference-card figcaption span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reference-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.reference-remove:hover {
+  color: #dc2626;
+  border-color: rgba(220, 38, 38, 0.26);
   background: #fff;
 }
 

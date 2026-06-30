@@ -1,4 +1,4 @@
-import { BarChart3, CheckCircle2, Copy, Download, ImagePlus, Loader2, Pencil, RotateCcw, Search, Sparkles, Upload } from "lucide-react";
+import { BarChart3, CheckCircle2, Copy, Download, ImagePlus, Loader2, Pencil, RotateCcw, Search, Sparkles, Upload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
@@ -13,7 +13,7 @@ type GenerateTab = "create" | "history" | "report";
 type ImageRatio = "1:1" | "16:9" | "9:16" | "4:3";
 type OutputFormat = "png" | "webp" | "jpeg";
 type PreviewRatioClass = "ratio-square" | "ratio-wide" | "ratio-tall" | "ratio-classic";
-type ReferenceImageState = { src: string; previewSrc: string; name: string; size: number };
+type ReferenceImageState = { id: string; src: string; previewSrc: string; name: string; size: number };
 type GenerateRunSummary = {
   durationMs: number;
   waitDurationMs?: number;
@@ -111,6 +111,7 @@ const ratioOptions: Array<{ ratio: ImageRatio; label: string; size: string }> = 
   { ratio: "9:16", label: "9:16", size: "864x1536" },
   { ratio: "4:3", label: "4:3", size: "1280x960" },
 ];
+const MAX_REFERENCE_IMAGES = 16;
 
 function ratioClassName(value?: string): PreviewRatioClass {
   const normalized = value?.trim();
@@ -527,7 +528,7 @@ export function GeneratePage(props: {
   const [ratio, setRatio] = useState<ImageRatio>("1:1");
   const [quality, setQuality] = useState<"low" | "medium" | "high" | "auto">("low");
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("png");
-  const [referenceImage, setReferenceImage] = useState<ReferenceImageState | null>(null);
+  const [referenceImages, setReferenceImages] = useState<ReferenceImageState[]>([]);
   const [resultImages, setResultImages] = useState<PreviewImage[]>([]);
   const [responseBody, setResponseBody] = useState("生成结果会显示在这里。");
   const [history, setHistory] = useState<GenerateHistoryItem[]>([]);
@@ -551,7 +552,10 @@ export function GeneratePage(props: {
     const first = resultImages[0];
     return first?.width && first.height ? `${first.width}×${first.height}` : selectedSize;
   }, [resultImages, selectedSize]);
-  const endpoint = referenceImage ? "/v1/images/edits" : "/v1/images/generations";
+  const endpoint = referenceImages.length > 0 ? "/v1/images/edits" : "/v1/images/generations";
+  const referenceSummary = referenceImages.length > 0
+    ? `${referenceImages.length}/${MAX_REFERENCE_IMAGES} 张参考图 · ${(referenceImages.reduce((sum, image) => sum + image.size, 0) / 1024).toFixed(1)} KB`
+    : `可选，最多 ${MAX_REFERENCE_IMAGES} 张，上传后走图片编辑接口`;
   const canGenerate = Boolean(props.config?.profile) && prompt.trim().length > 0 && props.busy !== "test" && props.busy !== "prompt-optimize";
   const canOptimizePrompt = Boolean(props.config?.profile) && prompt.trim().length > 0 && props.busy !== "test" && props.busy !== "prompt-optimize";
   const filteredHistory = useMemo(() => {
@@ -768,27 +772,51 @@ export function GeneratePage(props: {
   }, [generationStartedAt, props.busy]);
 
   async function handleReferenceUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.currentTarget.files?.[0];
+    const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
-    if (!file) return;
+    if (files.length === 0) return;
+
+    const room = MAX_REFERENCE_IMAGES - referenceImages.length;
+    if (room <= 0) {
+      props.setStatus(`参考图最多支持 ${MAX_REFERENCE_IMAGES} 张。`);
+      return;
+    }
+
+    const selected = files.slice(0, room);
     try {
-      const src = await readFileAsDataUrl(file);
-      setReferenceImage({ src, previewSrc: await createReferencePreview(src, file.size), name: file.name, size: file.size });
-      props.setStatus("参考图已载入，本次将走 images.edits。");
+      const nextImages = await Promise.all(selected.map(async (file) => {
+        const src = await readFileAsDataUrl(file);
+        return {
+          id: createClientId("reference"),
+          src,
+          previewSrc: await createReferencePreview(src, file.size),
+          name: file.name,
+          size: file.size,
+        };
+      }));
+      setReferenceImages((items) => [...items, ...nextImages]);
+      const limitMessage = files.length > room ? `，已达到上限，仅添加前 ${room} 张` : "";
+      props.setStatus(`已添加 ${nextImages.length} 张参考图${limitMessage}，本次将走 images.edits。`);
     } catch (error) {
       props.setStatus(errorMessage(error));
     }
   }
 
-  function clearReference() {
-    setReferenceImage(null);
+  function removeReferenceImage(id: string) {
+    const next = referenceImages.filter((item) => item.id !== id);
+    setReferenceImages(next);
+    props.setStatus(next.length > 0 ? `已移除参考图，还剩 ${next.length} 张。` : "已移除参考图，本次将走 images.generations。");
+  }
+
+  function clearReferences() {
+    setReferenceImages([]);
     props.setStatus("已移除参考图，本次将走 images.generations。");
   }
 
   function applyPromptExample(example: (typeof promptExamples)[number]) {
     setPrompt(example.prompt);
     setRatio(example.ratio);
-    setReferenceImage(null);
+    setReferenceImages([]);
     setPromptSuggestion(null);
     props.setStatus(`已填入${example.label}示例提示词。`);
   }
@@ -826,7 +854,7 @@ export function GeneratePage(props: {
                 `原始提示词：${originalPrompt}`,
                 `目标比例：${ratio}`,
                 `目标尺寸：${selectedSize}`,
-                referenceImage ? "用户会携带参考图，请强调参考图主体与风格一致性。" : "无参考图，请补足画面细节。",
+                referenceImages.length > 0 ? `用户会携带 ${referenceImages.length} 张参考图，请强调参考图主体、风格和关键元素的一致性。` : "无参考图，请补足画面细节。",
               ].join("\n"),
             },
           ],
@@ -869,11 +897,11 @@ export function GeneratePage(props: {
     setResponseBody("正在生成图片...");
     setResultImages([]);
     try {
-      const body = referenceImage
+      const body = referenceImages.length > 0
         ? {
             model: "gpt-image-2",
             prompt: prompt.trim(),
-            images: [{ image_url: referenceImage.src }],
+            images: referenceImages.map((image) => ({ image_url: image.src })),
             size: selectedSize,
             quality,
             output_format: outputFormat,
@@ -980,13 +1008,19 @@ export function GeneratePage(props: {
     setRatio(item.ratio && ratioOptions.some((option) => option.ratio === item.ratio) ? item.ratio : "1:1");
     setQuality(item.quality || "low");
     setOutputFormat(item.outputFormat || "png");
-    const firstReference = item.referenceImages.find((reference) => reference.url || reference.source);
-    setReferenceImage(firstReference?.url || firstReference?.source ? {
-      src: firstReference.url || firstReference.source || "",
-      previewSrc: firstReference.url || firstReference.source || "",
-      name: firstReference.name || "history-reference",
-      size: 0,
-    } : null);
+    setReferenceImages(item.referenceImages
+      .filter((reference) => reference.url || reference.source)
+      .slice(0, MAX_REFERENCE_IMAGES)
+      .map((reference, index) => {
+        const src = reference.url || reference.source || "";
+        return {
+          id: createClientId(`history-reference-${index + 1}`),
+          src,
+          previewSrc: src,
+          name: reference.name || `history-reference-${index + 1}`,
+          size: 0,
+        };
+      }));
     setTab("create");
     props.setStatus("已带入历史提示词和参数。");
   }
@@ -1005,12 +1039,13 @@ export function GeneratePage(props: {
       setRatio(item.ratio && ratioOptions.some((option) => option.ratio === item.ratio) ? item.ratio : "1:1");
       setQuality(item.quality || "low");
       setOutputFormat(item.outputFormat || "png");
-      setReferenceImage({
+      setReferenceImages([{
+        id: createClientId("history-image-reference"),
         src: dataUrl,
         previewSrc: image.previewUrl || await createReferencePreview(dataUrl, size),
         name: image.filename || "history-image.png",
         size,
-      });
+      }]);
       setResultImages([]);
       setResponseBody("已将历史图片作为参考图，本次会走 images.edits。");
       setTab("create");
@@ -1119,22 +1154,37 @@ export function GeneratePage(props: {
             <details className="reference-panel">
               <summary>
                 <strong>参考图</strong>
-                <span>{referenceImage ? `${referenceImage.name} · ${(referenceImage.size / 1024).toFixed(1)} KB` : "可选，上传后走图片编辑接口"}</span>
+                <span>{referenceSummary}</span>
               </summary>
               <div className="reference-actions">
                 <label className="btn-secondary upload-btn">
                   <Upload size={16} />
-                  上传图片
-                  <input type="file" accept="image/*" onChange={handleReferenceUpload} />
+                  添加图片
+                  <input type="file" accept="image/*" multiple onChange={handleReferenceUpload} />
                 </label>
-                {referenceImage ? (
-                  <button className="btn-secondary" type="button" onClick={clearReference}>
+                {referenceImages.length > 0 ? (
+                  <button className="btn-secondary" type="button" onClick={clearReferences}>
                     <RotateCcw size={16} />
-                    移除
+                    清空
                   </button>
                 ) : null}
               </div>
-              {referenceImage ? <img className="reference-preview" src={referenceImage.previewSrc} alt="参考图预览" /> : null}
+              {referenceImages.length > 0 ? (
+                <div className="reference-grid" aria-label="参考图列表">
+                  {referenceImages.map((image, index) => (
+                    <figure className="reference-card" key={image.id}>
+                      <img className="reference-preview" src={image.previewSrc} alt={`参考图 ${index + 1}: ${image.name}`} />
+                      <figcaption>
+                        <strong title={image.name}>{image.name}</strong>
+                        <span>{(image.size / 1024).toFixed(1)} KB</span>
+                      </figcaption>
+                      <button className="reference-remove" type="button" onClick={() => removeReferenceImage(image.id)} title="移除参考图" aria-label={`移除参考图 ${image.name}`}>
+                        <X size={14} />
+                      </button>
+                    </figure>
+                  ))}
+                </div>
+              ) : null}
             </details>
 
             {(props.busy === "test" || runSummary || lastDurationMs !== null) ? (
