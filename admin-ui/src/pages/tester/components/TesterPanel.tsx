@@ -2,6 +2,7 @@ import { Copy, Loader2, RotateCcw, Upload, Zap } from "lucide-react";
 import { ChangeEvent } from "react";
 import type { AdminConfig, SupportedEndpoint } from "@/shared/types";
 import type { BusyAction, PreviewImage, ResultTab } from "@/shared/lib/app-types";
+import type { ModalImage } from "@/hooks/useAdminWorkspace";
 import { endpointOrder, tabLabels } from "@/shared/lib/endpoints";
 import type { EditImageUploadMode } from "../index";
 
@@ -28,7 +29,7 @@ export function TesterPanel(props: {
   onCopyResponse: () => void;
   onCopyTiming: () => void;
   onImageUploadMode: (mode: EditImageUploadMode) => void;
-  onPreview: (value: { src: string; meta: string; filename?: string }) => void;
+  onPreview: (value: ModalImage) => void;
   onImageUpload: (file: File, mode: EditImageUploadMode) => Promise<void>;
 }) {
   const isImageEndpoint = props.endpoint.startsWith("/v1/images/");
@@ -159,7 +160,7 @@ export function TesterPanel(props: {
                 <div className="preview-grid">
                   {props.previewImages.map((image) => (
                     <figure className="preview-card" key={image.filename}>
-                      <button type="button" onClick={() => props.onPreview({ src: image.src, meta: image.meta, filename: image.filename })}>
+                      <button type="button" onClick={() => props.onPreview({ src: image.fullSrc || image.src, meta: image.fullMeta || image.meta, filename: image.filename, ratio: image.width && image.height ? `${image.width}:${image.height}` : undefined })}>
                         <img src={image.src} alt={image.meta} />
                       </button>
                       <figcaption>{image.meta}</figcaption>

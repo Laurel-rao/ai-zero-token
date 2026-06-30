@@ -1173,7 +1173,18 @@ export function GeneratePage(props: {
                 <div className="reference-grid" aria-label="参考图列表">
                   {referenceImages.map((image, index) => (
                     <figure className="reference-card" key={image.id}>
-                      <img className="reference-preview" src={image.previewSrc} alt={`参考图 ${index + 1}: ${image.name}`} />
+                      <button
+                        className="reference-preview-button"
+                        type="button"
+                        onClick={() => props.setPreviewImage({
+                          src: image.src,
+                          meta: `${image.name} · ${(image.size / 1024).toFixed(1)} KB`,
+                          filename: image.name,
+                        })}
+                        aria-label={`预览参考图 ${image.name}`}
+                      >
+                        <img className="reference-preview" src={image.previewSrc} alt={`参考图 ${index + 1}: ${image.name}`} />
+                      </button>
                       <figcaption>
                         <strong title={image.name}>{image.name}</strong>
                         <span>{(image.size / 1024).toFixed(1)} KB</span>

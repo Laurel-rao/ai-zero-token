@@ -214,6 +214,20 @@
   background: #fff;
 }
 
+.reference-preview-button {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: block;
+  cursor: zoom-in;
+}
+
+.reference-preview-button:focus-visible {
+  outline: 3px solid rgba(99, 91, 255, 0.22);
+  outline-offset: -3px;
+}
+
 .reference-preview {
   width: 100%;
   aspect-ratio: 1 / 1;
