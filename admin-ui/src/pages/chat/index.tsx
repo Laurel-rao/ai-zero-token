@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronUp, Copy, FileText, Image as ImageIcon, Loader2, Menu, MessageSquarePlus, Paperclip, Pencil, RefreshCw, Send, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, FileText, Image as ImageIcon, Loader2, Menu, MessageSquarePlus, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, X } from "lucide-react";
 import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -90,6 +90,13 @@ type MarkdownCodeProps = {
 
 type MarkdownPreProps = {
   children?: ReactNode;
+  onPreviewHtml?: (html: string, title?: string) => void;
+};
+
+type HtmlPreview = {
+  html: string;
+  title: string;
+  openedAt: number;
 };
 
 function parseSseBuffer(value: string, flush = false): { events: ChatSseEvent[]; rest: string } {
@@ -177,12 +184,23 @@ function codeElementFromPre(children: ReactNode): ReactElement<MarkdownCodeProps
   return child && isValidElement<MarkdownCodeProps>(child) && child.type === "code" ? child : null;
 }
 
-function MarkdownPre({ children }: MarkdownPreProps) {
+function isHtmlCode(code: string, language: string): boolean {
+  const normalizedLanguage = language.trim().toLowerCase();
+  if (normalizedLanguage === "html" || normalizedLanguage === "htm") {
+    return true;
+  }
+  const normalizedCode = code.trim();
+  return /^<!doctype html/i.test(normalizedCode) ||
+    /<\/?(html|head|body|main|section|article|div|style|script|canvas|iframe)(\s|>|\/)/i.test(normalizedCode);
+}
+
+function MarkdownPre({ children, onPreviewHtml }: MarkdownPreProps) {
   const [copied, setCopied] = useState(false);
   const codeElement = codeElementFromPre(children);
   const className = codeElement?.props.className;
   const code = markdownText(codeElement?.props.children ?? children).replace(/\n$/, "");
   const language = /language-([\w-]+)/.exec(className || "")?.[1] ?? "";
+  const canPreviewHtml = Boolean(onPreviewHtml && code && isHtmlCode(code, language));
 
   async function handleCopy() {
     const ok = await copyText(code);
@@ -197,46 +215,54 @@ function MarkdownPre({ children }: MarkdownPreProps) {
     <div className="chat-code-block">
       <div className="chat-code-head">
         <span>{language || "code"}</span>
-        <button className="chat-code-copy" type="button" onClick={handleCopy} aria-label="复制代码块">
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-          {copied ? "已复制" : "复制"}
-        </button>
+        <div className="chat-code-actions">
+          {canPreviewHtml ? (
+            <button className="chat-code-copy" type="button" onClick={() => onPreviewHtml?.(code, "HTML 预览")} aria-label="预览 HTML">
+              <Play size={14} />
+              预览
+            </button>
+          ) : null}
+          <button className="chat-code-copy" type="button" onClick={handleCopy} aria-label="复制代码块">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "已复制" : "复制"}
+          </button>
+        </div>
       </div>
       <pre>{children}</pre>
     </div>
   );
 }
 
-const markdownComponents: Components = {
-  a({ children, href }) {
-    return (
-      <a href={href} target="_blank" rel="noreferrer">
-        {children}
-      </a>
-    );
-  },
-  table({ children }) {
-    return (
-      <div className="chat-table-scroll">
-        <table>{children}</table>
-      </div>
-    );
-  },
-  pre(props) {
-    return <MarkdownPre {...props} />;
-  },
-};
-
 function ChatMessageContent(props: {
   id: string;
   content: string;
   status: ChatMessage["status"];
+  onPreviewHtml: (html: string, title?: string) => void;
 }) {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [canCollapse, setCanCollapse] = useState(false);
   const displayContent = props.content || (props.status === "running" ? "正在思考..." : "");
   const collapsed = canCollapse && !expanded && props.status !== "running";
+  const markdownComponents = useMemo<Components>(() => ({
+    a({ children, href }) {
+      return (
+        <a href={href} target="_blank" rel="noreferrer">
+          {children}
+        </a>
+      );
+    },
+    table({ children }) {
+      return (
+        <div className="chat-table-scroll">
+          <table>{children}</table>
+        </div>
+      );
+    },
+    pre(preProps) {
+      return <MarkdownPre {...preProps} onPreviewHtml={props.onPreviewHtml} />;
+    },
+  }), [props.onPreviewHtml]);
 
   useEffect(() => {
     setExpanded(false);
@@ -312,12 +338,15 @@ export function ChatPage(props: {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [htmlPreview, setHtmlPreview] = useState<HtmlPreview | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const copyMessageTimerRef = useRef<number | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
 
   const activeConversation = useMemo(() => conversations.find((item) => item.id === activeId) ?? null, [activeId, conversations]);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
@@ -342,6 +371,9 @@ export function ChatPage(props: {
   }, []);
 
   useEffect(() => {
+    if (!shouldStickToBottomRef.current) {
+      return;
+    }
     messageEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages]);
 
@@ -376,17 +408,19 @@ export function ChatPage(props: {
     }, 0);
   }
 
-  async function loadConversations(selectId?: string) {
+  async function loadConversations(selectId?: string, options?: { loadActive?: boolean }) {
     setLoading(true);
     try {
       const result = await fetchJson<{ items: ChatConversation[] }>("/_gateway/chats?limit=100");
       setConversations(result.items);
       const nextId = selectId ?? activeId ?? null;
       setActiveId(nextId);
-      if (nextId) {
+      if (nextId && options?.loadActive !== false) {
         await loadConversation(nextId);
       } else {
-        setMessages([]);
+        if (!nextId) {
+          setMessages([]);
+        }
       }
     } catch (error) {
       props.setStatus(`读取聊天历史失败：${errorMessage(error)}`);
@@ -398,6 +432,7 @@ export function ChatPage(props: {
   async function loadConversation(id: string) {
     try {
       const result = await fetchJson<{ item: ChatConversation & { messages: ChatMessage[] } }>(`/_gateway/chats/${encodeURIComponent(id)}`);
+      shouldStickToBottomRef.current = true;
       setActiveId(id);
       setMessages(result.item.messages);
       setModel(result.item.model || props.config?.settings.defaultModel || model);
@@ -414,6 +449,7 @@ export function ChatPage(props: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: "新对话", model: model || props.config?.settings.defaultModel }),
       });
+      shouldStickToBottomRef.current = true;
       setConversations((items) => [result.item, ...items.filter((item) => item.id !== result.item.id)]);
       setActiveId(result.item.id);
       setMessages([]);
@@ -650,7 +686,7 @@ export function ChatPage(props: {
       if (message?.id) {
         setMessages((items) => items.map((item) => item.id === message.id ? message : item));
       }
-      void loadConversations(conversationId || undefined);
+      void loadConversations(conversationId || undefined, { loadActive: false });
       return;
     }
     if (event.event === "error") {
@@ -690,6 +726,7 @@ export function ChatPage(props: {
     if (!canSend || (!content && sendingAttachments.length === 0)) {
       return;
     }
+    shouldStickToBottomRef.current = true;
     setInput((value) => value.trim() === content ? "" : value);
     setAttachments([]);
     setSending(true);
@@ -738,6 +775,7 @@ export function ChatPage(props: {
     if (!activeId || message.status !== "failed" || message.role !== "assistant" || sending || props.busy === "chat") {
       return;
     }
+    shouldStickToBottomRef.current = true;
     const controller = new AbortController();
     abortRef.current = controller;
     setSending(true);
@@ -783,6 +821,23 @@ export function ChatPage(props: {
       event.preventDefault();
       void sendMessage();
     }
+  }
+
+  function updateStickToBottom() {
+    const node = messagesScrollRef.current;
+    if (!node) {
+      shouldStickToBottomRef.current = true;
+      return;
+    }
+    shouldStickToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+  }
+
+  function openHtmlPreview(html: string, title = "HTML 预览") {
+    setHtmlPreview({
+      html,
+      title,
+      openedAt: Date.now(),
+    });
   }
 
   return (
@@ -859,7 +914,7 @@ export function ChatPage(props: {
           </select>
         </div>
 
-        <div className="chat-messages">
+        <div className="chat-messages" ref={messagesScrollRef} onScroll={updateStickToBottom}>
           {messages.length === 0 ? (
             <div className="chat-empty">
               <MessageSquarePlus size={34} />
@@ -894,7 +949,7 @@ export function ChatPage(props: {
                     </button>
                   ) : null}
                 </div>
-                <ChatMessageContent id={message.id} content={message.content} status={message.status} />
+                <ChatMessageContent id={message.id} content={message.content} status={message.status} onPreviewHtml={openHtmlPreview} />
                 {(message.attachments ?? []).length > 0 ? (
                   <div className="chat-message-attachments" aria-label="消息附件">
                     {(message.attachments ?? []).map((attachment) => (
@@ -991,6 +1046,22 @@ export function ChatPage(props: {
           )}
         </div>
       </div>
+      {htmlPreview ? (
+        <div className="chat-html-preview-window" role="dialog" aria-modal="false" aria-label={htmlPreview.title}>
+          <div className="chat-html-preview-head">
+            <strong>{htmlPreview.title}</strong>
+            <button className="chat-html-preview-close" type="button" onClick={() => setHtmlPreview(null)} title="关闭" aria-label="关闭 HTML 预览">
+              <X size={16} />
+            </button>
+          </div>
+          <iframe
+            key={htmlPreview.openedAt}
+            title={htmlPreview.title}
+            sandbox="allow-forms allow-modals allow-scripts"
+            srcDoc={htmlPreview.html}
+          />
+        </div>
+      ) : null}
     </section>
   );
 }
