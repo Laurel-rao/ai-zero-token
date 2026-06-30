@@ -422,6 +422,7 @@ export function ChatPage(props: {
   const activeIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<ChatConversation[]>([]);
   const lastScrollTopRef = useRef(0);
+  const dragDepthRef = useRef(0);
   const previewDragRef = useRef<HtmlPreviewDragState | null>(null);
 
   const activeConversation = useMemo(() => conversations.find((item) => item.id === activeId) ?? null, [activeId, conversations]);
@@ -490,7 +491,16 @@ export function ChatPage(props: {
       return Array.from(event.dataTransfer?.types ?? []).includes("Files");
     }
 
-    function preventFileNavigation(event: DragEvent) {
+    function handleWindowDragEnter(event: DragEvent) {
+      if (!hasDraggedFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setDraggingFiles(true);
+    }
+
+    function handleWindowDragOver(event: DragEvent) {
       if (!hasDraggedFiles(event)) {
         return;
       }
@@ -500,13 +510,48 @@ export function ChatPage(props: {
       }
     }
 
-    window.addEventListener("dragover", preventFileNavigation);
-    window.addEventListener("drop", preventFileNavigation);
+    function handleWindowDragLeave(event: DragEvent) {
+      if (!hasDraggedFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setDraggingFiles(false);
+      }
+    }
+
+    function handleWindowDrop(event: DragEvent) {
+      if (!hasDraggedFiles(event)) {
+        return;
+      }
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest(".chat-message-edit")) {
+        event.preventDefault();
+        dragDepthRef.current = 0;
+        setDraggingFiles(false);
+        return;
+      }
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setDraggingFiles(false);
+      const droppedFiles = Array.from(event.dataTransfer?.files ?? []);
+      if (droppedFiles.length > 0) {
+        void addFiles(droppedFiles);
+      }
+    }
+
+    window.addEventListener("dragenter", handleWindowDragEnter);
+    window.addEventListener("dragover", handleWindowDragOver);
+    window.addEventListener("dragleave", handleWindowDragLeave);
+    window.addEventListener("drop", handleWindowDrop);
     return () => {
-      window.removeEventListener("dragover", preventFileNavigation);
-      window.removeEventListener("drop", preventFileNavigation);
+      window.removeEventListener("dragenter", handleWindowDragEnter);
+      window.removeEventListener("dragover", handleWindowDragOver);
+      window.removeEventListener("dragleave", handleWindowDragLeave);
+      window.removeEventListener("drop", handleWindowDrop);
     };
-  }, []);
+  }, [attachments.length]);
 
   useEffect(() => {
     function handleWindowPaste(event: ClipboardEvent) {
@@ -974,6 +1019,7 @@ export function ChatPage(props: {
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = "copy";
+    dragDepthRef.current = Math.max(1, dragDepthRef.current);
     setDraggingFiles(true);
   }
 
@@ -985,6 +1031,7 @@ export function ChatPage(props: {
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
       return;
     }
+    dragDepthRef.current = 0;
     setDraggingFiles(false);
   }
 
@@ -994,6 +1041,7 @@ export function ChatPage(props: {
     }
     event.preventDefault();
     event.stopPropagation();
+    dragDepthRef.current = 0;
     setDraggingFiles(false);
     const droppedFiles = Array.from(event.dataTransfer.files);
     void addFiles(droppedFiles);
