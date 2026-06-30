@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronUp, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, Maximize2, Menu, MessageSquarePlus, Minimize2, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, Maximize2, Menu, MessageSquarePlus, Minimize2, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, TriangleAlert, X } from "lucide-react";
 import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -146,6 +146,13 @@ type EditingMessage = {
   content: string;
 };
 
+type PendingAttachmentFile = {
+  id: string;
+  name: string;
+  size: number;
+  label: string;
+};
+
 function parseSseBuffer(value: string, flush = false): { events: ChatSseEvent[]; rest: string } {
   const blocks = value.split("\n\n");
   const rest = flush ? "" : blocks.pop() ?? "";
@@ -198,6 +205,37 @@ function isSpreadsheetAttachment(file: File): boolean {
 
 function isSpreadsheetAttachmentName(name: string): boolean {
   return SPREADSHEET_ATTACHMENT_EXTENSIONS.has(fileExtension(name));
+}
+
+function attachmentKindLabel(name: string, kind?: ChatAttachment["kind"]): string {
+  if (kind === "image") {
+    return "图片";
+  }
+  if (isSpreadsheetAttachmentName(name)) {
+    return "Excel";
+  }
+  return "文本";
+}
+
+function pendingAttachmentLabel(file: File): string {
+  const imageMimeType = imageMimeTypeForFile(file);
+  if (imageMimeType) {
+    return "正在读取图片";
+  }
+  if (isSpreadsheetAttachment(file)) {
+    return "正在解析 Excel";
+  }
+  if (isTextAttachment(file)) {
+    return "正在读取文本";
+  }
+  return "正在检查文件";
+}
+
+function attachmentNoticeTone(message: string, loading: boolean): "loading" | "success" | "warning" {
+  if (loading) {
+    return "loading";
+  }
+  return /失败|未添加|超过|不支持|没有选择/.test(message) ? "warning" : "success";
 }
 
 function imageMimeTypeForFile(file: File): string | null {
@@ -476,6 +514,8 @@ export function ChatPage(props: {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [draggingFiles, setDraggingFiles] = useState(false);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const [pendingAttachmentFiles, setPendingAttachmentFiles] = useState<PendingAttachmentFile[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -510,8 +550,9 @@ export function ChatPage(props: {
   const activeCachedConversation = activeId ? conversationCacheRef.current.get(activeId) ?? null : null;
   const canLoadOlderMessages = Boolean((activeCachedConversation ?? activeConversation)?.hasMoreMessages && messages.length > 0);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
-  const canSend = (input.trim().length > 0 || attachments.length > 0) && !sending && props.busy !== "chat";
+  const canSend = (input.trim().length > 0 || attachments.length > 0) && !uploadingAttachments && !sending && props.busy !== "chat";
   const isLoadingActiveConversation = Boolean(activeId && loadingConversationId === activeId);
+  const attachmentNoticeStatus = attachmentNoticeTone(attachmentNotice, uploadingAttachments);
 
   useEffect(() => {
     if (!model && props.config?.settings.defaultModel) {
@@ -930,6 +971,8 @@ export function ChatPage(props: {
       if (options?.clearInput !== false) {
         setInput("");
         setAttachments([]);
+        setPendingAttachmentFiles([]);
+        setUploadingAttachments(false);
         setAttachmentNotice("");
       }
       setHistoryOpen(false);
@@ -1074,6 +1117,16 @@ export function ChatPage(props: {
       setAttachmentNotice("没有选择文件。");
       return;
     }
+    const pendingFiles = files.map((file) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      name: file.name || "未命名文件",
+      size: file.size,
+      label: pendingAttachmentLabel(file),
+    }));
+    setPendingAttachmentFiles(pendingFiles);
+    setUploadingAttachments(true);
+    setAttachmentNotice(`正在处理 ${files.length} 个附件...`);
+    props.setStatus(`正在处理 ${files.length} 个附件...`);
     try {
       const next = await filesToAttachments(files);
       if (next.length > 0) {
@@ -1084,12 +1137,16 @@ export function ChatPage(props: {
       setAttachmentNotice(message);
       props.setStatus(message);
     } finally {
+      setUploadingAttachments(false);
+      setPendingAttachmentFiles([]);
       focusComposer();
     }
   }
 
   function removeAttachment(id: string) {
     setAttachments((items) => items.filter((item) => item.id !== id));
+    setPendingAttachmentFiles([]);
+    setUploadingAttachments(false);
     setAttachmentNotice("");
   }
 
@@ -1232,6 +1289,8 @@ export function ChatPage(props: {
     shouldStickToBottomRef.current = true;
     setInput((value) => value.trim() === content ? "" : value);
     setAttachments([]);
+    setPendingAttachmentFiles([]);
+    setUploadingAttachments(false);
     setAttachmentNotice("");
     setSending(true);
     props.setBusy("chat");
@@ -1668,8 +1727,20 @@ export function ChatPage(props: {
 
         <div className="chat-composer">
           <div className="chat-composer-input">
-            {attachments.length > 0 ? (
+            {attachments.length > 0 || pendingAttachmentFiles.length > 0 ? (
               <div className="chat-attachment-tray" aria-label="待发送附件">
+                {pendingAttachmentFiles.map((file) => (
+                  <div className="chat-attachment-chip is-pending" key={file.id}>
+                    <div className="chat-attachment-thumb">
+                      <Loader2 className="spin" size={16} />
+                    </div>
+                    <div>
+                      <strong>{file.name}</strong>
+                      <span>{file.label} · {formatFileSize(file.size)}</span>
+                    </div>
+                    <span className="chat-attachment-state">处理中</span>
+                  </div>
+                ))}
                 {attachments.map((attachment) => (
                   <div className={`chat-attachment-chip is-${attachment.kind}`} key={attachment.id}>
                     <div className="chat-attachment-thumb">
@@ -1683,8 +1754,9 @@ export function ChatPage(props: {
                     </div>
                     <div>
                       <strong>{attachment.name}</strong>
-                      <span>{attachment.kind === "image" ? "图片" : isSpreadsheetAttachmentName(attachment.name) ? "Excel" : "文本"} · {formatFileSize(attachment.size)}</span>
+                      <span>{attachmentKindLabel(attachment.name, attachment.kind)} · {formatFileSize(attachment.size)}</span>
                     </div>
+                    <span className="chat-attachment-state is-ready">已添加</span>
                     <button className="chat-remove-attachment" type="button" onClick={() => removeAttachment(attachment.id)} title="移除附件" aria-label={`移除 ${attachment.name}`}>
                       <X size={14} />
                     </button>
@@ -1692,7 +1764,12 @@ export function ChatPage(props: {
                 ))}
               </div>
             ) : null}
-            {attachmentNotice ? <div className="chat-attachment-notice">{attachmentNotice}</div> : null}
+            {attachmentNotice ? (
+              <div className={`chat-attachment-notice is-${attachmentNoticeStatus}`} aria-live="polite">
+                {attachmentNoticeStatus === "loading" ? <Loader2 className="spin" size={14} /> : attachmentNoticeStatus === "warning" ? <TriangleAlert size={14} /> : <Check size={14} />}
+                <span>{attachmentNotice}</span>
+              </div>
+            ) : null}
             <div className="chat-composer-row">
               <label className="chat-attach-button" title="添加附件" aria-label="添加附件">
                 <Paperclip size={18} />
