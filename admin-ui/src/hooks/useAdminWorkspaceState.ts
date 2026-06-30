@@ -1,12 +1,11 @@
 import { startTransition, useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
-import type { BusyAction } from "@/shared/lib/app-types";
+import type { BusyAction, ModalImage } from "@/shared/lib/app-types";
 import { errorMessage } from "@/shared/lib/app-utils";
 import { canAccessRoute, normalizeUserRole, readRouteFromHash, type AppRoute, type UserRole } from "@/routes/routes";
 import { applyBranding } from "@/shared/lib/branding";
 
-export type ModalImage = { src: string; meta: string; filename?: string; ratio?: string };
 export type ManualLoginState = {
   loginId: string;
   message: string;

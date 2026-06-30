@@ -64,7 +64,9 @@ export type TrendWindow = 60 | 180 | 720;
 
 export type PreviewImage = { src: string; fullSrc?: string; filename: string; meta: string; fullMeta?: string; width?: number; height?: number };
 
-export type ModalImage = { src: string; meta: string; filename?: string; ratio?: string };
+export type ModalImageItem = { src: string; meta: string; filename?: string; ratio?: string };
+
+export type ModalImage = ModalImageItem & { gallery?: ModalImageItem[]; index?: number };
 
 export type SettingDraft = {
   defaultModel: string;

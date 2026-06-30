@@ -1,8 +1,9 @@
 import type { AdminConfig } from "@/shared/types";
 import type { AppRoute, UserRole } from "@/routes/routes";
+import type { ModalImage } from "@/shared/lib/app-types";
 import { useAdminWorkspaceActions, type WorkspaceActions } from "./useAdminWorkspaceActions";
 import { useAdminWorkspaceDerived, type WorkspaceDerived } from "./useAdminWorkspaceDerived";
-import { useAdminWorkspaceState, type ModalImage, type WorkspaceState } from "./useAdminWorkspaceState";
+import { useAdminWorkspaceState, type WorkspaceState } from "./useAdminWorkspaceState";
 
 export type UseAdminWorkspaceResult = WorkspaceState & WorkspaceDerived & WorkspaceActions & {
   activeRoute: AppRoute;

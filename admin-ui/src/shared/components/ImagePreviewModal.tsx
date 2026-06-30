@@ -1,7 +1,7 @@
-import { Download, Maximize2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { ChevronLeft, ChevronRight, Download, Maximize2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { Modal } from "./Modal";
-import type { ModalImage } from "@/hooks/useAdminWorkspace";
+import type { ModalImage, ModalImageItem } from "@/shared/lib/app-types";
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 6;
@@ -33,10 +33,23 @@ function clampZoom(value: number): number {
 }
 
 export function ImagePreviewModal(props: { image: ModalImage; onClose: () => void }) {
+  const gallery = useMemo<ModalImageItem[]>(() => {
+    const items = props.image.gallery?.length ? props.image.gallery : [props.image];
+    return items.map((item) => ({
+      src: item.src,
+      meta: item.meta,
+      filename: item.filename,
+      ratio: item.ratio,
+    }));
+  }, [props.image]);
+  const initialIndex = Math.min(Math.max(props.image.index ?? 0, 0), Math.max(gallery.length - 1, 0));
+  const [activeIndex, setActiveIndex] = useState(initialIndex);
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
+  const activeImage = gallery[activeIndex] ?? gallery[0] ?? props.image;
+  const hasGalleryNavigation = gallery.length > 1;
   const normalizedRotation = ((rotation % 360) + 360) % 360;
   const isQuarterTurn = normalizedRotation === 90 || normalizedRotation === 270;
 
@@ -54,9 +67,27 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
     }
   };
 
+  const showPrevious = () => {
+    if (!hasGalleryNavigation) {
+      return;
+    }
+    setActiveIndex((value) => (value - 1 + gallery.length) % gallery.length);
+  };
+
+  const showNext = () => {
+    if (!hasGalleryNavigation) {
+      return;
+    }
+    setActiveIndex((value) => (value + 1) % gallery.length);
+  };
+
+  useEffect(() => {
+    setActiveIndex(initialIndex);
+  }, [initialIndex]);
+
   useEffect(() => {
     resetView();
-  }, [props.image.src]);
+  }, [activeImage.src]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -80,10 +111,18 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
         event.preventDefault();
         setRotation((value) => value + 90);
       }
+      if (event.key === "ArrowLeft" && hasGalleryNavigation) {
+        event.preventDefault();
+        showPrevious();
+      }
+      if (event.key === "ArrowRight" && hasGalleryNavigation) {
+        event.preventDefault();
+        showNext();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [props, zoom]);
+  }, [hasGalleryNavigation, props, zoom]);
 
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -143,30 +182,40 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
         <button className="image-preview-tool" type="button" onClick={resetView} title="重置视图" aria-label="重置视图">
           <Maximize2 size={16} />
         </button>
-        <a className="image-preview-tool" href={props.image.src} download={props.image.filename || "generated-image.png"} title="下载图片" aria-label="下载图片">
+        <a className="image-preview-tool" href={activeImage.src} download={activeImage.filename || "generated-image.png"} title="下载图片" aria-label="下载图片">
           <Download size={16} />
         </a>
       </div>
       <div
-        className={`image-preview-stage ${ratioClassName(props.image.ratio)} ${zoom > 1 ? "is-zoomed" : ""} ${isQuarterTurn ? "is-quarter-turn" : ""}`}
+        className={`image-preview-stage ${ratioClassName(activeImage.ratio)} ${zoom > 1 ? "is-zoomed" : ""} ${isQuarterTurn ? "is-quarter-turn" : ""}`}
         onWheel={handleWheel}
         onPointerDown={startDrag}
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
+        {hasGalleryNavigation ? (
+          <>
+            <button className="image-preview-nav is-prev" type="button" onClick={showPrevious} onPointerDown={(event) => event.stopPropagation()} title="上一张" aria-label="上一张">
+              <ChevronLeft size={24} />
+            </button>
+            <button className="image-preview-nav is-next" type="button" onClick={showNext} onPointerDown={(event) => event.stopPropagation()} title="下一张" aria-label="下一张">
+              <ChevronRight size={24} />
+            </button>
+          </>
+        ) : null}
         <div className="image-preview-pan" style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0)` }}>
           <img
-            src={props.image.src}
-            alt={props.image.filename || "图片预览"}
+            src={activeImage.src}
+            alt={activeImage.filename || "图片预览"}
             draggable={false}
             style={{ transform: `rotate(${rotation}deg) scale(${zoom})` }}
           />
         </div>
       </div>
       <div className="preview-modal-meta">
-        <span>{props.image.meta}</span>
-        <span>{normalizedRotation === 0 ? "0deg" : `${normalizedRotation}deg`}</span>
+        <span>{activeImage.meta}</span>
+        <span>{hasGalleryNavigation ? `${activeIndex + 1}/${gallery.length} · ` : ""}{normalizedRotation === 0 ? "0deg" : `${normalizedRotation}deg`}</span>
       </div>
     </Modal>
   );

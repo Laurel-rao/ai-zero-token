@@ -2,7 +2,7 @@ import { BarChart3, CheckCircle2, Copy, Download, ImagePlus, Loader2, Pencil, Ro
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
-import type { BusyAction, PreviewImage } from "@/shared/lib/app-types";
+import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, createClientId, errorMessage, extractPreviewImages, readFileAsDataUrl, summarizeJson } from "@/shared/lib/app-utils";
 import { formatDuration, formatFullTime, formatJson } from "@/shared/lib/format";
 import { profileLabel } from "@/shared/lib/profiles";
@@ -70,6 +70,32 @@ type GenerateHistoryItem = {
     previewSize?: number;
   }>;
 };
+
+function referencePreviewItems(images: ReferenceImageState[]): ModalImageItem[] {
+  return images.map((image) => ({
+    src: image.src,
+    meta: `${image.name} · ${(image.size / 1024).toFixed(1)} KB`,
+    filename: image.name,
+  }));
+}
+
+function generatedPreviewItems(images: PreviewImage[], fallbackRatio: string): ModalImageItem[] {
+  return images.map((image) => ({
+    src: image.fullSrc || image.src,
+    meta: image.fullMeta || image.meta,
+    filename: image.filename,
+    ratio: image.width && image.height ? `${image.width}:${image.height}` : fallbackRatio,
+  }));
+}
+
+function historyPreviewItems(item: GenerateHistoryItem): ModalImageItem[] {
+  return item.images.map((image) => ({
+    src: image.url,
+    meta: `${image.mimeType}${image.width && image.height ? ` · ${image.width}×${image.height}` : ""} · ${(image.size / 1024).toFixed(1)} KB`,
+    filename: image.filename,
+    ratio: image.width && image.height ? `${image.width}:${image.height}` : item.ratio || item.size,
+  }));
+}
 
 type GenerateReportBucket = {
   key: number;
@@ -521,7 +547,7 @@ export function GeneratePage(props: {
   setStatus: (value: string) => void;
   setRequestLogs: (value: SetStateAction<RequestLog[]>) => void;
   refreshConfig: (options?: { runtime?: boolean; silent?: boolean }) => Promise<AdminConfig>;
-  setPreviewImage: (value: { src: string; meta: string; filename?: string; ratio?: string } | null) => void;
+  setPreviewImage: (value: ModalImage | null) => void;
 }) {
   const [tab, setTab] = useState<GenerateTab>("create");
   const [prompt, setPrompt] = useState("生成一张白底红苹果商品图，构图简洁，光线干净。");
@@ -1176,11 +1202,10 @@ export function GeneratePage(props: {
                       <button
                         className="reference-preview-button"
                         type="button"
-                        onClick={() => props.setPreviewImage({
-                          src: image.src,
-                          meta: `${image.name} · ${(image.size / 1024).toFixed(1)} KB`,
-                          filename: image.name,
-                        })}
+                        onClick={() => {
+                          const gallery = referencePreviewItems(referenceImages);
+                          props.setPreviewImage({ ...gallery[index], gallery, index });
+                        }}
                         aria-label={`预览参考图 ${image.name}`}
                       >
                         <img className="reference-preview" src={image.previewSrc} alt={`参考图 ${index + 1}: ${image.name}`} />
@@ -1243,12 +1268,15 @@ export function GeneratePage(props: {
             </div>
             {resultImages.length > 0 ? (
               <div className="generate-preview-grid">
-                {resultImages.map((image) => (
+                {resultImages.map((image, index) => (
                   <figure className="generate-preview-card" key={image.filename}>
                     <button
                       className={ratioClassName(ratio)}
                       type="button"
-                      onClick={() => props.setPreviewImage({ src: image.fullSrc || image.src, meta: image.fullMeta || image.meta, filename: image.filename, ratio: image.width && image.height ? `${image.width}:${image.height}` : ratio })}
+                      onClick={() => {
+                        const gallery = generatedPreviewItems(resultImages, ratio);
+                        props.setPreviewImage({ ...gallery[index], gallery, index });
+                      }}
                     >
                       <img src={image.src} alt={image.meta} />
                     </button>
@@ -1326,12 +1354,10 @@ export function GeneratePage(props: {
                         className={`generate-history-thumb ${item.images.length === 1 ? ratioClassName(item.ratio || item.size) : ""}`}
                         type="button"
                         key={image.filename}
-                        onClick={() => props.setPreviewImage({
-                          src: image.url,
-                          meta: `${image.mimeType}${image.width && image.height ? ` · ${image.width}×${image.height}` : ""} · ${(image.size / 1024).toFixed(1)} KB`,
-                          filename: image.filename,
-                          ratio: image.width && image.height ? `${image.width}:${image.height}` : item.ratio || item.size,
-                        })}
+                        onClick={() => {
+                          const gallery = historyPreviewItems(item);
+                          props.setPreviewImage({ ...gallery[index], gallery, index });
+                        }}
                         aria-label={`预览第 ${index + 1} 张生成图`}
                       >
                         <img src={image.previewUrl || image.url} alt={`${item.prompt} - 第 ${index + 1} 张`} />

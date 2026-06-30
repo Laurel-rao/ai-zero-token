@@ -1,7 +1,7 @@
 import { Copy, Loader2, RotateCcw, Upload, Zap } from "lucide-react";
 import { ChangeEvent } from "react";
 import type { AdminConfig, SupportedEndpoint } from "@/shared/types";
-import type { BusyAction, PreviewImage, ResultTab } from "@/shared/lib/app-types";
+import type { BusyAction, ModalImageItem, PreviewImage, ResultTab } from "@/shared/lib/app-types";
 import type { ModalImage } from "@/hooks/useAdminWorkspace";
 import { endpointOrder, tabLabels } from "@/shared/lib/endpoints";
 import type { EditImageUploadMode } from "../index";
@@ -33,6 +33,12 @@ export function TesterPanel(props: {
   onImageUpload: (file: File, mode: EditImageUploadMode) => Promise<void>;
 }) {
   const isImageEndpoint = props.endpoint.startsWith("/v1/images/");
+  const gallery: ModalImageItem[] = props.previewImages.map((image) => ({
+    src: image.fullSrc || image.src,
+    meta: image.fullMeta || image.meta,
+    filename: image.filename,
+    ratio: image.width && image.height ? `${image.width}:${image.height}` : undefined,
+  }));
   function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
@@ -158,9 +164,9 @@ export function TesterPanel(props: {
                 <div className="preview-empty">图片结果会显示在这里。点击缩略图可查看大图。</div>
               ) : (
                 <div className="preview-grid">
-                  {props.previewImages.map((image) => (
+                  {props.previewImages.map((image, index) => (
                     <figure className="preview-card" key={image.filename}>
-                      <button type="button" onClick={() => props.onPreview({ src: image.fullSrc || image.src, meta: image.fullMeta || image.meta, filename: image.filename, ratio: image.width && image.height ? `${image.width}:${image.height}` : undefined })}>
+                      <button type="button" onClick={() => props.onPreview({ ...gallery[index], gallery, index })}>
                         <img src={image.src} alt={image.meta} />
                       </button>
                       <figcaption>{image.meta}</figcaption>
