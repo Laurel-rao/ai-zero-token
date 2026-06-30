@@ -71,6 +71,7 @@ export type SettingDraft = {
   brandingTitle: string;
   brandingAppIconUrl: string;
   brandingFaviconUrl: string;
+  apiKey: string;
   proxyEnabled: boolean;
   proxyUrl: string;
   proxyNoProxy: string;

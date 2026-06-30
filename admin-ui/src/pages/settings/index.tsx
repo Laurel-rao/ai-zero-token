@@ -3,16 +3,17 @@ import {
   Gauge,
   Globe2,
   ImageIcon,
+  Key,
   KeyRound,
   Layers3,
   Loader2,
   MonitorCog,
   Network,
+  Copy,
   RefreshCw,
   Search,
   ShieldCheck,
   UsersRound,
-  Zap,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
@@ -37,6 +38,7 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     brandingTitle: branding.title,
     brandingAppIconUrl: branding.appIconUrl,
     brandingFaviconUrl: branding.faviconUrl,
+    apiKey: "",
     proxyEnabled: config.settings.networkProxy.enabled,
     proxyUrl: config.settings.networkProxy.url,
     proxyNoProxy: config.settings.networkProxy.noProxy || "localhost,127.0.0.1,::1",
@@ -67,7 +69,7 @@ function profileSearchText(profile: ProfileSummary): string {
   return [profileLabel(profile, true), profile.email || "", profile.accountId, profile.codexAccountId || "", profile.profileId, getPlanType(profile)].join(" ").toLowerCase();
 }
 
-type SettingSectionId = "model" | "branding" | "wecom" | "proxy" | "runtime" | "limits" | "rotation" | "display";
+type SettingSectionId = "model" | "branding" | "api" | "wecom" | "proxy" | "runtime" | "limits" | "rotation" | "display";
 
 type SettingSectionMeta = {
   id: SettingSectionId;
@@ -110,6 +112,7 @@ export function SettingsPage(props: {
     brandingTitle: "AI Zero Token",
     brandingAppIconUrl: "",
     brandingFaviconUrl: "",
+    apiKey: "",
     proxyEnabled: false,
     proxyUrl: "",
     proxyNoProxy: "localhost,127.0.0.1,::1",
@@ -131,7 +134,7 @@ export function SettingsPage(props: {
   });
   const [settingsDirtyFields, setSettingsDirtyFields] = useState<Set<keyof SettingDraft>>(() => new Set());
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
-  const [openSections, setOpenSections] = useState<Set<SettingSectionId>>(() => new Set(["model"]));
+  const [openSections, setOpenSections] = useState<Set<SettingSectionId>>(() => new Set(props.role === "user" ? ["api"] : ["model"]));
   const settingsDirty = settingsDirtyFields.size > 0;
 
   useEffect(() => {
@@ -185,9 +188,13 @@ export function SettingsPage(props: {
   const autoSwitchBlockedCount = Math.max(0, autoSwitchTotalCount - autoSwitchExcludedCount - autoSwitchRuntimeReadyCount);
   const modelCount = props.config?.modelCatalog.modelCount || props.config?.models.length || 0;
   const modelAutoRefresh = props.config?.modelAutoRefresh;
+  const isAdmin = props.role === "admin";
   const wecomConfigured = Boolean(settingsDraft.wecomEnabled && settingsDraft.wecomCorpId.trim() && settingsDraft.wecomAgentId.trim());
   const selectedModel = settingsDraft.defaultModel || props.config?.settings.defaultModel || "-";
   const brandingPreviewIcon = settingsDraft.brandingAppIconUrl || settingsDraft.brandingFaviconUrl;
+  const apiKeyConfigured = Boolean(props.config?.settings.security?.userApiKeyConfigured);
+  const apiKeySource = apiKeyConfigured ? "个人 Key" : "未配置";
+  const globalApiKeySource = props.config?.settings.security?.apiKeySource === "environment" ? "环境变量" : props.config?.settings.security?.apiKeySource === "database" ? "系统配置" : "";
   const modelAutoRefreshStatus = modelAutoRefresh?.running
     ? "自动同步中"
     : modelAutoRefresh?.lastError && (!modelAutoRefresh.lastSuccessAt || (modelAutoRefresh.lastFailureAt ?? 0) > modelAutoRefresh.lastSuccessAt)
@@ -220,6 +227,16 @@ export function SettingsPage(props: {
       status: settingsDraft.brandingTitle || "AI Zero Token",
       statusTone: "info",
       metrics: [brandingPreviewIcon ? "已配置图标" : "使用默认图标"],
+    },
+    {
+      id: "api",
+      title: "API 访问",
+      description: "配置外部 curl 调用网关使用的个人 Bearer Key",
+      icon: Key,
+      tone: "slate",
+      status: apiKeyConfigured ? "已启用" : "未启用",
+      statusTone: apiKeyConfigured ? "success" : "warn",
+      metrics: [apiKeySource, ...(isAdmin && globalApiKeySource ? [`全局 ${globalApiKeySource}`] : [])],
     },
     {
       id: "wecom",
@@ -322,6 +339,29 @@ export function SettingsPage(props: {
 
   async function saveSettings(options?: { restart?: boolean }) {
     const hasDirtyField = (...fields: Array<keyof SettingDraft>) => fields.some((field) => settingsDirtyFields.has(field));
+    if (!isAdmin) {
+      if (!hasDirtyField("apiKey")) {
+        props.setStatus("没有需要保存的个人设置。");
+        return;
+      }
+      props.setBusy("settings");
+      try {
+        const next = await fetchJson<AdminConfig>("/_gateway/admin/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: formatJson({ security: settingsDraft.apiKey.trim() ? { apiKey: settingsDraft.apiKey.trim() } : { clearApiKey: true } }),
+        });
+        props.setConfig(next);
+        setSettingsDirtyFields(new Set());
+        setSettingsDraft((draft) => ({ ...draft, apiKey: "" }));
+        props.setStatus("个人 API Key 已保存。");
+      } catch (error) {
+        props.setStatus(errorMessage(error));
+      } finally {
+        props.setBusy(null);
+      }
+      return;
+    }
     const parseLimit = (value: string, label: string, max = 100_000): number | null => {
       const parsed = Number.parseInt(value || "0", 10);
       if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) {
@@ -392,6 +432,7 @@ export function SettingsPage(props: {
     const payload: {
       defaultModel?: string;
       branding?: { title?: string; appIconUrl?: string; faviconUrl?: string };
+      security?: { apiKey?: string; clearApiKey?: boolean };
       networkProxy?: { enabled: boolean; url: string; noProxy: string };
       autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
       accountRotation?: { enabled?: boolean; strategy?: "round_robin" };
@@ -428,6 +469,9 @@ export function SettingsPage(props: {
       if (hasDirtyField("brandingFaviconUrl")) {
         payload.branding.faviconUrl = settingsDraft.brandingFaviconUrl;
       }
+    }
+    if (hasDirtyField("apiKey")) {
+      payload.security = settingsDraft.apiKey.trim() ? { apiKey: settingsDraft.apiKey.trim() } : { clearApiKey: true };
     }
     if (hasDirtyField("proxyEnabled", "proxyUrl", "proxyNoProxy")) {
       payload.networkProxy = {
@@ -502,6 +546,7 @@ export function SettingsPage(props: {
       });
       props.setConfig(next);
       setSettingsDirtyFields(new Set());
+      setSettingsDraft((draft) => ({ ...draft, apiKey: "" }));
       if (options?.restart) {
         props.setStatus("设置已保存，正在重启本地网关...");
         await fetchJson<{ ok: boolean; restarting?: boolean }>("/_gateway/admin/restart", { method: "POST" });
@@ -554,10 +599,34 @@ export function SettingsPage(props: {
     }
   }
 
+  function generateApiKey() {
+    const bytes = new Uint8Array(32);
+    window.crypto.getRandomValues(bytes);
+    const token = btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/u, "");
+    markSettingsDirty({ apiKey: `sk-${token}` });
+    props.setStatus("已生成新的 API Key，保存设置后生效。");
+  }
+
+  async function copyApiKey() {
+    if (!settingsDraft.apiKey) {
+      props.setStatus("请先生成或输入新的 API Key。");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(settingsDraft.apiKey);
+      props.setStatus("API Key 已复制。保存设置后才会生效。");
+    } catch {
+      props.setStatus("复制失败，请手动选中当前 API Key。");
+    }
+  }
+
   return (
     <section className="settings-page">
       <div className="settings-config-list">
-        <section className={`settings-config-card ${openSections.has("model") ? "is-open" : ""}`}>
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("model") ? "is-open" : ""}`}>
           {renderSectionHeader(settingsSections[0])}
           {openSections.has("model") ? (
             <div className="settings-config-body">
@@ -590,9 +659,9 @@ export function SettingsPage(props: {
               </div>
             </div>
           ) : null}
-        </section>
+        </section> : null}
 
-        <section className={`settings-config-card ${openSections.has("branding") ? "is-open" : ""}`}>
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("branding") ? "is-open" : ""}`}>
           {renderSectionHeader(settingsSections[1])}
           {openSections.has("branding") ? (
             <div className="settings-config-body">
@@ -622,10 +691,44 @@ export function SettingsPage(props: {
               <p className="settings-status-note">支持 SVG、PNG、ICO 或可访问的图片 URL；保存后当前页面标题和图标会立即刷新。</p>
             </div>
           ) : null}
+        </section> : null}
+
+        <section className={`settings-config-card ${openSections.has("api") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[2])}
+          {openSections.has("api") ? (
+            <div className="settings-config-body">
+              <div className="settings-form-grid two-columns">
+                <label className="field">
+                  <span>API Key</span>
+                  <div className="settings-input-with-action">
+                    <input
+                      className="input"
+                      type="text"
+                      value={settingsDraft.apiKey}
+                      onChange={(event) => markSettingsDirty({ apiKey: event.target.value })}
+                      placeholder={apiKeyConfigured ? "留空并保存将清除当前 Key" : "至少 12 位，用于 Authorization: Bearer"}
+                    />
+                    <button className="btn-secondary" type="button" onClick={generateApiKey}>
+                      生成
+                    </button>
+                    <button className="btn-secondary" type="button" onClick={() => void copyApiKey()} disabled={!settingsDraft.apiKey}>
+                      <Copy size={15} />
+                      复制
+                    </button>
+                  </div>
+                </label>
+                <div className="settings-info-box">
+                  <span>当前状态</span>
+                  <strong>{apiKeyConfigured ? "已配置个人 Key" : "未配置个人 Key"}</strong>
+                  <p>保存后可通过 Authorization: Bearer 调用 /v1/images/generations、/v1/chat/completions 等兼容接口；请求日志和生图历史会归入当前用户。</p>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </section>
 
-        <section className={`settings-config-card ${openSections.has("wecom") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[2])}
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("wecom") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[3])}
           {openSections.has("wecom") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">
@@ -651,10 +754,10 @@ export function SettingsPage(props: {
               </div>
             </div>
           ) : null}
-        </section>
+        </section> : null}
 
-        <section className={`settings-config-card ${openSections.has("proxy") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[3])}
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("proxy") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[4])}
           {openSections.has("proxy") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">
@@ -682,10 +785,10 @@ export function SettingsPage(props: {
               </div>
             </div>
           ) : null}
-        </section>
+        </section> : null}
 
-        <section className={`settings-config-card ${openSections.has("runtime") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[4])}
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("runtime") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[5])}
           {openSections.has("runtime") ? (
             <div className="settings-config-body">
               <div className="settings-toggle-grid">
@@ -733,10 +836,10 @@ export function SettingsPage(props: {
               {props.status ? <p className="settings-status-note">{props.status}</p> : null}
             </div>
           ) : null}
-        </section>
+        </section> : null}
 
-        <section className={`settings-config-card ${openSections.has("limits") ? "is-open" : ""}`} id="image-limits">
-          {renderSectionHeader(settingsSections[5])}
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("limits") ? "is-open" : ""}`} id="image-limits">
+          {renderSectionHeader(settingsSections[6])}
           {openSections.has("limits") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">
@@ -763,10 +866,10 @@ export function SettingsPage(props: {
               <p className="settings-status-note">单个数据库用户的覆盖值可在“用户管理”页面直接编辑；留空表示继承这里的全局限额。</p>
             </div>
           ) : null}
-        </section>
+        </section> : null}
 
-        <section className={`settings-config-card ${openSections.has("rotation") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[6])}
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("rotation") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[7])}
           {openSections.has("rotation") ? (
             <div className="settings-config-body">
               <div className="auto-switch-counts" aria-label="自动轮换账号统计">
@@ -812,10 +915,10 @@ export function SettingsPage(props: {
               </div>
             </div>
           ) : null}
-        </section>
+        </section> : null}
 
         <section className={`settings-config-card ${openSections.has("display") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[7])}
+          {renderSectionHeader(settingsSections[8])}
           {openSections.has("display") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">
@@ -833,16 +936,16 @@ export function SettingsPage(props: {
       <div className={`settings-save-bar ${settingsDirty ? "is-dirty" : ""}`}>
         <div>
           <strong>{settingsDirty ? "有未保存的设置" : "设置已同步"}</strong>
-          <span>{settingsDirty ? "保存后才会写入网关配置。" : "展开配置卡片可继续调整策略。"}</span>
+          <span>{settingsDirty ? (isAdmin ? "保存后才会写入网关配置。" : "保存后会更新你的个人 API Key。") : "展开配置卡片可继续调整策略。"}</span>
         </div>
         <button className="btn-secondary" type="button" onClick={() => void saveSettings()} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty}>
           {props.busy === "settings" ? <Loader2 className="spin" size={16} /> : null}
-          保存设置
+          {isAdmin ? "保存设置" : "保存个人 Key"}
         </button>
-        <button className="btn-primary" type="button" onClick={() => void saveSettings({ restart: true })} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty || !props.config?.restartSupported}>
+        {isAdmin ? <button className="btn-primary" type="button" onClick={() => void saveSettings({ restart: true })} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty || !props.config?.restartSupported}>
           {props.busy === "restart" ? <Loader2 className="spin" size={16} /> : null}
           保存并重启网关
-        </button>
+        </button> : null}
       </div>
     </section>
   );

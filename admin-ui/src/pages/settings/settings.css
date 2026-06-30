@@ -418,6 +418,19 @@
   gap: 10px;
 }
 
+.settings-input-with-action {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-input-with-action .btn-secondary {
+  min-height: 42px;
+  padding: 0 14px;
+}
+
 .settings-save-bar {
   position: sticky;
   z-index: 6;

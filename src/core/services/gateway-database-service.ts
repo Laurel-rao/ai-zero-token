@@ -76,6 +76,18 @@ export type GenerationLimitUsage = {
 export type ChatMessageRole = "user" | "assistant";
 export type ChatMessageStatus = "success" | "running" | "failed";
 
+export type ChatAttachmentKind = "image" | "text";
+
+export type ChatAttachment = {
+  id: string;
+  kind: ChatAttachmentKind;
+  name: string;
+  mimeType: string;
+  size: number;
+  dataUrl?: string;
+  text?: string;
+};
+
 export type ChatConversation = {
   id: string;
   owner?: string;
@@ -93,6 +105,7 @@ export type ChatMessage = {
   owner?: string;
   role: ChatMessageRole;
   content: string;
+  attachments: ChatAttachment[];
   status: ChatMessageStatus;
   model?: string;
   error?: string;
@@ -120,6 +133,7 @@ type SaveChatMessageParams = {
   status?: ChatMessageStatus;
   model?: string;
   error?: string;
+  attachments?: ChatAttachment[];
   metadata?: Record<string, unknown>;
   createdAt?: number;
 };
@@ -186,6 +200,7 @@ export type GatewayUser = {
   username: string;
   displayName?: string;
   role: GatewayUserRole;
+  apiKeyConfigured?: boolean;
   groupId?: string;
   groupName?: string;
   groupSortOrder: number;
@@ -200,6 +215,7 @@ export type GatewayUser = {
 
 export type GatewayUserRecord = GatewayUser & {
   passwordHash: string;
+  apiKeyHash?: string;
 };
 
 export type SaveGatewayUserParams = {
@@ -330,6 +346,51 @@ function chatPreview(value: string): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
+function parseChatAttachments(metadata: Record<string, unknown> | undefined): ChatAttachment[] {
+  const raw = metadata?.attachments;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const kind = record.kind === "image" || record.kind === "text" ? record.kind : null;
+      const id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : "";
+      const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : "";
+      const mimeType = typeof record.mimeType === "string" && record.mimeType.trim() ? record.mimeType.trim() : "application/octet-stream";
+      const size = typeof record.size === "number" && Number.isFinite(record.size) ? record.size : 0;
+      if (!kind || !id || !name) {
+        return null;
+      }
+      return {
+        id,
+        kind,
+        name,
+        mimeType,
+        size,
+        dataUrl: typeof record.dataUrl === "string" && record.dataUrl ? record.dataUrl : undefined,
+        text: typeof record.text === "string" ? record.text : undefined,
+      } satisfies ChatAttachment;
+    })
+    .filter(Boolean) as ChatAttachment[];
+}
+
+function mergeChatMetadata(metadata: Record<string, unknown> | undefined, attachments: ChatAttachment[] | undefined): Record<string, unknown> | undefined {
+  if (typeof attachments === "undefined") {
+    return metadata;
+  }
+  const next: Record<string, unknown> = metadata ? { ...metadata } : {};
+  if (attachments.length > 0) {
+    next.attachments = attachments;
+  } else {
+    delete next.attachments;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 function calculateWaitDurationMs(createdAt: number, startedAt: number | undefined, status: string, now: number): number {
   if (!Number.isFinite(createdAt)) {
     return 0;
@@ -371,6 +432,7 @@ export class GatewayDatabaseService {
         username TEXT NOT NULL UNIQUE,
         display_name TEXT,
         password_hash TEXT NOT NULL,
+        api_key_hash TEXT,
         role TEXT NOT NULL,
         group_id TEXT,
         created_at INTEGER NOT NULL,
@@ -443,6 +505,7 @@ export class GatewayDatabaseService {
     this.addColumnIfMissing("request_logs", "owner", "TEXT");
     this.addColumnIfMissing("gateway_users", "group_id", "TEXT");
     this.addColumnIfMissing("gateway_users", "display_name", "TEXT");
+    this.addColumnIfMissing("gateway_users", "api_key_hash", "TEXT");
     this.addColumnIfMissing("gateway_user_groups", "per_user_daily", "INTEGER");
     this.addColumnIfMissing("gateway_user_groups", "per_user_hourly", "INTEGER");
     this.addColumnIfMissing("gateway_user_groups", "min_interval_seconds", "INTEGER");
@@ -484,7 +547,7 @@ export class GatewayDatabaseService {
     await this.init();
     const row = this.database
       .prepare(`
-        SELECT id, username, password_hash AS passwordHash, role, created_at AS createdAt,
+        SELECT id, username, password_hash AS passwordHash, api_key_hash AS apiKeyHash, role, created_at AS createdAt,
                updated_at AS updatedAt, disabled, group_id AS groupId, display_name AS displayName
         FROM gateway_users
         WHERE username = ?
@@ -497,7 +560,7 @@ export class GatewayDatabaseService {
     await this.init();
     const row = this.database
       .prepare(`
-        SELECT u.id, u.username, u.password_hash AS passwordHash, u.role, u.created_at AS createdAt,
+        SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
                u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
                g.name AS groupName, g.sort_order AS groupSortOrder,
                g.image_limits_disabled AS groupImageLimitsDisabled,
@@ -512,11 +575,49 @@ export class GatewayDatabaseService {
     return row ? this.mapUserRecord(row) : null;
   }
 
+  async getUserByApiKeyHash(apiKeyHash: string): Promise<GatewayUserRecord | null> {
+    await this.init();
+    const row = this.database
+      .prepare(`
+        SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
+               u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
+               g.name AS groupName, g.sort_order AS groupSortOrder,
+               g.image_limits_disabled AS groupImageLimitsDisabled,
+               g.per_user_daily AS groupPerUserDaily,
+               g.per_user_hourly AS groupPerUserHourly,
+               g.min_interval_seconds AS groupMinIntervalSeconds
+        FROM gateway_users u
+        LEFT JOIN gateway_user_groups g ON g.id = u.group_id
+        WHERE u.api_key_hash = ?
+          AND u.disabled = 0
+        LIMIT 1
+      `)
+      .get(apiKeyHash) as Record<string, unknown> | undefined;
+    return row ? this.mapUserRecord(row) : null;
+  }
+
+  async setUserApiKey(username: string, apiKeyHash: string | null): Promise<GatewayUser | null> {
+    await this.init();
+    const now = Date.now();
+    const result = this.database
+      .prepare("UPDATE gateway_users SET api_key_hash = ?, updated_at = ? WHERE username = ? AND disabled = 0")
+      .run(apiKeyHash?.trim() || null, now, username);
+    if (result.changes <= 0) {
+      return null;
+    }
+    const updated = await this.getUserByUsername(username);
+    if (!updated) {
+      return null;
+    }
+    const { passwordHash: _passwordHash, apiKeyHash: _apiKeyHash, ...user } = updated;
+    return user;
+  }
+
   async listUsers(): Promise<GatewayUser[]> {
     await this.init();
     const rows = this.database
       .prepare(`
-        SELECT u.id, u.username, u.password_hash AS passwordHash, u.role, u.created_at AS createdAt,
+        SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
                u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
                g.name AS groupName, g.sort_order AS groupSortOrder,
                g.image_limits_disabled AS groupImageLimitsDisabled,
@@ -529,7 +630,7 @@ export class GatewayDatabaseService {
       `)
       .all() as Array<Record<string, unknown>>;
     return rows.map((row) => {
-      const { passwordHash: _passwordHash, ...user } = this.mapUserRecord(row);
+      const { passwordHash: _passwordHash, apiKeyHash: _apiKeyHash, ...user } = this.mapUserRecord(row);
       return user;
     });
   }
@@ -548,7 +649,7 @@ export class GatewayDatabaseService {
     if (!created) {
       throw new Error("用户创建失败。");
     }
-    const { passwordHash: _passwordHash, ...user } = created;
+    const { passwordHash: _passwordHash, apiKeyHash: _apiKeyHash, ...user } = created;
     return user;
   }
 
@@ -559,7 +660,7 @@ export class GatewayDatabaseService {
     await this.init();
     const current = this.database
       .prepare(`
-        SELECT id, username, password_hash AS passwordHash, role, created_at AS createdAt,
+        SELECT id, username, password_hash AS passwordHash, api_key_hash AS apiKeyHash, role, created_at AS createdAt,
                updated_at AS updatedAt, disabled, group_id AS groupId, display_name AS displayName
         FROM gateway_users
         WHERE id = ?
@@ -582,7 +683,7 @@ export class GatewayDatabaseService {
       );
     const updated = this.database
       .prepare(`
-        SELECT u.id, u.username, u.password_hash AS passwordHash, u.role, u.created_at AS createdAt,
+        SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
                u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
                g.name AS groupName, g.sort_order AS groupSortOrder,
                g.image_limits_disabled AS groupImageLimitsDisabled,
@@ -597,7 +698,7 @@ export class GatewayDatabaseService {
     if (!updated) {
       return null;
     }
-    const { passwordHash: _passwordHash, ...user } = this.mapUserRecord(updated);
+    const { passwordHash: _passwordHash, apiKeyHash: _apiKeyHash, ...user } = this.mapUserRecord(updated);
     return user;
   }
 
@@ -854,6 +955,50 @@ export class GatewayDatabaseService {
     }));
   }
 
+  async getGenerationHistoryItem(id: string, owner?: string): Promise<GenerationHistoryItem | null> {
+    await this.init();
+    this.deleteCoveredRunningGenerations(owner);
+    const row = this.database
+      .prepare(`
+        SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
+               prompt, ratio, size, quality, output_format AS outputFormat, duration_ms AS durationMs,
+               request_json AS requestJson, response_summary_json AS responseSummaryJson, error,
+               reference_images_json AS referenceImagesJson, images_json AS imagesJson
+        FROM generation_history
+        WHERE id = ?
+          AND (? IS NULL OR owner = ?)
+        LIMIT 1
+      `)
+      .get(id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
+    if (!row) {
+      return null;
+    }
+    const now = Date.now();
+    return {
+      id: String(row.id),
+      owner: typeof row.owner === "string" ? row.owner : undefined,
+      createdAt: Number(row.createdAt),
+      startedAt: typeof row.startedAt === "number" ? row.startedAt : undefined,
+      updatedAt: Number(row.updatedAt),
+      status: row.status === "queued" || row.status === "running" || row.status === "failed" ? row.status : "success",
+      endpoint: String(row.endpoint),
+      account: String(row.account),
+      model: String(row.model),
+      prompt: String(row.prompt),
+      ratio: typeof row.ratio === "string" ? row.ratio : undefined,
+      size: typeof row.size === "string" ? row.size : undefined,
+      quality: typeof row.quality === "string" ? row.quality : undefined,
+      outputFormat: typeof row.outputFormat === "string" ? row.outputFormat : undefined,
+      durationMs: Number(row.durationMs),
+      waitDurationMs: calculateWaitDurationMs(Number(row.createdAt), typeof row.startedAt === "number" ? row.startedAt : undefined, String(row.status), now),
+      request: parseJsonObject(row.requestJson) ?? {},
+      responseSummary: parseJsonObject(row.responseSummaryJson),
+      error: typeof row.error === "string" ? row.error : undefined,
+      referenceImages: parseJsonArray<GenerationReferenceAsset>(row.referenceImagesJson),
+      images: parseJsonArray<GenerationImageAsset>(row.imagesJson),
+    };
+  }
+
   async clearGenerationHistory(owner?: string): Promise<void> {
     await this.init();
     if (!owner) {
@@ -1022,6 +1167,7 @@ export class GatewayDatabaseService {
     const id = params.id ?? crypto.randomUUID();
     const createdAt = params.createdAt ?? now;
     const status = params.status ?? "success";
+    const metadata = mergeChatMetadata(params.metadata, params.attachments);
     this.database
       .prepare(`
         INSERT OR REPLACE INTO chat_messages
@@ -1039,7 +1185,7 @@ export class GatewayDatabaseService {
         params.error ?? null,
         createdAt,
         now,
-        params.metadata ? JSON.stringify(params.metadata) : null,
+        metadata ? JSON.stringify(metadata) : null,
       );
     this.touchChatConversation(params.conversationId, now);
     const message = await this.getChatMessage(id, params.owner);
@@ -1292,6 +1438,8 @@ export class GatewayDatabaseService {
       username: String(row.username),
       displayName: typeof row.displayName === "string" && row.displayName.trim() ? row.displayName.trim() : undefined,
       passwordHash: String(row.passwordHash),
+      apiKeyHash: typeof row.apiKeyHash === "string" && row.apiKeyHash.trim() ? row.apiKeyHash.trim() : undefined,
+      apiKeyConfigured: typeof row.apiKeyHash === "string" && Boolean(row.apiKeyHash.trim()),
       role: row.role === "admin" ? "admin" : "user",
       groupId: typeof row.groupId === "string" ? row.groupId : undefined,
       groupName: typeof row.groupName === "string" ? row.groupName : undefined,
@@ -1323,18 +1471,20 @@ export class GatewayDatabaseService {
   private mapChatMessage(row: Record<string, unknown>): ChatMessage {
     const role = row.role === "assistant" ? "assistant" : "user";
     const status = row.status === "running" || row.status === "failed" ? row.status : "success";
+    const metadata = parseJsonObject(row.metadataJson);
     return {
       id: String(row.id),
       conversationId: String(row.conversationId),
       owner: typeof row.owner === "string" ? row.owner : undefined,
       role,
       content: String(row.content ?? ""),
+      attachments: parseChatAttachments(metadata),
       status,
       model: typeof row.model === "string" ? row.model : undefined,
       error: typeof row.error === "string" ? row.error : undefined,
       createdAt: Number(row.createdAt),
       updatedAt: Number(row.updatedAt),
-      metadata: parseJsonObject(row.metadataJson),
+      metadata,
     };
   }
 

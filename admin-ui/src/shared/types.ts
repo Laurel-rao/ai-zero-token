@@ -60,6 +60,11 @@ export type GatewaySettings = {
     appIconUrl: string;
     faviconUrl: string;
   };
+  security: {
+    apiKeyConfigured: boolean;
+    apiKeySource?: "database" | "environment";
+    userApiKeyConfigured?: boolean;
+  };
   networkProxy: {
     enabled: boolean;
     url: string;

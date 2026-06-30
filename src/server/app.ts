@@ -25,7 +25,7 @@ import {
   type OpenAICodexRemoteLoginSession,
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
-import type { ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
+import type { ChatAttachment, ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
 import { getGenerationAssetsDir } from "../core/store/state-paths.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
@@ -39,6 +39,11 @@ const CODEX_STREAM_DRAIN_AFTER_CLIENT_CLOSE_MS = 30_000;
 const IMAGE_GENERATION_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_ROUTE_BODY_LIMIT_BYTES = 128 * BYTES_PER_MIB;
 const CODEX_COMPACT_BODY_LIMIT_BYTES = 256 * BYTES_PER_MIB;
+const MAX_CHAT_ATTACHMENTS = 8;
+const MAX_CHAT_IMAGE_ATTACHMENT_BYTES = 10 * BYTES_PER_MIB;
+const MAX_CHAT_TEXT_ATTACHMENT_BYTES = 512 * 1024;
+const MAX_CHAT_TEXT_ATTACHMENT_CHARS = 512 * 1024;
+const MAX_CHAT_MESSAGE_CHARS = 100_000;
 const ADMIN_SESSION_COOKIE = "azt_admin_session";
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const WECOM_LOGIN_STATE_COOKIE = "azt_wecom_login_state";
@@ -151,6 +156,21 @@ type AdminSession = {
 
 type WecomLoginChannel = "qr" | "oauth";
 
+type GatewayApiAuth = {
+  owner?: string;
+  source: "database" | "environment";
+};
+
+type GatewayAuthedRequest = FastifyRequest & {
+  gatewayApiAuth?: GatewayApiAuth;
+};
+
+type ResolvedApiKey = {
+  hash: string | null;
+  owner?: string;
+  source?: "database" | "environment";
+};
+
 function hashSecret(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -186,6 +206,40 @@ function secureEqualHash(hash: string | null, value: string | null | undefined):
   const expected = Buffer.from(hash, "hex");
   const actual = Buffer.from(hashSecret(value), "hex");
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+async function resolveApiKeyAuth(ctx: ReturnType<typeof createGatewayContext>, security: SecurityConfig, bearerToken: string | null): Promise<ResolvedApiKey> {
+  if (bearerToken) {
+    const bearerHash = hashSecret(bearerToken);
+    const user = await ctx.gatewayDatabaseService.getUserByApiKeyHash(bearerHash).catch(() => null);
+    if (user) {
+      return {
+        hash: bearerHash,
+        owner: user.username,
+        source: "database",
+      };
+    }
+  }
+  try {
+    const settings = await ctx.configService.getSettings();
+    if (settings.security.apiKeyHash) {
+      return {
+        hash: settings.security.apiKeyHash,
+        source: "database",
+      };
+    }
+    return {
+      hash: security.apiKeyHash,
+      owner: security.adminUser || undefined,
+      source: security.apiKeyHash ? "environment" : undefined,
+    };
+  } catch {
+    return {
+      hash: security.apiKeyHash,
+      owner: security.adminUser || undefined,
+      source: security.apiKeyHash ? "environment" : undefined,
+    };
+  }
 }
 
 function toGatewayImageAssets(
@@ -353,6 +407,12 @@ function isUserGatewayPath(method: string, url: string): boolean {
   if ((method === "GET" || method === "DELETE") && pathOnly === "/_gateway/generations/history") {
     return true;
   }
+  if (method === "GET" && pathOnly.startsWith("/_gateway/generations/history/")) {
+    return true;
+  }
+  if (method === "PUT" && pathOnly === "/_gateway/admin/settings") {
+    return true;
+  }
   if (method === "GET" && pathOnly.startsWith("/_gateway/generations/images/")) {
     return true;
   }
@@ -361,7 +421,10 @@ function isUserGatewayPath(method: string, url: string): boolean {
 
 function isApiPath(url: string): boolean {
   const pathOnly = url.split("?")[0] ?? "/";
-  return pathOnly.startsWith("/v1/") || pathOnly.startsWith("/codex/v1/");
+  return pathOnly.startsWith("/v1/") ||
+    pathOnly.startsWith("/codex/v1/") ||
+    pathOnly.startsWith("/_gateway/generations/history/") ||
+    pathOnly.startsWith("/_gateway/generations/images/");
 }
 
 function acceptsGzip(request: FastifyRequest): boolean {
@@ -602,6 +665,12 @@ const settingsUpdateSchema = z.object({
       faviconUrl: z.string().trim().max(500).optional(),
     })
     .optional(),
+  security: z
+    .object({
+      apiKey: z.string().trim().min(12).max(200).optional(),
+      clearApiKey: z.boolean().optional(),
+    })
+    .optional(),
   networkProxy: z
     .object({
       enabled: z.boolean(),
@@ -754,9 +823,52 @@ const chatConversationPatchSchema = z.object({
   model: z.string().min(1).optional(),
 });
 
+function estimateBase64Bytes(value: string): number {
+  const base64 = value.trim().split(",", 2)[1] ?? "";
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+const chatAttachmentSchema = z
+  .object({
+    id: z.string().trim().min(1).max(120),
+    kind: z.enum(["image", "text"]),
+    name: z.string().trim().min(1).max(220),
+    mimeType: z.string().trim().min(1).max(160),
+    size: z.number().int().min(0).max(MAX_CHAT_IMAGE_ATTACHMENT_BYTES),
+    dataUrl: z.string().optional(),
+    text: z.string().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.kind === "image") {
+      if (!value.mimeType.startsWith("image/")) {
+        ctx.addIssue({ code: "custom", message: "图片附件的 MIME 类型必须是 image/*。" });
+      }
+      if (!value.dataUrl || !/^data:image\/[^;,]+;base64,/i.test(value.dataUrl.trim())) {
+        ctx.addIssue({ code: "custom", message: "图片附件必须提供 base64 data URL。" });
+      }
+      if (value.size > MAX_CHAT_IMAGE_ATTACHMENT_BYTES || (value.dataUrl && estimateBase64Bytes(value.dataUrl) > MAX_CHAT_IMAGE_ATTACHMENT_BYTES)) {
+        ctx.addIssue({ code: "custom", message: "单个图片附件不能超过 10 MiB。" });
+      }
+      return;
+    }
+
+    if (value.size > MAX_CHAT_TEXT_ATTACHMENT_BYTES || (typeof value.text === "string" && Buffer.byteLength(value.text, "utf8") > MAX_CHAT_TEXT_ATTACHMENT_BYTES)) {
+      ctx.addIssue({ code: "custom", message: "单个文本附件不能超过 512 KiB。" });
+    }
+    if (typeof value.text !== "string" || value.text.length === 0) {
+      ctx.addIssue({ code: "custom", message: "文本附件必须提供文件内容。" });
+    } else if (value.text.length > MAX_CHAT_TEXT_ATTACHMENT_CHARS) {
+      ctx.addIssue({ code: "custom", message: "单个文本附件内容不能超过 512 KiB。" });
+    }
+  });
+
 const chatMessageStreamBodySchema = z.object({
-  content: z.string().trim().min(1),
+  content: z.string().trim().max(MAX_CHAT_MESSAGE_CHARS),
   model: z.string().min(1).optional(),
+  attachments: z.array(chatAttachmentSchema).max(MAX_CHAT_ATTACHMENTS).optional(),
+}).refine((value) => value.content.length > 0 || (value.attachments?.length ?? 0) > 0, {
+  message: "消息内容或附件至少需要提供一个。",
 });
 
 const chatMessageRetryStreamBodySchema = z.object({
@@ -1660,6 +1772,58 @@ function createChatCompletionsCodexBody(
   return body;
 }
 
+function buildGatewayChatText(message: ChatMessage): string {
+  const textAttachments = message.attachments.filter((item) => item.kind === "text" && typeof item.text === "string");
+  if (textAttachments.length === 0) {
+    return message.content;
+  }
+
+  const sections = [message.content.trim()].filter(Boolean);
+  for (const attachment of textAttachments) {
+    sections.push([
+      `附件: ${attachment.name}`,
+      `类型: ${attachment.mimeType || "text/plain"}`,
+      `大小: ${attachment.size} bytes`,
+      "",
+      attachment.text ?? "",
+    ].join("\n"));
+  }
+  return sections.join("\n\n---\n\n");
+}
+
+function createGatewayChatContentParts(message: ChatMessage): Array<Record<string, unknown>> {
+  if (message.role === "assistant") {
+    return [
+      {
+        type: "output_text",
+        text: message.content,
+      },
+    ];
+  }
+
+  const parts: Array<Record<string, unknown>> = [];
+  const text = buildGatewayChatText(message).trim();
+  if (text) {
+    parts.push({ type: "input_text", text });
+  }
+
+  const imageAttachments = message.attachments.filter((item) => item.kind === "image" && item.dataUrl);
+  if (!text && imageAttachments.length > 0) {
+    parts.push({ type: "input_text", text: "请根据附件内容回复。" });
+  }
+  for (const attachment of imageAttachments) {
+    parts.push({
+      type: "input_image",
+      image_url: attachment.dataUrl,
+    });
+  }
+
+  if (parts.length === 0) {
+    parts.push({ type: "input_text", text: "" });
+  }
+  return parts;
+}
+
 function createGatewayChatCodexBody(params: {
   model: string;
   messages: ChatMessage[];
@@ -1675,14 +1839,21 @@ function createGatewayChatCodexBody(params: {
     parallel_tool_calls: true,
     input: params.messages.map((message) => ({
       role: message.role,
-      content: [
-        {
-          type: message.role === "assistant" ? "output_text" : "input_text",
-          text: message.content,
-        },
-      ],
+      content: createGatewayChatContentParts(message),
     })),
   };
+}
+
+function chatMessageTitle(content: string, attachments: ChatAttachment[]): string {
+  const text = content.trim().replace(/\s+/g, " ");
+  if (text) {
+    return text.slice(0, 30);
+  }
+  const firstAttachment = attachments[0];
+  if (!firstAttachment) {
+    return "新对话";
+  }
+  return `附件：${firstAttachment.name}`.slice(0, 30);
 }
 
 function writeGatewayChatSse(reply: FastifyReply, event: string, payload: Record<string, unknown>): void {
@@ -2525,6 +2696,10 @@ export function createApp(params?: {
   }
 
   async function getRequestOwner(request: FastifyRequest): Promise<string | undefined> {
+    const apiOwner = (request as GatewayAuthedRequest).gatewayApiAuth?.owner;
+    if (apiOwner) {
+      return apiOwner;
+    }
     return requestOwnerFromSession(await getSessionFromRequest(request));
   }
 
@@ -3026,7 +3201,7 @@ export function createApp(params?: {
     await ensureBootstrapUsers();
     const session = await getSessionFromRequest(request);
 
-    if (isApiPath(request.url)) {
+    if (isApiPath(request.url) && (request.url.split("?")[0]?.startsWith("/_gateway/") ? Boolean(getBearerToken(request)) : true)) {
       const pathOnly = request.url.split("?")[0] ?? "/";
       if (
         isAdminSession(session) ||
@@ -3039,17 +3214,19 @@ export function createApp(params?: {
         return;
       }
 
-      if (!security.apiKeyHash) {
+      const bearerToken = getBearerToken(request);
+      const resolvedApiKey = await resolveApiKeyAuth(ctx, security, bearerToken);
+      if (!resolvedApiKey.hash) {
         reply.code(403);
         return reply.send({
           error: {
             type: "forbidden",
-            message: "API access is disabled. Set AZT_API_KEY to enable OpenAI-compatible endpoints.",
+            message: "API access is disabled. Set API Key in Settings or AZT_API_KEY to enable OpenAI-compatible endpoints.",
           },
         });
       }
 
-      if (!secureEqualHash(security.apiKeyHash, getBearerToken(request))) {
+      if (!secureEqualHash(resolvedApiKey.hash, bearerToken)) {
         reply.code(401);
         reply.header("WWW-Authenticate", "Bearer");
         return reply.send({
@@ -3059,6 +3236,10 @@ export function createApp(params?: {
           },
         });
       }
+      (request as GatewayAuthedRequest).gatewayApiAuth = {
+        owner: resolvedApiKey.owner,
+        source: resolvedApiKey.source ?? "database",
+      };
       return;
     }
 
@@ -3295,6 +3476,7 @@ export function createApp(params?: {
           request: {
             conversationId: params.conversationId,
             promptLength: params.promptLength,
+            attachmentCount: params.contextMessages.reduce((sum, message) => sum + message.attachments.length, 0),
             contextMessageCount: params.contextMessages.length,
           },
           response: {
@@ -3344,6 +3526,7 @@ export function createApp(params?: {
           request: {
             conversationId: params.conversationId,
             promptLength: params.promptLength,
+            attachmentCount: params.contextMessages.reduce((sum, message) => sum + message.attachments.length, 0),
             contextMessageCount: params.contextMessages.length,
           },
           error: {
@@ -3387,12 +3570,13 @@ export function createApp(params?: {
       owner,
       role: "user",
       content: parsed.data.content.trim(),
+      attachments: parsed.data.attachments ?? [],
       status: "success",
       model,
     });
     if (conversation.title === "新对话") {
       await ctx.gatewayDatabaseService.updateChatConversation(id, owner, {
-        title: parsed.data.content.trim().replace(/\s+/g, " ").slice(0, 30),
+        title: chatMessageTitle(parsed.data.content, parsed.data.attachments ?? []),
         model,
       });
     } else if (conversation.model !== model) {
@@ -3490,6 +3674,19 @@ export function createApp(params?: {
     };
   });
 
+  app.get("/_gateway/generations/history/:id", async (request, reply) => {
+    const params = request.params as { id?: string };
+    const session = await getSessionFromRequest(request);
+    const apiOwner = (request as GatewayAuthedRequest).gatewayApiAuth?.owner;
+    const owner = apiOwner || resolveDataOwnerFilter(session);
+    const item = await ctx.gatewayDatabaseService.getGenerationHistoryItem(String(params.id ?? ""), owner);
+    if (!item) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "生图任务不存在。" } };
+    }
+    return { item };
+  });
+
   app.delete("/_gateway/generations/history", async (request) => {
     const parsed = generationHistoryQuerySchema.safeParse(request.query);
     const session = await getSessionFromRequest(request);
@@ -3500,6 +3697,7 @@ export function createApp(params?: {
 
   app.get("/_gateway/generations/images/*", async (request, reply) => {
     const session = await getSessionFromRequest(request);
+    const requestOwner = await getRequestOwner(request);
     const wildcard = (request.params as { "*": string })["*"] ?? "";
     const normalized = path.normalize(wildcard).replace(/^(\.\.(\/|\\|$))+/, "");
     const root = getGenerationAssetsDir();
@@ -3512,7 +3710,7 @@ export function createApp(params?: {
     const generationId = normalized.split(path.sep)[0] || normalized.split("/")[0];
     if (!isAdminSession(session) && generationId) {
       const owner = await ctx.gatewayDatabaseService.getGenerationOwner(generationId);
-      if (!owner || owner !== requestOwnerFromSession(session)) {
+      if (!owner || owner !== requestOwner) {
         reply.code(403);
         return { error: { type: "forbidden", message: "禁止访问该图片。" } };
       }
@@ -3531,7 +3729,7 @@ export function createApp(params?: {
   async function buildAdminConfig(request: FastifyRequest) {
     const session = await getSessionFromRequest(request);
     const isAdmin = isAdminSession(session);
-    const [status, models, modelCatalog, versionStatus, settings, profile, profiles, codexStatus, usage, users] = await Promise.all([
+    const [status, models, modelCatalog, versionStatus, settings, profile, profiles, codexStatus, usage, users, currentUserRecord] = await Promise.all([
       ctx.authService.getStatus(),
       ctx.modelService.listModels(),
       ctx.modelService.getCatalog(),
@@ -3542,6 +3740,7 @@ export function createApp(params?: {
       ctx.authService.getCodexStatus(),
       ctx.usageService.getSummary(),
       session ? ctx.gatewayDatabaseService.listUsers() : Promise.resolve([]),
+      session ? ctx.gatewayDatabaseService.getUserByUsername(session.user) : Promise.resolve(null),
     ]);
     const origin = resolveOrigin(request);
     const visibleUsers = isAdmin ? users : users.filter((item) => item.username === session?.user);
@@ -3549,7 +3748,7 @@ export function createApp(params?: {
     return {
       auth: session ? { user: session.user, role: session.role } : null,
       status,
-      settings: serializeSettings(settings, isAdmin),
+      settings: serializeSettings(settings, isAdmin, Boolean(security.apiKeyHash), Boolean(currentUserRecord?.apiKeyHash)),
       models,
       modelCatalog,
       modelAutoRefresh: ctx.modelService.getAutoRefreshStatus(),

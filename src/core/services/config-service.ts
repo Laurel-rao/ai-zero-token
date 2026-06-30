@@ -224,6 +224,7 @@ export class ConfigService {
   async updateSettings(params: {
     defaultModel?: string;
     branding?: BrandingParams;
+    security?: { apiKeyHash?: string };
     networkProxy?: NetworkProxyParams;
     autoSwitch?: { enabled?: boolean; excludedProfileIds?: string[] };
     accountRotation?: { enabled?: boolean; strategy?: "round_robin" };
@@ -266,6 +267,15 @@ export class ConfigService {
       next = {
         ...next,
         branding: normalizeBranding(params.branding, next.branding),
+      };
+    }
+
+    if (params.security) {
+      next = {
+        ...next,
+        security: {
+          apiKeyHash: params.security.apiKeyHash?.trim() ?? next.security.apiKeyHash,
+        },
       };
     }
 

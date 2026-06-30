@@ -27,7 +27,7 @@ export const routes: NavRoute[] = [
   { id: "settings-groups", label: "用户组管理", icon: UsersRound, parentId: "settings" },
 ];
 
-const userRoutes = new Set<AppRoute>(["chat", "generate", "logs"]);
+const userRoutes = new Set<AppRoute>(["chat", "generate", "logs", "settings"]);
 
 export function normalizeUserRole(role?: string | null): UserRole {
   return role === "user" ? "user" : "admin";

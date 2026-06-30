@@ -48,7 +48,7 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
     docs: "查看 AI-Zero-Token Skill.md，复制 Base URL、下载文档，并按步骤接入本地网关。",
     network: "单页总览 IPv4、IPv6、DNS、WebRTC、常用平台和版本状态。",
     logs: "查看本页快速测试产生的最近请求，包含接口、模型、状态和耗时。",
-    settings: "调整本地网关、默认模型、代理和自动切换策略的桌面设置页。",
+    settings: state.role === "user" ? "管理自己的 API Key，用于外部调用并归入个人历史。" : "调整本地网关、默认模型、代理和自动切换策略的桌面设置页。",
     "settings-users": "管理数据库登录用户，并为具体用户设置生图限额覆盖。",
     "settings-groups": "管理用户组、排队优先级和组级生图限额。",
   };

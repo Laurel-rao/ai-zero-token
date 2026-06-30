@@ -23,6 +23,9 @@ export function createDefaultSettings(): GatewaySettings {
       appIconUrl: "",
       faviconUrl: "",
     },
+    security: {
+      apiKeyHash: "",
+    },
     networkProxy: {
       enabled: false,
       url: "",
@@ -73,6 +76,9 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
     defaultProvider: parsed.defaultProvider ?? defaults.defaultProvider,
     defaultModel: parsed.defaultModel ?? defaults.defaultModel,
     branding: normalizeBranding(parsed.branding, defaults.branding),
+    security: {
+      apiKeyHash: normalizeTrimmedString(parsed.security?.apiKeyHash, defaults.security.apiKeyHash, 128),
+    },
     networkProxy: {
       enabled: parsed.networkProxy?.enabled ?? defaults.networkProxy.enabled,
       url: parsed.networkProxy?.url ?? defaults.networkProxy.url,

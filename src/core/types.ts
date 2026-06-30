@@ -159,6 +159,9 @@ export type GatewaySettings = {
     appIconUrl: string;
     faviconUrl: string;
   };
+  security: {
+    apiKeyHash: string;
+  };
   networkProxy: {
     enabled: boolean;
     url: string;
