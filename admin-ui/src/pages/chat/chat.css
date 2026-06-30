@@ -703,6 +703,33 @@
   background: #fff;
 }
 
+.chat-load-older {
+  justify-self: center;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(99, 91, 255, 0.16);
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: var(--brand);
+  background: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.chat-load-older:hover {
+  border-color: rgba(99, 91, 255, 0.28);
+  background: rgba(99, 91, 255, 0.08);
+}
+
+.chat-load-older:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .chat-message-edit {
   width: min(820px, 100%);
   border: 1px solid rgba(99, 91, 255, 0.18);

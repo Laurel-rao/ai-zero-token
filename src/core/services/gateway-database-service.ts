@@ -116,12 +116,20 @@ export type ChatMessage = {
 
 export type ChatConversationDetail = ChatConversation & {
   messages: ChatMessage[];
+  hasMoreMessages?: boolean;
+  nextBeforeMessageId?: string;
+  loadedMessageCount?: number;
 };
 
 type CreateChatConversationParams = {
   owner?: string;
   title?: string;
   model?: string;
+};
+
+type ChatConversationMessagePageOptions = {
+  messageLimit?: number;
+  beforeMessageId?: string;
 };
 
 type SaveChatMessageParams = {
@@ -261,6 +269,8 @@ type DataUrlPayload = {
 const MAX_REQUEST_LOGS = 5000;
 const MAX_GENERATION_HISTORY = 500;
 const MAX_CHAT_CONVERSATIONS = 500;
+const DEFAULT_CHAT_MESSAGE_PAGE_SIZE = 80;
+const MAX_CHAT_MESSAGE_PAGE_SIZE = 200;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
 
 function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
@@ -515,6 +525,7 @@ export class GatewayDatabaseService {
     this.database.exec(`
       CREATE INDEX IF NOT EXISTS idx_request_logs_owner_time ON request_logs(owner, time DESC);
       CREATE INDEX IF NOT EXISTS idx_generation_history_owner_created_at ON generation_history(owner, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_created_rowid ON chat_messages(conversation_id, created_at DESC, id);
     `);
     this.initialized = true;
   }
@@ -1047,22 +1058,26 @@ export class GatewayDatabaseService {
     const rows = this.database
       .prepare(`
         SELECT c.id, c.owner, c.title, c.model, c.created_at AS createdAt, c.updated_at AS updatedAt,
-               COUNT(m.id) AS messageCount,
+               (
+                 SELECT COUNT(1)
+                 FROM chat_messages count_message
+                 WHERE count_message.conversation_id = c.id
+                   AND (? IS NULL OR count_message.owner = ?)
+               ) AS messageCount,
                (
                  SELECT content
                  FROM chat_messages latest
                  WHERE latest.conversation_id = c.id
-                 ORDER BY latest.created_at DESC
+                   AND (? IS NULL OR latest.owner = ?)
+                 ORDER BY latest.created_at DESC, latest.rowid DESC
                  LIMIT 1
                ) AS lastMessage
         FROM chat_conversations c
-        LEFT JOIN chat_messages m ON m.conversation_id = c.id
         WHERE (? IS NULL OR c.owner = ?)
-        GROUP BY c.id
         ORDER BY c.updated_at DESC
         LIMIT ?
       `)
-      .all(owner ?? null, owner ?? null, clampLimit(limit, MAX_CHAT_CONVERSATIONS)) as Array<Record<string, unknown>>;
+      .all(owner ?? null, owner ?? null, owner ?? null, owner ?? null, owner ?? null, owner ?? null, clampLimit(limit, MAX_CHAT_CONVERSATIONS)) as Array<Record<string, unknown>>;
 
     return rows.map((row) => this.mapChatConversation(row));
   }
@@ -1085,42 +1100,44 @@ export class GatewayDatabaseService {
     return detail;
   }
 
-  async getChatConversation(id: string, owner?: string): Promise<ChatConversationDetail | null> {
+  async getChatConversation(id: string, owner?: string, options?: ChatConversationMessagePageOptions): Promise<ChatConversationDetail | null> {
     await this.init();
     const row = this.database
       .prepare(`
         SELECT c.id, c.owner, c.title, c.model, c.created_at AS createdAt, c.updated_at AS updatedAt,
-               COUNT(m.id) AS messageCount,
+               (
+                 SELECT COUNT(1)
+                 FROM chat_messages count_message
+                 WHERE count_message.conversation_id = c.id
+                   AND (? IS NULL OR count_message.owner = ?)
+               ) AS messageCount,
                (
                  SELECT content
                  FROM chat_messages latest
                  WHERE latest.conversation_id = c.id
-                 ORDER BY latest.created_at DESC
+                   AND (? IS NULL OR latest.owner = ?)
+                 ORDER BY latest.created_at DESC, latest.rowid DESC
                  LIMIT 1
                ) AS lastMessage
         FROM chat_conversations c
-        LEFT JOIN chat_messages m ON m.conversation_id = c.id
         WHERE c.id = ? AND (? IS NULL OR c.owner = ?)
-        GROUP BY c.id
       `)
-      .get(id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
+      .get(owner ?? null, owner ?? null, owner ?? null, owner ?? null, id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
     if (!row) {
       return null;
     }
 
-    const messages = this.database
-      .prepare(`
-        SELECT id, conversation_id AS conversationId, owner, role, content, status, model, error,
-               created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
-        FROM chat_messages
-        WHERE conversation_id = ? AND (? IS NULL OR owner = ?)
-        ORDER BY created_at ASC, rowid ASC
-      `)
-      .all(id, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
+    const page = options?.messageLimit || options?.beforeMessageId
+      ? this.getChatMessagePage(id, owner, options)
+      : this.getAllChatMessages(id, owner);
+    const conversation = this.mapChatConversation(row);
 
     return {
-      ...this.mapChatConversation(row),
-      messages: messages.map((item) => this.mapChatMessage(item)),
+      ...conversation,
+      messages: page.messages,
+      hasMoreMessages: page.hasMoreMessages,
+      nextBeforeMessageId: page.nextBeforeMessageId,
+      loadedMessageCount: page.messages.length,
     };
   }
 
@@ -1516,6 +1533,85 @@ export class GatewayDatabaseService {
       createdAt: Number(row.createdAt),
       updatedAt: Number(row.updatedAt),
       metadata,
+    };
+  }
+
+  private getChatMessagePage(
+    conversationId: string,
+    owner?: string,
+    options?: ChatConversationMessagePageOptions,
+  ): { messages: ChatMessage[]; hasMoreMessages: boolean; nextBeforeMessageId?: string } {
+    const limit = clampLimit(options?.messageLimit ?? DEFAULT_CHAT_MESSAGE_PAGE_SIZE, MAX_CHAT_MESSAGE_PAGE_SIZE);
+    let beforeCreatedAt: number | null = null;
+    let beforeRowid: number | null = null;
+
+    if (options?.beforeMessageId) {
+      const before = this.database
+        .prepare(`
+          SELECT created_at AS createdAt, rowid AS rowid
+          FROM chat_messages
+          WHERE id = ?
+            AND conversation_id = ?
+            AND (? IS NULL OR owner = ?)
+        `)
+        .get(options.beforeMessageId, conversationId, owner ?? null, owner ?? null) as { createdAt?: unknown; rowid?: unknown } | undefined;
+      if (!before) {
+        return { messages: [], hasMoreMessages: false };
+      }
+      beforeCreatedAt = Number(before.createdAt);
+      beforeRowid = Number(before.rowid);
+    }
+
+    const rows = this.database
+      .prepare(`
+        SELECT id, conversation_id AS conversationId, owner, role, content, status, model, error,
+               created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
+        FROM chat_messages
+        WHERE conversation_id = ?
+          AND (? IS NULL OR owner = ?)
+          AND (
+            ? IS NULL
+            OR created_at < ?
+            OR (created_at = ? AND rowid < ?)
+          )
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?
+      `)
+      .all(
+        conversationId,
+        owner ?? null,
+        owner ?? null,
+        beforeCreatedAt,
+        beforeCreatedAt,
+        beforeCreatedAt,
+        beforeRowid,
+        limit + 1,
+      ) as Array<Record<string, unknown>>;
+
+    const hasMoreMessages = rows.length > limit;
+    const pageRows = (hasMoreMessages ? rows.slice(0, limit) : rows).reverse();
+    const messages = pageRows.map((row) => this.mapChatMessage(row));
+    return {
+      messages,
+      hasMoreMessages,
+      nextBeforeMessageId: hasMoreMessages ? messages[0]?.id : undefined,
+    };
+  }
+
+  private getAllChatMessages(conversationId: string, owner?: string): { messages: ChatMessage[]; hasMoreMessages: boolean; nextBeforeMessageId?: string } {
+    const rows = this.database
+      .prepare(`
+        SELECT id, conversation_id AS conversationId, owner, role, content, status, model, error,
+               created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
+        FROM chat_messages
+        WHERE conversation_id = ? AND (? IS NULL OR owner = ?)
+        ORDER BY created_at ASC, rowid ASC
+      `)
+      .all(conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
+    return {
+      messages: rows.map((row) => this.mapChatMessage(row)),
+      hasMoreMessages: false,
+      nextBeforeMessageId: undefined,
     };
   }
 

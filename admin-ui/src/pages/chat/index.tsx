@@ -15,6 +15,9 @@ const COLLAPSED_MESSAGE_HEIGHT = 420;
 const COPY_FEEDBACK_MS = 1400;
 const CHAT_BOTTOM_THRESHOLD = 96;
 const COMPOSER_MAX_HEIGHT = 150;
+const CHAT_HISTORY_LIMIT = 100;
+const CHAT_MESSAGE_PAGE_SIZE = 80;
+const CHAT_DETAIL_CACHE_LIMIT = 8;
 const HTML_PREVIEW_CSP = "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src data: blob:; child-src data: blob:; form-action 'none'; base-uri 'none'";
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "txt",
@@ -79,6 +82,9 @@ type ChatConversation = {
   messageCount: number;
   lastMessagePreview?: string;
   messages?: ChatMessage[];
+  hasMoreMessages?: boolean;
+  nextBeforeMessageId?: string;
+  loadedMessageCount?: number;
 };
 
 type ChatSseEvent = {
@@ -386,19 +392,27 @@ export function ChatPage(props: {
   const [htmlPreviewMaximized, setHtmlPreviewMaximized] = useState(false);
   const [copiedHtmlPreview, setCopiedHtmlPreview] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
+  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const conversationLoadAbortRef = useRef<AbortController | null>(null);
   const copyMessageTimerRef = useRef<number | null>(null);
   const copyHtmlTimerRef = useRef<number | null>(null);
+  const conversationCacheRef = useRef<Map<string, ChatConversation & { messages: ChatMessage[] }>>(new Map());
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const activeIdRef = useRef<string | null>(null);
+  const conversationsRef = useRef<ChatConversation[]>([]);
   const lastScrollTopRef = useRef(0);
   const previewDragRef = useRef<HtmlPreviewDragState | null>(null);
 
   const activeConversation = useMemo(() => conversations.find((item) => item.id === activeId) ?? null, [activeId, conversations]);
+  const activeCachedConversation = activeId ? conversationCacheRef.current.get(activeId) ?? null : null;
+  const canLoadOlderMessages = Boolean((activeCachedConversation ?? activeConversation)?.hasMoreMessages && messages.length > 0);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !sending && props.busy !== "chat";
 
@@ -407,6 +421,14 @@ export function ChatPage(props: {
       setModel(props.config.settings.defaultModel);
     }
   }, [model, props.config?.settings.defaultModel]);
+
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   useEffect(() => {
     void loadConversations();
@@ -504,13 +526,120 @@ export function ChatPage(props: {
     });
   }
 
+  function cacheConversation(item: ChatConversation & { messages: ChatMessage[] }) {
+    const cache = conversationCacheRef.current;
+    cache.delete(item.id);
+    cache.set(item.id, item);
+    while (cache.size > CHAT_DETAIL_CACHE_LIMIT) {
+      const oldest = cache.keys().next().value as string | undefined;
+      if (!oldest) {
+        break;
+      }
+      cache.delete(oldest);
+    }
+  }
+
+  function cacheCurrentConversationSnapshot() {
+    const currentId = activeIdRef.current;
+    if (!currentId || messages.length === 0) {
+      return;
+    }
+    const cached = conversationCacheRef.current.get(currentId);
+    const summary = conversationsRef.current.find((item) => item.id === currentId);
+    if (!cached && !summary) {
+      return;
+    }
+    cacheConversation({
+      ...(cached ?? summary as ChatConversation),
+      id: currentId,
+      messages,
+      hasMoreMessages: cached?.hasMoreMessages ?? summary?.hasMoreMessages,
+      nextBeforeMessageId: cached?.nextBeforeMessageId ?? summary?.nextBeforeMessageId,
+      loadedMessageCount: messages.length,
+    });
+  }
+
+  function forgetConversationCache(id: string) {
+    conversationCacheRef.current.delete(id);
+  }
+
+  function mergeConversationSummary(item: ChatConversation) {
+    setConversations((items) => items.map((entry) => entry.id === item.id ? { ...entry, ...item, messages: undefined } : entry));
+  }
+
+  function updateCachedConversationMessages(conversationId: string | null | undefined, updater: (items: ChatMessage[]) => ChatMessage[]) {
+    if (!conversationId) {
+      return;
+    }
+    const cached = conversationCacheRef.current.get(conversationId);
+    const summary = conversationsRef.current.find((item) => item.id === conversationId);
+    if (!cached && !summary) {
+      return;
+    }
+    const nextMessages = updater(cached?.messages ?? []);
+    cacheConversation({
+      ...(cached ?? summary as ChatConversation),
+      id: conversationId,
+      messages: nextMessages,
+      loadedMessageCount: nextMessages.length,
+    });
+  }
+
+  function updateVisibleConversationMessages(conversationId: string | null | undefined, updater: (items: ChatMessage[]) => ChatMessage[]) {
+    if (!conversationId || activeIdRef.current === conversationId) {
+      setMessages(updater);
+    }
+  }
+
+  function applyMessageStart(
+    items: ChatMessage[],
+    userMessage: ChatMessage | undefined,
+    assistantMessage: ChatMessage | undefined,
+    replacedAfterMessageId: string,
+  ): ChatMessage[] {
+    const replacedIndex = replacedAfterMessageId ? items.findIndex((item) => item.id === replacedAfterMessageId) : -1;
+    const baseItems = replacedIndex >= 0 ? items.slice(0, replacedIndex + 1) : items;
+    const next = baseItems.map((item) => {
+      if (item.id === userMessage?.id) {
+        return userMessage;
+      }
+      if (item.id === assistantMessage?.id) {
+        return assistantMessage;
+      }
+      return item;
+    });
+    const hasAssistant = Boolean(assistantMessage && next.some((item) => item.id === assistantMessage.id));
+    const hasUser = Boolean(userMessage && next.some((item) => item.id === userMessage.id));
+    return [
+      ...next,
+      ...(userMessage && !hasUser ? [userMessage] : []),
+      ...(assistantMessage && !hasAssistant ? [assistantMessage] : []),
+    ];
+  }
+
+  function replaceOrAppendMessage(items: ChatMessage[], message: ChatMessage): ChatMessage[] {
+    return items.some((item) => item.id === message.id)
+      ? items.map((item) => item.id === message.id ? message : item)
+      : [...items, message];
+  }
+
+  function conversationDetailUrl(id: string, params?: { beforeMessageId?: string }) {
+    const search = new URLSearchParams({ messageLimit: String(CHAT_MESSAGE_PAGE_SIZE) });
+    if (params?.beforeMessageId) {
+      search.set("beforeMessageId", params.beforeMessageId);
+    }
+    return `/_gateway/chats/${encodeURIComponent(id)}?${search.toString()}`;
+  }
+
   async function loadConversations(selectId?: string, options?: { loadActive?: boolean }) {
     setLoading(true);
     try {
-      const result = await fetchJson<{ items: ChatConversation[] }>("/_gateway/chats?limit=100");
+      const result = await fetchJson<{ items: ChatConversation[] }>(`/_gateway/chats?limit=${CHAT_HISTORY_LIMIT}`);
       setConversations(result.items);
-      const nextId = selectId ?? activeId ?? null;
-      setActiveId(nextId);
+      const nextId = options?.loadActive === false ? activeIdRef.current : selectId ?? activeIdRef.current ?? null;
+      if (options?.loadActive !== false) {
+        setActiveId(nextId);
+      }
       if (nextId && options?.loadActive !== false) {
         await loadConversation(nextId);
       } else {
@@ -526,17 +655,99 @@ export function ChatPage(props: {
   }
 
   async function loadConversation(id: string) {
+    if (id === activeId && loadingConversationId === id) {
+      return;
+    }
+    if (id !== activeIdRef.current) {
+      cacheCurrentConversationSnapshot();
+    }
+    conversationLoadAbortRef.current?.abort();
+    const controller = new AbortController();
+    conversationLoadAbortRef.current = controller;
+    const cached = conversationCacheRef.current.get(id);
+    if (cached) {
+      shouldStickToBottomRef.current = true;
+      setIsNearBottom(true);
+      setEditingMessage(null);
+      setActiveId(id);
+      setMessages(cached.messages);
+      setModel(cached.model || props.config?.settings.defaultModel || model);
+      setHistoryOpen(false);
+    } else {
+      setActiveId(id);
+      setMessages([]);
+      setEditingMessage(null);
+    }
+    setLoadingConversationId(id);
     try {
-      const result = await fetchJson<{ item: ChatConversation & { messages: ChatMessage[] } }>(`/_gateway/chats/${encodeURIComponent(id)}`);
+      const result = await fetchJson<{ item: ChatConversation & { messages: ChatMessage[] } }>(conversationDetailUrl(id), {
+        signal: controller.signal,
+      });
+      if (conversationLoadAbortRef.current !== controller) {
+        return;
+      }
       shouldStickToBottomRef.current = true;
       setIsNearBottom(true);
       setEditingMessage(null);
       setActiveId(id);
       setMessages(result.item.messages);
+      cacheConversation(result.item);
+      mergeConversationSummary(result.item);
       setModel(result.item.model || props.config?.settings.defaultModel || model);
       setHistoryOpen(false);
     } catch (error) {
-      props.setStatus(`读取对话失败：${errorMessage(error)}`);
+      if ((error as { name?: string }).name !== "AbortError") {
+        props.setStatus(`读取对话失败：${errorMessage(error)}`);
+      }
+    } finally {
+      if (conversationLoadAbortRef.current === controller) {
+        conversationLoadAbortRef.current = null;
+        setLoadingConversationId(null);
+      }
+    }
+  }
+
+  async function loadOlderMessages() {
+    if (!activeId || loadingOlderMessages) {
+      return;
+    }
+    const cached = conversationCacheRef.current.get(activeId);
+    const beforeMessageId = cached?.nextBeforeMessageId ?? messages[0]?.id;
+    if (!beforeMessageId) {
+      return;
+    }
+    const scrollNode = messagesScrollRef.current;
+    const previousScrollHeight = scrollNode?.scrollHeight ?? 0;
+    const previousScrollTop = scrollNode?.scrollTop ?? 0;
+    setLoadingOlderMessages(true);
+    try {
+      const result = await fetchJson<{ item: ChatConversation & { messages: ChatMessage[] } }>(conversationDetailUrl(activeId, { beforeMessageId }));
+      if (activeIdRef.current !== result.item.id) {
+        return;
+      }
+      const existingIds = new Set(messages.map((message) => message.id));
+      const olderMessages = result.item.messages.filter((message) => !existingIds.has(message.id));
+      const nextMessages = [...olderMessages, ...messages];
+      setMessages(nextMessages);
+      const merged: ChatConversation & { messages: ChatMessage[] } = {
+        ...result.item,
+        messages: nextMessages,
+        hasMoreMessages: result.item.hasMoreMessages,
+        nextBeforeMessageId: result.item.nextBeforeMessageId,
+        loadedMessageCount: nextMessages.length,
+      };
+      cacheConversation(merged);
+      mergeConversationSummary(result.item);
+      requestAnimationFrame(() => {
+        if (!scrollNode) {
+          return;
+        }
+        scrollNode.scrollTop = scrollNode.scrollHeight - previousScrollHeight + previousScrollTop;
+      });
+    } catch (error) {
+      props.setStatus(`加载更早消息失败：${errorMessage(error)}`);
+    } finally {
+      setLoadingOlderMessages(false);
     }
   }
 
@@ -761,26 +972,8 @@ export function ChatPage(props: {
       const userMessage = data.userMessage as ChatMessage | undefined;
       const assistantMessage = data.assistantMessage as ChatMessage | undefined;
       const replacedAfterMessageId = typeof data.replacedAfterMessageId === "string" ? data.replacedAfterMessageId : "";
-      setMessages((items) => {
-        const replacedIndex = replacedAfterMessageId ? items.findIndex((item) => item.id === replacedAfterMessageId) : -1;
-        const baseItems = replacedIndex >= 0 ? items.slice(0, replacedIndex + 1) : items;
-        const next = baseItems.map((item) => {
-          if (item.id === userMessage?.id) {
-            return userMessage;
-          }
-          if (item.id === assistantMessage?.id) {
-            return assistantMessage;
-          }
-          return item;
-        });
-        const hasAssistant = Boolean(assistantMessage && next.some((item) => item.id === assistantMessage.id));
-        const hasUser = Boolean(userMessage && next.some((item) => item.id === userMessage.id));
-        return [
-          ...next,
-          ...(userMessage && !hasUser ? [userMessage] : []),
-          ...(assistantMessage && !hasAssistant ? [assistantMessage] : []),
-        ];
-      });
+      updateCachedConversationMessages(conversationId, (items) => applyMessageStart(items, userMessage, assistantMessage, replacedAfterMessageId));
+      updateVisibleConversationMessages(conversationId, (items) => applyMessageStart(items, userMessage, assistantMessage, replacedAfterMessageId));
       return;
     }
     if (event.event === "message_delta") {
@@ -789,13 +982,17 @@ export function ChatPage(props: {
       if (!id || !delta) {
         return;
       }
-      setMessages((items) => items.map((item) => item.id === id ? { ...item, content: `${item.content}${delta}` } : item));
+      const appendDelta = (items: ChatMessage[]) => items.map((item) => item.id === id ? { ...item, content: `${item.content}${delta}` } : item);
+      updateCachedConversationMessages(conversationId, appendDelta);
+      updateVisibleConversationMessages(conversationId, appendDelta);
       return;
     }
     if (event.event === "message_done") {
       const message = data.message as ChatMessage | undefined;
       if (message?.id) {
-        setMessages((items) => items.map((item) => item.id === message.id ? message : item));
+        const replaceDone = (items: ChatMessage[]) => replaceOrAppendMessage(items, message);
+        updateCachedConversationMessages(conversationId, replaceDone);
+        updateVisibleConversationMessages(conversationId, replaceDone);
       }
       void loadConversations(conversationId || undefined, { loadActive: false });
       return;
@@ -804,7 +1001,9 @@ export function ChatPage(props: {
       const message = typeof data.message === "string" ? data.message : "聊天失败。";
       const assistantMessage = data.assistantMessage as ChatMessage | undefined;
       if (assistantMessage?.id) {
-        setMessages((items) => items.map((item) => item.id === assistantMessage.id ? assistantMessage : item));
+        const replaceFailed = (items: ChatMessage[]) => replaceOrAppendMessage(items, assistantMessage);
+        updateCachedConversationMessages(conversationId, replaceFailed);
+        updateVisibleConversationMessages(conversationId, replaceFailed);
       }
       props.setStatus(`聊天失败：${message}`);
     }
@@ -878,7 +1077,9 @@ export function ChatPage(props: {
       abortRef.current = null;
       setSending(false);
       props.setBusy(null);
-      focusComposer();
+      if (activeIdRef.current === targetId) {
+        focusComposer();
+      }
     }
   }
 
@@ -1164,9 +1365,15 @@ export function ChatPage(props: {
             {messages.length === 0 ? (
               <div className="chat-empty">
                 <MessageSquarePlus size={34} />
-                <strong>开始一场新聊天</strong>
-                <span>直接输入问题即可创建聊天。</span>
+                <strong>{loadingConversationId === activeId ? "正在读取聊天..." : "开始一场新聊天"}</strong>
+                <span>{loadingConversationId === activeId ? "历史较多时会先加载最近消息。" : "直接输入问题即可创建聊天。"}</span>
               </div>
+            ) : null}
+            {canLoadOlderMessages ? (
+              <button className="chat-load-older" type="button" onClick={() => void loadOlderMessages()} disabled={loadingOlderMessages}>
+                {loadingOlderMessages ? <Loader2 className="spin" size={14} /> : <ChevronUp size={14} />}
+                {loadingOlderMessages ? "正在加载..." : "加载更早消息"}
+              </button>
             ) : null}
             {messages.map((message) => (
               <div className={`chat-message is-${message.role}`} key={message.id}>

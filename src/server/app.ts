@@ -813,6 +813,11 @@ const chatListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
+const chatDetailQuerySchema = z.object({
+  messageLimit: z.coerce.number().int().min(1).max(200).optional(),
+  beforeMessageId: z.string().min(1).optional(),
+});
+
 const chatConversationBodySchema = z.object({
   title: z.string().max(80).optional(),
   model: z.string().min(1).optional(),
@@ -3399,9 +3404,13 @@ export function createApp(params?: {
   });
 
   app.get("/_gateway/chats/:id", async (request, reply) => {
+    const parsed = chatDetailQuerySchema.safeParse(request.query);
     const id = String((request.params as { id?: string }).id ?? "");
     const owner = await getRequestOwner(request);
-    const item = await ctx.gatewayDatabaseService.getChatConversation(id, owner);
+    const item = await ctx.gatewayDatabaseService.getChatConversation(id, owner, {
+      messageLimit: parsed.success ? parsed.data.messageLimit ?? 80 : 80,
+      beforeMessageId: parsed.success ? parsed.data.beforeMessageId : undefined,
+    });
     if (!item) {
       reply.code(404);
       return { error: { type: "not_found", message: "聊天会话不存在。" } };
