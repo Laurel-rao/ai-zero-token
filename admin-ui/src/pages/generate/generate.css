@@ -828,47 +828,86 @@
   min-width: 0;
 }
 
-.generate-history-card > button {
+.generate-history-thumbs {
   width: min(100%, 320px);
   height: 320px;
   max-width: 100%;
+  position: relative;
+  justify-self: center;
+  display: grid;
+  gap: 6px;
+}
+
+.generate-history-thumbs.is-multiple {
+  width: min(100%, 320px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+.generate-history-thumb {
+  width: 100%;
+  height: 100%;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
+  position: relative;
   display: grid;
   place-items: center;
   color: var(--text-muted);
   background: #f8fafc;
   overflow: hidden;
-  justify-self: center;
+  cursor: zoom-in;
 }
 
-.generate-history-card > button.ratio-square {
+.generate-history-thumb.ratio-square {
   width: 320px;
 }
 
-.generate-history-card > button.ratio-wide {
+.generate-history-thumb.ratio-wide {
   width: 100%;
   height: min(320px, calc((100vw - 96px) * 9 / 16));
   min-height: 180px;
 }
 
-.generate-history-card > button.ratio-tall {
+.generate-history-thumb.ratio-tall {
   width: 180px;
+  justify-self: center;
 }
 
-.generate-history-card > button.ratio-classic {
+.generate-history-thumb.ratio-classic {
   width: min(100%, 426px);
   height: 320px;
 }
 
-.generate-history-card img {
+.generate-history-thumb img {
   width: auto;
   height: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   display: block;
+}
+
+.generate-history-thumb > span,
+.generate-history-more {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.generate-history-thumb.is-empty {
+  cursor: default;
 }
 
 .ratio-square {
@@ -1125,26 +1164,27 @@
     grid-template-rows: auto minmax(0, 1fr) auto;
   }
 
-  .generate-history-card > button {
+  .generate-history-thumbs,
+  .generate-history-thumb {
     max-width: 100%;
   }
 
-  .generate-history-card > button.ratio-square {
+  .generate-history-thumb.ratio-square {
     width: min(100%, 320px);
   }
 
-  .generate-history-card > button.ratio-wide {
+  .generate-history-thumb.ratio-wide {
     height: auto;
     aspect-ratio: 16 / 9;
   }
 
-  .generate-history-card > button.ratio-tall {
+  .generate-history-thumb.ratio-tall {
     width: min(60vw, 220px);
     height: auto;
     aspect-ratio: 9 / 16;
   }
 
-  .generate-history-card > button.ratio-classic {
+  .generate-history-thumb.ratio-classic {
     width: min(100%, 426px);
     height: auto;
     aspect-ratio: 4 / 3;

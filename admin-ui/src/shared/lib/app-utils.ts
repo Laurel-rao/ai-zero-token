@@ -208,25 +208,84 @@ export function buildSeedRequests(config: AdminConfig, showEmails: boolean): Req
   });
 }
 
+function normalizeImageBase64(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  const match = /^data:image\/[^;,]+;base64,(.+)$/i.exec(trimmed);
+  return match?.[1] ?? trimmed;
+}
+
+function collectImageRecords(payload: unknown): Array<Record<string, unknown>> {
+  const records: Array<Record<string, unknown>> = [];
+  const seen = new Set<unknown>();
+  const visit = (value: unknown) => {
+    if (typeof value === "string") {
+      const normalized = normalizeImageBase64(value);
+      if (normalized) {
+        records.push({ b64_json: normalized });
+      }
+      return;
+    }
+
+    if (!value || typeof value !== "object" || seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    const hasImageValue = ["b64_json", "result", "image_base64", "base64", "image_data", "url", "image_url"].some((key) => typeof record[key] === "string");
+    if (hasImageValue) {
+      records.push(record);
+      return;
+    }
+
+    for (const key of ["b64_json", "result", "image_base64", "base64", "image_data", "url", "image_url", "data", "images", "results", "output"]) {
+      if (key in record) {
+        visit(record[key]);
+      }
+    }
+  };
+
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  visit(payload);
+  return records.length > 0 ? records : [payload as Record<string, unknown>];
+}
+
 export function extractPreviewImages(payload: unknown): Array<{ src: string; fullSrc?: string; filename: string; meta: string; fullMeta?: string; width?: number; height?: number }> {
-  if (!payload || typeof payload !== "object" || !("data" in payload) || !Array.isArray((payload as { data?: unknown }).data)) {
+  if (!payload || typeof payload !== "object") {
     return [];
   }
   const imagePayload = payload as {
-    data: Array<Record<string, unknown>>;
     _gateway_images?: unknown;
     output_format?: unknown;
   };
   const gatewayImages = Array.isArray(imagePayload._gateway_images)
     ? (imagePayload._gateway_images as Array<Record<string, unknown>>)
     : [];
-  return (imagePayload.data || [])
+  const records = collectImageRecords(payload);
+  const recordsWithGatewayOnly = records.length > 0 && records.some((item) => {
+    const b64 = normalizeImageBase64(item.b64_json ?? item.result ?? item.image_base64 ?? item.base64 ?? item.image_data);
+    const itemUrl = typeof item.url === "string" ? item.url : typeof item.image_url === "string" ? item.image_url : "";
+    return Boolean(b64 || itemUrl);
+  }) ? records : gatewayImages;
+  return recordsWithGatewayOnly
     .map((item, index) => {
-      const b64 = typeof item.b64_json === "string" ? item.b64_json : "";
+      const b64 = normalizeImageBase64(item.b64_json ?? item.result ?? item.image_base64 ?? item.base64 ?? item.image_data);
+      const itemUrl = typeof item.url === "string" ? item.url : typeof item.image_url === "string" ? item.image_url : "";
       const gatewayImage = gatewayImages[index];
       const fullUrl = typeof gatewayImage?.url === "string" ? gatewayImage.url : "";
       const previewUrl = typeof gatewayImage?.previewUrl === "string" ? gatewayImage.previewUrl : "";
-      if (!b64 && !fullUrl && !previewUrl) {
+      if (!b64 && !itemUrl && !fullUrl && !previewUrl) {
         return null;
       }
       const outputFormat = imagePayload.output_format;
@@ -238,7 +297,7 @@ export function extractPreviewImages(payload: unknown): Array<{ src: string; ful
       const width = typeof gatewayImage?.width === "number" ? gatewayImage.width : undefined;
       const height = typeof gatewayImage?.height === "number" ? gatewayImage.height : undefined;
       const dimension = width && height ? `${width}×${height}` : "";
-      const fallbackDataUrl = b64 ? `data:image/${format};base64,${b64}` : fullUrl;
+      const fallbackDataUrl = b64 ? `data:image/${format};base64,${b64}` : itemUrl || fullUrl;
       return {
         src: previewUrl || fallbackDataUrl,
         fullSrc: fullUrl || fallbackDataUrl,

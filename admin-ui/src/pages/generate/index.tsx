@@ -1317,18 +1317,33 @@ export function GeneratePage(props: {
             <div className="generate-history-grid">
               {filteredHistory.map((item) => {
                 const statusMeta = generateStatusMeta(item.status);
+                const firstImage = item.images[0];
                 return (
                 <article className="generate-history-card" key={item.id}>
-                  <button
-                    className={ratioClassName(item.ratio || item.size)}
-                    type="button"
-                    onClick={() => {
-                      const image = item.images[0];
-                      props.setPreviewImage(image ? { src: image.url, meta: `${image.mimeType}${image.width && image.height ? ` · ${image.width}×${image.height}` : ""} · ${(image.size / 1024).toFixed(1)} KB`, filename: image.filename, ratio: image.width && image.height ? `${image.width}:${image.height}` : item.ratio || item.size } : null);
-                    }}
-                  >
-                    {item.images[0] ? <img src={item.images[0].previewUrl || item.images[0].url} alt={item.prompt} /> : <ImagePlus size={28} />}
-                  </button>
+                  <div className={`generate-history-thumbs ${item.images.length > 1 ? "is-multiple" : ""}`}>
+                    {item.images.length > 0 ? item.images.slice(0, 4).map((image, index) => (
+                      <button
+                        className={`generate-history-thumb ${item.images.length === 1 ? ratioClassName(item.ratio || item.size) : ""}`}
+                        type="button"
+                        key={image.filename}
+                        onClick={() => props.setPreviewImage({
+                          src: image.url,
+                          meta: `${image.mimeType}${image.width && image.height ? ` · ${image.width}×${image.height}` : ""} · ${(image.size / 1024).toFixed(1)} KB`,
+                          filename: image.filename,
+                          ratio: image.width && image.height ? `${image.width}:${image.height}` : item.ratio || item.size,
+                        })}
+                        aria-label={`预览第 ${index + 1} 张生成图`}
+                      >
+                        <img src={image.previewUrl || image.url} alt={`${item.prompt} - 第 ${index + 1} 张`} />
+                        {item.images.length > 1 ? <span>{index + 1}</span> : null}
+                      </button>
+                    )) : (
+                      <div className="generate-history-thumb is-empty">
+                        <ImagePlus size={28} />
+                      </div>
+                    )}
+                    {item.images.length > 4 ? <span className="generate-history-more">+{item.images.length - 4}</span> : null}
+                  </div>
                   <div>
                     <div className="generate-history-title-row">
                       <span className={`generate-status ${statusMeta.className}`}>
@@ -1339,18 +1354,18 @@ export function GeneratePage(props: {
                       </strong>
                     </div>
                     <span>
-                      {formatFullTime(item.createdAt)} · {item.images[0]?.width && item.images[0]?.height ? `${item.images[0].width}×${item.images[0].height}` : item.ratio || item.size} · {item.referenceImages.length > 0 ? `参考图 ${item.referenceImages.length}` : "纯文本"} · {formatDuration(item.durationMs)}
+                      {formatFullTime(item.createdAt)} · {firstImage?.width && firstImage?.height ? `${firstImage.width}×${firstImage.height}` : item.ratio || item.size} · {item.images.length > 0 ? `生成图 ${item.images.length}` : "无生成图"} · {item.referenceImages.length > 0 ? `参考图 ${item.referenceImages.length}` : "纯文本"} · {formatDuration(item.durationMs)}
                       {item.waitDurationMs && item.waitDurationMs > 0 ? ` · 等待 ${formatDuration(item.waitDurationMs)}` : ""}
                       {props.role === "admin" ? ` · 用户 ${userDisplayName(props.config, item.owner)}` : ""}
-                      {item.images[0]?.previewSize ? ` · 预览 ${(item.images[0].previewSize / 1024).toFixed(0)} KB` : ""}
+                      {firstImage?.previewSize ? ` · 预览 ${(firstImage.previewSize / 1024).toFixed(0)} KB` : ""}
                     </span>
                     {item.error ? <span className="generate-history-error">{item.error}</span> : null}
                   </div>
                   <div className="generate-history-card-actions">
-                    {item.images[0] ? (
+                    {firstImage ? (
                       <button className="btn-secondary" type="button" onClick={() => editFromHistory(item)} disabled={props.busy === "test"}>
                         <Pencil size={15} />
-                        编辑
+                        编辑首张
                       </button>
                     ) : null}
                     <button className="btn-secondary" type="button" onClick={() => reuseHistory(item)}>
@@ -1360,11 +1375,11 @@ export function GeneratePage(props: {
                       <Copy size={15} />
                       {copiedPromptId === item.id ? "已复制" : "复制提示词"}
                     </button>
-                    {item.images[0] ? (
-                      <a className="btn-secondary" href={item.images[0].url} download={item.images[0].filename}>
-                        下载
+                    {item.images.map((image, index) => (
+                      <a className="btn-secondary" href={image.url} download={image.filename} key={image.filename}>
+                        {item.images.length > 1 ? `下载 ${index + 1}` : "下载"}
                       </a>
-                    ) : null}
+                    ))}
                   </div>
                 </article>
               );

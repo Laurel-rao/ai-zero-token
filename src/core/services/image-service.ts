@@ -55,8 +55,8 @@ type ImageResult = {
 type ImageGenerationOutput = {
   id?: string;
   type?: string;
-  result?: string;
-  partial_image_b64?: string;
+  result?: unknown;
+  partial_image_b64?: unknown;
   revised_prompt?: string;
   background?: string;
   output_format?: string;
@@ -185,6 +185,105 @@ function normalizeReturnedBackground(background: unknown): ImageResult["backgrou
   return undefined;
 }
 
+function normalizeImageBase64(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const dataUrlMatch = /^data:image\/[^;,]+;base64,(.+)$/i.exec(trimmed);
+  const base64 = dataUrlMatch?.[1] ?? trimmed;
+  if (base64.length < 80 || !/^[A-Za-z0-9+/=_-]+$/.test(base64)) {
+    return null;
+  }
+
+  return base64;
+}
+
+function collectImageBase64Values(value: unknown): string[] {
+  const results: string[] = [];
+  const add = (candidate: unknown) => {
+    const base64 = normalizeImageBase64(candidate);
+    if (base64 && !results.includes(base64)) {
+      results.push(base64);
+    }
+  };
+
+  const visit = (candidate: unknown) => {
+    if (typeof candidate === "string") {
+      add(candidate);
+      return;
+    }
+
+    if (Array.isArray(candidate)) {
+      candidate.forEach(visit);
+      return;
+    }
+
+    if (!isRecord(candidate)) {
+      return;
+    }
+
+    for (const key of ["b64_json", "result", "image_base64", "base64", "image_data", "data", "images", "results", "output"]) {
+      if (key in candidate) {
+        visit(candidate[key]);
+      }
+    }
+  };
+
+  visit(value);
+  return results;
+}
+
+function finalImageResults(image: ImageGenerationOutput): string[] {
+  return collectImageBase64Values({
+    result: image.result,
+    b64_json: (image as Record<string, unknown>).b64_json,
+    image_base64: (image as Record<string, unknown>).image_base64,
+    base64: (image as Record<string, unknown>).base64,
+    image_data: (image as Record<string, unknown>).image_data,
+    data: (image as Record<string, unknown>).data,
+    images: (image as Record<string, unknown>).images,
+    results: (image as Record<string, unknown>).results,
+    output: (image as Record<string, unknown>).output,
+  });
+}
+
+function partialImageResults(image: ImageGenerationOutput): string[] {
+  return collectImageBase64Values({
+    partial_image_b64: image.partial_image_b64,
+    partial_images: (image as Record<string, unknown>).partial_images,
+  });
+}
+
+function expandImageOutput(image: ImageGenerationOutput, results: string[], fallbackId: string): ImageGenerationOutput[] {
+  return results.map((result, index) => ({
+    ...image,
+    id: image.id ? `${image.id}${index === 0 ? "" : `:${index + 1}`}` : `${fallbackId}:${index + 1}`,
+    result,
+    partial_image_b64: undefined,
+  }));
+}
+
+function collectExpandedImageOutput(
+  target: Map<string, ImageGenerationOutput>,
+  image: ImageGenerationOutput,
+  fallbackId: string,
+  mode: "final" | "partial",
+): boolean {
+  const results = mode === "final" ? finalImageResults(image) : partialImageResults(image);
+  const expanded = expandImageOutput(image, results, fallbackId);
+  for (let index = 0; index < expanded.length; index += 1) {
+    const item = expanded[index];
+    target.set(item.id ?? `${fallbackId}:${index + 1}`, item);
+  }
+  return expanded.length > 0;
+}
+
 function collectImageGenerationOutputs(raw: unknown): ImageGenerationOutput[] {
   if (!isRecord(raw)) {
     return [];
@@ -196,30 +295,30 @@ function collectImageGenerationOutputs(raw: unknown): ImageGenerationOutput[] {
   const events = Array.isArray(raw.events) ? raw.events : [];
 
   if (response && Array.isArray(response.output)) {
-    for (const output of response.output) {
+    for (let index = 0; index < response.output.length; index += 1) {
+      const output = response.output[index];
       const image = toImageGenerationOutput(output);
-      if (!image || !image.id) {
+      if (!image) {
         continue;
       }
 
-      if (typeof image.result === "string" && image.result.length > 0) {
-        finalItems.set(image.id, image);
-      } else if (typeof image.partial_image_b64 === "string" && image.partial_image_b64.length > 0) {
-        partialItems.set(image.id, image);
+      const fallbackId = `response:${index + 1}`;
+      if (!collectExpandedImageOutput(finalItems, image, fallbackId, "final")) {
+        collectExpandedImageOutput(partialItems, image, fallbackId, "partial");
       }
     }
   }
 
-  for (const event of events) {
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
     const image = toImageGenerationEventOutput(event);
-    if (!image || !image.id) {
+    if (!image) {
       continue;
     }
 
-    if (typeof image.result === "string" && image.result.length > 0) {
-      finalItems.set(image.id, image);
-    } else if (typeof image.partial_image_b64 === "string" && image.partial_image_b64.length > 0) {
-      partialItems.set(image.id, image);
+    const fallbackId = `event:${index + 1}`;
+    if (!collectExpandedImageOutput(finalItems, image, fallbackId, "final")) {
+      collectExpandedImageOutput(partialItems, image, fallbackId, "partial");
     }
   }
 
@@ -229,7 +328,7 @@ function collectImageGenerationOutputs(raw: unknown): ImageGenerationOutput[] {
 
   return Array.from(partialItems.values()).map((item) => ({
     ...item,
-    result: item.partial_image_b64,
+    result: normalizeImageBase64(item.result) ?? normalizeImageBase64(item.partial_image_b64) ?? "",
   }));
 }
 
@@ -834,7 +933,7 @@ export class ImageService {
             ? response.created_at
             : Math.floor(Date.now() / 1000),
         data: images.map((image) => ({
-          b64_json: image.result ?? "",
+          b64_json: normalizeImageBase64(image.result) ?? "",
           ...(image.revised_prompt ? { revised_prompt: image.revised_prompt } : {}),
         })),
         background: normalizeReturnedBackground(first.background),
