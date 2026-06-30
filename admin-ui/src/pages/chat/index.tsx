@@ -430,6 +430,7 @@ export function ChatPage(props: {
   const canLoadOlderMessages = Boolean((activeCachedConversation ?? activeConversation)?.hasMoreMessages && messages.length > 0);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !sending && props.busy !== "chat";
+  const isLoadingActiveConversation = Boolean(activeId && loadingConversationId === activeId);
 
   useEffect(() => {
     if (!model && props.config?.settings.defaultModel) {
@@ -1446,8 +1447,8 @@ export function ChatPage(props: {
             {messages.length === 0 ? (
               <div className="chat-empty">
                 <MessageSquarePlus size={34} />
-                <strong>{loadingConversationId === activeId ? "正在读取聊天..." : "开始一场新聊天"}</strong>
-                <span>{loadingConversationId === activeId ? "历史较多时会先加载最近消息。" : "直接输入问题即可创建聊天。"}</span>
+                <strong>{isLoadingActiveConversation ? "正在读取聊天..." : "欢迎，今天想聊点什么？"}</strong>
+                <span>{isLoadingActiveConversation ? "历史较多时会先加载最近消息。" : "新会话已准备好。"}</span>
               </div>
             ) : null}
             {canLoadOlderMessages ? (
