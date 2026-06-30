@@ -317,6 +317,19 @@ async function readSpreadsheetAsText(file: File): Promise<string> {
   return truncateUtf8Text(sections.join("\n"), MAX_TEXT_ATTACHMENT_BYTES);
 }
 
+function parseChatHttpError(text: string, fallback: string): string {
+  if (!text.trim()) {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(text) as { error?: { message?: unknown }; message?: unknown };
+    const message = typeof parsed.error?.message === "string" ? parsed.error.message : typeof parsed.message === "string" ? parsed.message : "";
+    return message || text;
+  } catch {
+    return text;
+  }
+}
+
 function filesFromClipboardData(clipboardData: ClipboardLike): File[] {
   const itemFiles = Array.from(clipboardData.items ?? [])
     .filter((item) => item.kind === "file")
@@ -1069,13 +1082,14 @@ export function ChatPage(props: {
           skipped.push(`${file.name} 超过 ${formatFileSize(MAX_SPREADSHEET_ATTACHMENT_BYTES)}`);
           continue;
         }
+        const spreadsheetText = await readSpreadsheetAsText(file);
         next.push({
           id,
           kind: "text",
           name: file.name || "workbook.xlsx",
           mimeType: file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          size: file.size,
-          text: await readSpreadsheetAsText(file),
+          size: utf8ByteLength(spreadsheetText),
+          text: spreadsheetText,
         });
         continue;
       }
@@ -1261,7 +1275,7 @@ export function ChatPage(props: {
 
   async function readChatStream(response: Response, conversationId: string) {
     if (!response.ok || !response.body) {
-      throw new Error(await response.text() || `HTTP ${response.status}`);
+      throw new Error(parseChatHttpError(await response.text(), `HTTP ${response.status}`));
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -1301,6 +1315,9 @@ export function ChatPage(props: {
       targetId = created?.id ?? null;
     }
     if (!targetId) {
+      const message = "发送失败：未能创建聊天，请稍后重试。";
+      setAttachmentNotice(message);
+      props.setStatus(message);
       setSending(false);
       props.setBusy(null);
       setInput((value) => value || content);
@@ -1322,7 +1339,9 @@ export function ChatPage(props: {
       props.setStatus("聊天完成。");
     } catch (error) {
       if ((error as { name?: string }).name !== "AbortError") {
-        props.setStatus(`聊天失败：${errorMessage(error)}`);
+        const message = `发送失败：${errorMessage(error)}`;
+        setAttachmentNotice(message);
+        props.setStatus(message);
         setInput((value) => value || content);
         setAttachments((items) => items.length > 0 ? items : sendingAttachments);
       }
