@@ -49,6 +49,16 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "sh",
   "sql",
 ]);
+const IMAGE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  bmp: "image/bmp",
+  svg: "image/svg+xml",
+};
+const SUPPORTED_ATTACHMENT_HINT = "支持常见图片、文本、代码、Markdown、JSON 和 CSV 等小文件";
 
 type ChatAttachment = {
   id: string;
@@ -173,6 +183,17 @@ function isTextAttachment(file: File): boolean {
     file.type === "application/yaml" ||
     file.type === "application/javascript" ||
     TEXT_ATTACHMENT_EXTENSIONS.has(fileExtension(file.name));
+}
+
+function imageMimeTypeForFile(file: File): string | null {
+  if (file.type.startsWith("image/")) {
+    return file.type;
+  }
+  return IMAGE_ATTACHMENT_MIME_BY_EXTENSION[fileExtension(file.name)] ?? null;
+}
+
+function normalizeDataUrlMimeType(dataUrl: string, mimeType: string): string {
+  return dataUrl.replace(/^data:[^,]*;base64,/i, `data:${mimeType};base64,`);
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -396,6 +417,7 @@ export function ChatPage(props: {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [draggingFiles, setDraggingFiles] = useState(false);
+  const [attachmentNotice, setAttachmentNotice] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
@@ -849,6 +871,7 @@ export function ChatPage(props: {
       if (options?.clearInput !== false) {
         setInput("");
         setAttachments([]);
+        setAttachmentNotice("");
       }
       setHistoryOpen(false);
       if (!options?.silent) {
@@ -906,20 +929,24 @@ export function ChatPage(props: {
   async function filesToAttachments(files: File[]): Promise<ChatAttachment[]> {
     const room = MAX_ATTACHMENTS - attachments.length;
     if (room <= 0) {
-      props.setStatus(`一次消息最多携带 ${MAX_ATTACHMENTS} 个附件。`);
+      const message = `一次消息最多携带 ${MAX_ATTACHMENTS} 个附件。`;
+      setAttachmentNotice(message);
+      props.setStatus(message);
       return [];
     }
 
     const selected = files.slice(0, room);
+    let limitMessage = "";
     if (files.length > room) {
-      props.setStatus(`已达到上限，仅添加前 ${room} 个附件。`);
+      limitMessage = `已达到上限，仅添加前 ${room} 个附件。`;
     }
 
     const next: ChatAttachment[] = [];
     const skipped: string[] = [];
     for (const file of selected) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      if (file.type.startsWith("image/")) {
+      const imageMimeType = imageMimeTypeForFile(file);
+      if (imageMimeType) {
         if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
           skipped.push(`${file.name} 超过 ${formatFileSize(MAX_IMAGE_ATTACHMENT_BYTES)}`);
           continue;
@@ -928,9 +955,9 @@ export function ChatPage(props: {
           id,
           kind: "image",
           name: file.name || "clipboard-image.png",
-          mimeType: file.type || "image/png",
+          mimeType: imageMimeType,
           size: file.size,
-          dataUrl: await readFileAsDataUrl(file),
+          dataUrl: normalizeDataUrlMimeType(await readFileAsDataUrl(file), imageMimeType),
         });
         continue;
       }
@@ -951,19 +978,25 @@ export function ChatPage(props: {
         continue;
       }
 
-      skipped.push(`${file.name || "未命名文件"} 暂不支持`);
+      skipped.push(`${file.name || "未命名文件"} 不是当前支持的附件类型`);
     }
 
     if (skipped.length > 0) {
-      props.setStatus(`部分附件未添加：${skipped.slice(0, 3).join("；")}${skipped.length > 3 ? "..." : ""}`);
+      const prefix = next.length > 0 ? "部分附件未添加" : "附件未添加";
+      const message = `${prefix}：${skipped.slice(0, 3).join("；")}${skipped.length > 3 ? "..." : ""}。${SUPPORTED_ATTACHMENT_HINT}。`;
+      setAttachmentNotice(message);
+      props.setStatus(message);
     } else if (next.length > 0) {
-      props.setStatus(`已添加 ${next.length} 个附件。`);
+      const message = limitMessage || `已添加 ${next.length} 个附件。`;
+      setAttachmentNotice(message);
+      props.setStatus(message);
     }
     return next;
   }
 
   async function addFiles(files: File[]) {
     if (files.length === 0) {
+      setAttachmentNotice("没有选择文件。");
       return;
     }
     try {
@@ -972,7 +1005,9 @@ export function ChatPage(props: {
         setAttachments((items) => [...items, ...next]);
       }
     } catch (error) {
-      props.setStatus(`读取附件失败：${errorMessage(error)}`);
+      const message = `读取附件失败：${errorMessage(error)}`;
+      setAttachmentNotice(message);
+      props.setStatus(message);
     } finally {
       focusComposer();
     }
@@ -980,6 +1015,7 @@ export function ChatPage(props: {
 
   function removeAttachment(id: string) {
     setAttachments((items) => items.filter((item) => item.id !== id));
+    setAttachmentNotice("");
   }
 
   async function copyMessage(message: ChatMessage) {
@@ -1121,6 +1157,7 @@ export function ChatPage(props: {
     shouldStickToBottomRef.current = true;
     setInput((value) => value.trim() === content ? "" : value);
     setAttachments([]);
+    setAttachmentNotice("");
     setSending(true);
     props.setBusy("chat");
     props.setStatus(activeId ? "正在等待回复..." : "正在创建聊天...");
@@ -1424,7 +1461,7 @@ export function ChatPage(props: {
           <div className="chat-drop-overlay" aria-live="polite">
             <Paperclip size={22} />
             <strong>松开添加附件</strong>
-            <span>支持图片、文本、代码、JSON 和 CSV 文件</span>
+            <span>{SUPPORTED_ATTACHMENT_HINT}</span>
           </div>
         ) : null}
         <div className="chat-topbar">
@@ -1555,17 +1592,6 @@ export function ChatPage(props: {
         </div>
 
         <div className="chat-composer">
-          <input
-            ref={fileInputRef}
-            className="chat-file-input"
-            type="file"
-            multiple
-            accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.xml,.yaml,.yml,.js,.jsx,.ts,.tsx,.css,.scss,.html,.vue,.svelte,.py,.java,.go,.rs,.php,.rb,.sh,.sql"
-            onChange={(event) => {
-              void addFiles(Array.from(event.target.files ?? []));
-              event.target.value = "";
-            }}
-          />
           <div className="chat-composer-input">
             {attachments.length > 0 ? (
               <div className="chat-attachment-tray" aria-label="待发送附件">
@@ -1591,14 +1617,30 @@ export function ChatPage(props: {
                 ))}
               </div>
             ) : null}
+            {attachmentNotice ? <div className="chat-attachment-notice">{attachmentNotice}</div> : null}
             <div className="chat-composer-row">
-              <button className="chat-attach-button" type="button" onClick={() => fileInputRef.current?.click()} title="添加附件" aria-label="添加附件">
+              <label className="chat-attach-button" title="添加附件" aria-label="添加附件">
                 <Paperclip size={18} />
-              </button>
+                <input
+                  ref={fileInputRef}
+                  className="chat-file-input"
+                  type="file"
+                  multiple
+                  onChange={(event) => {
+                    void addFiles(Array.from(event.target.files ?? []));
+                    event.target.value = "";
+                  }}
+                />
+              </label>
               <textarea
                 ref={composerRef}
                 value={input}
-                onChange={(event) => setInput(event.target.value)}
+                onChange={(event) => {
+                  setInput(event.target.value);
+                  if (attachmentNotice) {
+                    setAttachmentNotice("");
+                  }
+                }}
                 onPaste={handleInputPaste}
                 onCompositionStart={() => {
                   composingRef.current = true;
