@@ -448,7 +448,9 @@
 }
 
 .settings-save-bar.is-dirty {
-  border-color: rgba(99, 91, 255, 0.24);
+  border-color: rgba(99, 91, 255, 0.48);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 247, 255, 0.98));
+  box-shadow: 0 20px 48px rgba(99, 91, 255, 0.2), 0 12px 34px rgba(15, 23, 42, 0.12);
 }
 
 .settings-save-bar > div {
@@ -466,6 +468,18 @@
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.settings-save-primary {
+  min-width: 138px;
+  min-height: 46px;
+  padding: 0 22px;
+  font-weight: 900;
+  box-shadow: 0 12px 24px rgba(99, 91, 255, 0.24);
+}
+
+.settings-save-primary:disabled {
+  box-shadow: none;
 }
 
 .auto-switch-counts {

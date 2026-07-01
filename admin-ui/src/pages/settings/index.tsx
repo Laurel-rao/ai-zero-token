@@ -938,14 +938,10 @@ export function SettingsPage(props: {
           <strong>{settingsDirty ? "有未保存的设置" : "设置已同步"}</strong>
           <span>{settingsDirty ? (isAdmin ? "保存后才会写入网关配置。" : "保存后会更新你的个人 API Key。") : "展开配置卡片可继续调整策略。"}</span>
         </div>
-        <button className="btn-secondary" type="button" onClick={() => void saveSettings()} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty}>
+        <button className="btn-primary settings-save-primary" type="button" onClick={() => void saveSettings()} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty}>
           {props.busy === "settings" ? <Loader2 className="spin" size={16} /> : null}
           {isAdmin ? "保存设置" : "保存个人 Key"}
         </button>
-        {isAdmin ? <button className="btn-primary" type="button" onClick={() => void saveSettings({ restart: true })} disabled={props.busy === "settings" || props.busy === "restart" || !settingsDirty || !props.config?.restartSupported}>
-          {props.busy === "restart" ? <Loader2 className="spin" size={16} /> : null}
-          保存并重启网关
-        </button> : null}
       </div>
     </section>
   );
