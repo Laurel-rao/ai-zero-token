@@ -87,6 +87,7 @@ export type GatewaySettings = {
   };
   image: {
     freeAccountWebGenerationEnabled: boolean;
+    generationTimeoutMs?: number;
     limits?: {
       enabled: boolean;
       perUserDaily: number;

@@ -43,6 +43,7 @@ export type WorkspaceState = {
 const ACTIVE_PROFILE_REFRESH_MS = 15 * 1000;
 const REQUEST_LOGS_REFRESH_MS = 5 * 1000;
 const SHOW_EMAILS_STORAGE_KEY = "azt:settings:show-emails";
+const REQUEST_LOG_ROUTES = new Set<AppRoute>(["overview", "logs"]);
 
 function readStoredShowEmails(): boolean {
   try {
@@ -118,21 +119,24 @@ export function useAdminWorkspaceState(auth?: { currentUser?: string | null; rol
 
   useEffect(() => {
     refreshConfig().catch(() => undefined);
-    refreshRequestLogs().catch(() => undefined);
     const timer = window.setInterval(() => {
       refreshConfig({ silent: true }).catch(() => undefined);
     }, 60_000);
     return () => window.clearInterval(timer);
-  }, [refreshConfig, refreshRequestLogs]);
+  }, [refreshConfig]);
 
   useEffect(() => {
+    if (!REQUEST_LOG_ROUTES.has(activeRoute)) {
+      return undefined;
+    }
+    refreshRequestLogs().catch(() => undefined);
     const timer = window.setInterval(() => {
       if (!document.hidden) {
         refreshRequestLogs().catch(() => undefined);
       }
     }, REQUEST_LOGS_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [refreshRequestLogs]);
+  }, [activeRoute, refreshRequestLogs]);
 
   useEffect(() => {
     try {

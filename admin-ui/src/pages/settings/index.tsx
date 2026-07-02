@@ -9,10 +9,12 @@ import {
   Loader2,
   MonitorCog,
   Network,
+  Check,
   Copy,
   RefreshCw,
   Search,
   ShieldCheck,
+  Upload,
   UsersRound,
   type LucideIcon,
 } from "lucide-react";
@@ -20,14 +22,18 @@ import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, ProfileSummary } from "@/shared/types";
 import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
-import { errorMessage } from "@/shared/lib/app-utils";
-import { formatDuration, formatFullTime, formatJson } from "@/shared/lib/format";
+import { errorMessage, readFileAsDataUrl } from "@/shared/lib/app-utils";
+import { formatDuration, formatFileSize, formatFullTime, formatJson } from "@/shared/lib/format";
 import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
 import type { UserRole } from "@/routes/routes";
 import { normalizeBranding } from "@/shared/lib/branding";
 
 function countToDraft(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
+}
+
+function timeoutMinutesToDraft(value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(Math.round(value / 60_000)) : "10";
 }
 
 function createSettingsDraft(config: AdminConfig): SettingDraft {
@@ -48,6 +54,7 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     quotaSyncConcurrency: String(config.settings.runtime?.quotaSyncConcurrency || 3),
     accountMaxConcurrency: String(config.settings.runtime?.accountMaxConcurrency || 2),
     freeAccountWebGenerationEnabled: Boolean(config.settings.image?.freeAccountWebGenerationEnabled),
+    imageGenerationTimeoutMinutes: timeoutMinutesToDraft(config.settings.image?.generationTimeoutMs),
     imageLimitsEnabled: Boolean(imageLimits?.enabled),
     imageLimitDaily: countToDraft(imageLimits?.perUserDaily),
     imageLimitHourly: countToDraft(imageLimits?.perUserHourly),
@@ -80,6 +87,19 @@ type SettingSectionMeta = {
   status: string;
   statusTone?: "success" | "info" | "warn" | "muted";
   metrics?: string[];
+};
+
+type BrandingAssetKind = "app-icon" | "favicon";
+
+const MAX_BRANDING_ASSET_BYTES = 512 * 1024;
+
+type BrandingUploadResult = {
+  asset: {
+    url: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+  };
 };
 
 function enabledLabel(value: boolean): string {
@@ -122,6 +142,7 @@ export function SettingsPage(props: {
     quotaSyncConcurrency: "3",
     accountMaxConcurrency: "2",
     freeAccountWebGenerationEnabled: false,
+    imageGenerationTimeoutMinutes: "10",
     imageLimitsEnabled: false,
     imageLimitDaily: "0",
     imageLimitHourly: "0",
@@ -135,6 +156,7 @@ export function SettingsPage(props: {
   const [settingsDirtyFields, setSettingsDirtyFields] = useState<Set<keyof SettingDraft>>(() => new Set());
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
   const [openSections, setOpenSections] = useState<Set<SettingSectionId>>(() => new Set(props.role === "user" ? ["api"] : ["model"]));
+  const [brandingUploadBusy, setBrandingUploadBusy] = useState<BrandingAssetKind | null>(null);
   const settingsDirty = settingsDirtyFields.size > 0;
 
   useEffect(() => {
@@ -276,7 +298,7 @@ export function SettingsPage(props: {
       tone: "orange",
       status: settingsDraft.imageLimitsEnabled ? "已启用" : "未启用",
       statusTone: settingsDraft.imageLimitsEnabled ? "success" : "muted",
-      metrics: [`24h ${limitLabel(settingsDraft.imageLimitDaily)}`, `1h ${limitLabel(settingsDraft.imageLimitHourly)}`],
+      metrics: [`超时 ${settingsDraft.imageGenerationTimeoutMinutes || "10"} 分钟`, `24h ${limitLabel(settingsDraft.imageLimitDaily)}`, `1h ${limitLabel(settingsDraft.imageLimitHourly)}`],
     },
     {
       id: "rotation",
@@ -386,6 +408,14 @@ export function SettingsPage(props: {
     if (imageLimitHourly === null) return;
     const imageLimitMinIntervalSeconds = parseLimit(settingsDraft.imageLimitMinIntervalSeconds, "最小间隔秒数", 86_400);
     if (imageLimitMinIntervalSeconds === null) return;
+    const imageGenerationTimeoutMinutes = Number.parseInt(settingsDraft.imageGenerationTimeoutMinutes, 10);
+    if (
+      hasDirtyField("imageGenerationTimeoutMinutes") &&
+      (!Number.isInteger(imageGenerationTimeoutMinutes) || imageGenerationTimeoutMinutes < 1 || imageGenerationTimeoutMinutes > 30)
+    ) {
+      props.setStatus("图片生成超时时间必须是 1 到 30 分钟之间的整数。");
+      return;
+    }
 
     const imageLimitUserOverrides: Array<{
       username: string;
@@ -439,6 +469,7 @@ export function SettingsPage(props: {
       runtime?: { quotaSyncConcurrency?: number; accountMaxConcurrency?: number };
       image?: {
         freeAccountWebGenerationEnabled?: boolean;
+        generationTimeoutMs?: number;
         limits?: {
           enabled: boolean;
           perUserDaily: number;
@@ -507,6 +538,7 @@ export function SettingsPage(props: {
     if (
       hasDirtyField(
         "freeAccountWebGenerationEnabled",
+        "imageGenerationTimeoutMinutes",
         "imageLimitsEnabled",
         "imageLimitDaily",
         "imageLimitHourly",
@@ -517,6 +549,9 @@ export function SettingsPage(props: {
       payload.image = {};
       if (hasDirtyField("freeAccountWebGenerationEnabled")) {
         payload.image.freeAccountWebGenerationEnabled = settingsDraft.freeAccountWebGenerationEnabled;
+      }
+      if (hasDirtyField("imageGenerationTimeoutMinutes")) {
+        payload.image.generationTimeoutMs = imageGenerationTimeoutMinutes * 60_000;
       }
       if (hasDirtyField("imageLimitsEnabled", "imageLimitDaily", "imageLimitHourly", "imageLimitMinIntervalSeconds", "imageLimitUserOverrides")) {
         payload.image.limits = {
@@ -623,6 +658,74 @@ export function SettingsPage(props: {
     }
   }
 
+  async function uploadBrandingAsset(kind: BrandingAssetKind, file: File | undefined) {
+    if (!file) {
+      return;
+    }
+    const fileName = file.name.toLowerCase();
+    const expectedExtension = kind === "app-icon" ? ".svg" : ".ico";
+    if (!fileName.endsWith(expectedExtension)) {
+      props.setStatus(kind === "app-icon" ? "设置图标只支持上传 SVG 文件。" : "网站 favicon 只支持上传 ICO 文件。");
+      return;
+    }
+    if (file.size > MAX_BRANDING_ASSET_BYTES) {
+      props.setStatus(`上传文件过大，请控制在 ${formatFileSize(MAX_BRANDING_ASSET_BYTES)} 内。`);
+      return;
+    }
+
+    setBrandingUploadBusy(kind);
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const result = await fetchJson<BrandingUploadResult>("/_gateway/admin/branding-assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: formatJson({
+          kind,
+          filename: file.name,
+          dataUrl,
+        }),
+      });
+      if (kind === "app-icon") {
+        markSettingsDirty({ brandingAppIconUrl: result.asset.url });
+      } else {
+        markSettingsDirty({ brandingFaviconUrl: result.asset.url });
+      }
+      props.setStatus(`${file.name} 已上传（${formatFileSize(result.asset.size)}），保存设置后生效。`);
+    } catch (error) {
+      props.setStatus(`上传失败: ${errorMessage(error)}`);
+    } finally {
+      setBrandingUploadBusy(null);
+    }
+  }
+
+  function renderBrandingUploadCard(kind: BrandingAssetKind) {
+    const isAppIcon = kind === "app-icon";
+    const currentUrl = isAppIcon ? settingsDraft.brandingAppIconUrl : settingsDraft.brandingFaviconUrl;
+    const busy = brandingUploadBusy === kind;
+    return (
+      <label className={`settings-brand-upload-card ${busy ? "is-uploading" : ""}`}>
+        <input
+          type="file"
+          accept={isAppIcon ? ".svg,image/svg+xml" : ".ico,image/x-icon,image/vnd.microsoft.icon"}
+          disabled={Boolean(brandingUploadBusy)}
+          onChange={(event) => {
+            void uploadBrandingAsset(kind, event.target.files?.[0]);
+            event.currentTarget.value = "";
+          }}
+        />
+        <span className="settings-brand-upload-action">
+          {busy ? <Loader2 className="spin" size={16} /> : currentUrl ? <Check size={16} /> : <Upload size={16} />}
+          {busy ? "上传中" : isAppIcon ? "上传 SVG" : "上传 ICO"}
+        </span>
+        <span className="settings-brand-upload-copy">
+          <strong>{isAppIcon ? "设置页图标" : "浏览器 favicon"}</strong>
+          <span>{isAppIcon ? "仅支持 .svg 文件，推荐方形透明底。" : "仅支持 .ico 文件，用于浏览器标签页。"}</span>
+          <em>{currentUrl ? currentUrl : "尚未上传"}</em>
+        </span>
+      </label>
+    );
+  }
+
   return (
     <section className="settings-page">
       <div className="settings-config-list">
@@ -665,19 +768,15 @@ export function SettingsPage(props: {
           {renderSectionHeader(settingsSections[1])}
           {openSections.has("branding") ? (
             <div className="settings-config-body">
-              <div className="settings-form-grid three-columns">
+              <div className="settings-form-grid">
                 <label className="field">
                   <span>网站标题</span>
                   <input className="input" value={settingsDraft.brandingTitle} onChange={(event) => markSettingsDirty({ brandingTitle: event.target.value })} placeholder="AI Zero Token" />
                 </label>
-                <label className="field">
-                  <span>设置图标 URL</span>
-                  <input className="input" value={settingsDraft.brandingAppIconUrl} onChange={(event) => markSettingsDirty({ brandingAppIconUrl: event.target.value })} placeholder="https://example.com/logo.svg" />
-                </label>
-                <label className="field">
-                  <span>网站 ico URL</span>
-                  <input className="input" value={settingsDraft.brandingFaviconUrl} onChange={(event) => markSettingsDirty({ brandingFaviconUrl: event.target.value })} placeholder="https://example.com/favicon.ico" />
-                </label>
+                <div className="settings-brand-upload-grid">
+                  {renderBrandingUploadCard("app-icon")}
+                  {renderBrandingUploadCard("favicon")}
+                </div>
               </div>
               <div className="settings-brand-preview">
                 <span className="settings-brand-preview-mark">
@@ -688,7 +787,7 @@ export function SettingsPage(props: {
                   <span>{brandingPreviewIcon || "当前使用默认应用图标"}</span>
                 </div>
               </div>
-              <p className="settings-status-note">支持 SVG、PNG、ICO 或可访问的图片 URL；保存后当前页面标题和图标会立即刷新。</p>
+              <p className="settings-status-note">上传成功后会自动写入资源地址；点击底部“保存设置”后，当前页面标题和图标会立即刷新。</p>
             </div>
           ) : null}
         </section> : null}
@@ -851,6 +950,18 @@ export function SettingsPage(props: {
               </label>
               <div className="settings-form-grid three-columns">
                 <label className="field">
+                  <span>图片生成超时（分钟）</span>
+                  <input
+                    className="input"
+                    inputMode="numeric"
+                    min={1}
+                    max={30}
+                    type="number"
+                    value={settingsDraft.imageGenerationTimeoutMinutes}
+                    onChange={(event) => markSettingsDirty({ imageGenerationTimeoutMinutes: event.target.value })}
+                  />
+                </label>
+                <label className="field">
                   <span>每用户 24 小时上限</span>
                   <input className="input" inputMode="numeric" min={0} type="number" value={settingsDraft.imageLimitDaily} onChange={(event) => markSettingsDirty({ imageLimitDaily: event.target.value })} />
                 </label>
@@ -863,7 +974,7 @@ export function SettingsPage(props: {
                   <input className="input" inputMode="numeric" min={0} max={86400} type="number" value={settingsDraft.imageLimitMinIntervalSeconds} onChange={(event) => markSettingsDirty({ imageLimitMinIntervalSeconds: event.target.value })} />
                 </label>
               </div>
-              <p className="settings-status-note">单个数据库用户的覆盖值可在“用户管理”页面直接编辑；留空表示继承这里的全局限额。</p>
+              <p className="settings-status-note">超时对图片生成和图片编辑请求生效，默认 10 分钟；单个数据库用户的覆盖值可在“用户管理”页面直接编辑，留空表示继承这里的全局限额。</p>
             </div>
           ) : null}
         </section> : null}

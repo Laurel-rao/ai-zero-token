@@ -311,6 +311,98 @@
   line-height: 1.55;
 }
 
+.settings-brand-upload-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-brand-upload-card {
+  min-width: 0;
+  min-height: 112px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  background: #fbfcff;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.settings-brand-upload-card:hover {
+  border-color: rgba(37, 99, 235, 0.34);
+  background: #f8fbff;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.055);
+}
+
+.settings-brand-upload-card:focus-within {
+  border-color: rgba(37, 99, 235, 0.66);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
+.settings-brand-upload-card.is-uploading {
+  cursor: wait;
+  opacity: 0.82;
+}
+
+.settings-brand-upload-card input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.settings-brand-upload-action {
+  min-width: 104px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.settings-brand-upload-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.settings-brand-upload-copy strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.settings-brand-upload-copy span,
+.settings-brand-upload-copy em {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.45;
+}
+
+.settings-brand-upload-copy em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-brand-preview {
   min-width: 0;
   min-height: 74px;
@@ -1259,6 +1351,7 @@
 
   .settings-form-grid.two-columns,
   .settings-form-grid.three-columns,
+  .settings-brand-upload-grid,
   .settings-toggle-grid {
     grid-template-columns: 1fr;
   }

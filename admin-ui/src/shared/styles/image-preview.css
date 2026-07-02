@@ -112,6 +112,9 @@
   display: grid;
   place-items: center;
   will-change: transform;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
 }
 
 .image-preview-stage img {
@@ -123,6 +126,32 @@
   transition: transform 0.16s ease;
   will-change: transform;
   pointer-events: none;
+}
+
+.image-preview-stage img.is-loading-original {
+  opacity: 0;
+}
+
+.image-preview-loading {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 3;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.74);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.2);
+}
+
+.image-preview-loading.is-error {
+  background: rgba(153, 27, 27, 0.82);
 }
 
 .image-preview-stage.is-quarter-turn img {

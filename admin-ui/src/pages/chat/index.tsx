@@ -109,6 +109,11 @@ type ChatSseEvent = {
   data: unknown;
 };
 
+type PendingChatStart = {
+  userMessageId: string;
+  assistantMessageId: string;
+};
+
 type ClipboardLike = {
   items?: DataTransferItemList;
   files?: FileList;
@@ -547,6 +552,7 @@ export function ChatPage(props: {
   const copyMessageTimerRef = useRef<number | null>(null);
   const copyHtmlTimerRef = useRef<number | null>(null);
   const conversationCacheRef = useRef<Map<string, ChatConversation & { messages: ChatMessage[] }>>(new Map());
+  const pendingChatStartRef = useRef<Map<string, PendingChatStart>>(new Map());
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
@@ -809,15 +815,24 @@ export function ChatPage(props: {
     }
   }
 
+  function setActiveConversationId(id: string | null) {
+    activeIdRef.current = id;
+    setActiveId(id);
+  }
+
   function applyMessageStart(
     items: ChatMessage[],
     userMessage: ChatMessage | undefined,
     assistantMessage: ChatMessage | undefined,
     replacedAfterMessageId: string,
+    pendingStart?: PendingChatStart,
   ): ChatMessage[] {
     const replacedIndex = replacedAfterMessageId ? items.findIndex((item) => item.id === replacedAfterMessageId) : -1;
     const baseItems = replacedIndex >= 0 ? items.slice(0, replacedIndex + 1) : items;
-    const next = baseItems.map((item) => {
+    const filteredItems = pendingStart
+      ? baseItems.filter((item) => item.id !== pendingStart.userMessageId && item.id !== pendingStart.assistantMessageId)
+      : baseItems;
+    const next = filteredItems.map((item) => {
       if (item.id === userMessage?.id) {
         return userMessage;
       }
@@ -841,6 +856,21 @@ export function ChatPage(props: {
       : [...items, message];
   }
 
+  function markRunningAssistantFailed(conversationId: string | null | undefined, message: string) {
+    if (!conversationId) {
+      return;
+    }
+    pendingChatStartRef.current.delete(conversationId);
+    const failedAt = Date.now();
+    const markFailed = (items: ChatMessage[]) => items.map((item) => (
+      item.role === "assistant" && item.status === "running"
+        ? { ...item, status: "failed" as const, error: message, updatedAt: failedAt }
+        : item
+    ));
+    updateCachedConversationMessages(conversationId, markFailed);
+    updateVisibleConversationMessages(conversationId, markFailed);
+  }
+
   function conversationDetailUrl(id: string, params?: { beforeMessageId?: string }) {
     const search = new URLSearchParams({ messageLimit: String(CHAT_MESSAGE_PAGE_SIZE) });
     if (params?.beforeMessageId) {
@@ -856,7 +886,7 @@ export function ChatPage(props: {
       setConversations(result.items);
       const nextId = options?.loadActive === false ? activeIdRef.current : selectId ?? activeIdRef.current ?? null;
       if (options?.loadActive !== false) {
-        setActiveId(nextId);
+        setActiveConversationId(nextId);
       }
       if (nextId && options?.loadActive !== false) {
         await loadConversation(nextId);
@@ -887,12 +917,12 @@ export function ChatPage(props: {
       shouldStickToBottomRef.current = true;
       setIsNearBottom(true);
       setEditingMessage(null);
-      setActiveId(id);
+      setActiveConversationId(id);
       setMessages(cached.messages);
       setModel(cached.model || props.config?.settings.defaultModel || model);
       setHistoryOpen(false);
     } else {
-      setActiveId(id);
+      setActiveConversationId(id);
       setMessages([]);
       setEditingMessage(null);
     }
@@ -907,7 +937,7 @@ export function ChatPage(props: {
       shouldStickToBottomRef.current = true;
       setIsNearBottom(true);
       setEditingMessage(null);
-      setActiveId(id);
+      setActiveConversationId(id);
       setMessages(result.item.messages);
       cacheConversation(result.item);
       mergeConversationSummary(result.item);
@@ -978,7 +1008,7 @@ export function ChatPage(props: {
       });
       shouldStickToBottomRef.current = true;
       setConversations((items) => [result.item, ...items.filter((item) => item.id !== result.item.id)]);
-      setActiveId(result.item.id);
+      setActiveConversationId(result.item.id);
       setMessages([]);
       setEditingMessage(null);
       if (options?.clearInput !== false) {
@@ -1028,7 +1058,7 @@ export function ChatPage(props: {
       setConversations(next);
       if (activeId === id) {
         const nextId = next[0]?.id ?? null;
-        setActiveId(nextId);
+        setActiveConversationId(nextId);
         if (nextId) {
           await loadConversation(nextId);
         } else {
@@ -1236,8 +1266,12 @@ export function ChatPage(props: {
       const userMessage = data.userMessage as ChatMessage | undefined;
       const assistantMessage = data.assistantMessage as ChatMessage | undefined;
       const replacedAfterMessageId = typeof data.replacedAfterMessageId === "string" ? data.replacedAfterMessageId : "";
-      updateCachedConversationMessages(conversationId, (items) => applyMessageStart(items, userMessage, assistantMessage, replacedAfterMessageId));
-      updateVisibleConversationMessages(conversationId, (items) => applyMessageStart(items, userMessage, assistantMessage, replacedAfterMessageId));
+      const pendingStart = conversationId ? pendingChatStartRef.current.get(conversationId) : undefined;
+      if (conversationId) {
+        pendingChatStartRef.current.delete(conversationId);
+      }
+      updateCachedConversationMessages(conversationId, (items) => applyMessageStart(items, userMessage, assistantMessage, replacedAfterMessageId, pendingStart));
+      updateVisibleConversationMessages(conversationId, (items) => applyMessageStart(items, userMessage, assistantMessage, replacedAfterMessageId, pendingStart));
       return;
     }
     if (event.event === "message_delta") {
@@ -1324,6 +1358,39 @@ export function ChatPage(props: {
       setAttachments((items) => items.length > 0 ? items : sendingAttachments);
       return;
     }
+    const now = Date.now();
+    const pendingStart: PendingChatStart = {
+      userMessageId: `local-user-${now}`,
+      assistantMessageId: `local-assistant-${now}`,
+    };
+    const optimisticMessages: ChatMessage[] = [
+      {
+        id: pendingStart.userMessageId,
+        conversationId: targetId,
+        role: "user",
+        content,
+        attachments: sendingAttachments,
+        status: "success",
+        model: model || props.config?.settings.defaultModel,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: pendingStart.assistantMessageId,
+        conversationId: targetId,
+        role: "assistant",
+        content: "",
+        attachments: [],
+        status: "running",
+        model: model || props.config?.settings.defaultModel,
+        createdAt: now + 1,
+        updatedAt: now + 1,
+      },
+    ];
+    pendingChatStartRef.current.set(targetId, pendingStart);
+    updateCachedConversationMessages(targetId, (items) => [...items, ...optimisticMessages]);
+    updateVisibleConversationMessages(targetId, (items) => [...items, ...optimisticMessages]);
+    setIsNearBottom(true);
     const controller = new AbortController();
     abortRef.current = controller;
     props.setStatus("正在等待回复...");
@@ -1338,8 +1405,11 @@ export function ChatPage(props: {
       await readChatStream(response, targetId);
       props.setStatus("聊天完成。");
     } catch (error) {
-      if ((error as { name?: string }).name !== "AbortError") {
+      if ((error as { name?: string }).name === "AbortError") {
+        markRunningAssistantFailed(targetId, "已停止当前回复。");
+      } else {
         const message = `发送失败：${errorMessage(error)}`;
+        markRunningAssistantFailed(targetId, message);
         setAttachmentNotice(message);
         props.setStatus(message);
         setInput((value) => value || content);

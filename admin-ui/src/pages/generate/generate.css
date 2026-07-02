@@ -615,6 +615,20 @@
   padding: 0 14px;
 }
 
+.generate-history-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.generate-history-pager span {
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .generate-report-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

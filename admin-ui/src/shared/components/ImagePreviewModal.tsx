@@ -40,6 +40,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
       meta: item.meta,
       filename: item.filename,
       ratio: item.ratio,
+      placeholderSrc: item.placeholderSrc,
     }));
   }, [props.image]);
   const initialIndex = Math.min(Math.max(props.image.index ?? 0, 0), Math.max(gallery.length - 1, 0));
@@ -52,6 +53,12 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   const hasGalleryNavigation = gallery.length > 1;
   const normalizedRotation = ((rotation % 360) + 360) % 360;
   const isQuarterTurn = normalizedRotation === 90 || normalizedRotation === 270;
+  const hasPlaceholder = Boolean(activeImage.placeholderSrc && activeImage.placeholderSrc !== activeImage.src);
+  const [imageLoaded, setImageLoaded] = useState(!hasPlaceholder);
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const placeholderStyle = hasPlaceholder && !imageLoaded
+    ? { backgroundImage: `url("${activeImage.placeholderSrc}")` }
+    : undefined;
 
   const resetView = () => {
     setZoom(1);
@@ -87,7 +94,9 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
 
   useEffect(() => {
     resetView();
-  }, [activeImage.src]);
+    setImageLoaded(!hasPlaceholder);
+    setImageLoadFailed(false);
+  }, [activeImage.src, hasPlaceholder]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -204,14 +213,28 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
             </button>
           </>
         ) : null}
-        <div className="image-preview-pan" style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0)` }}>
+        <div className="image-preview-pan" style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0)`, ...placeholderStyle }}>
           <img
             src={activeImage.src}
             alt={activeImage.filename || "图片预览"}
             draggable={false}
+            className={hasPlaceholder && !imageLoaded ? "is-loading-original" : undefined}
+            decoding="async"
+            onLoad={() => {
+              setImageLoaded(true);
+              setImageLoadFailed(false);
+            }}
+            onError={() => {
+              setImageLoaded(false);
+              setImageLoadFailed(true);
+            }}
             style={{ transform: `rotate(${rotation}deg) scale(${zoom})` }}
           />
         </div>
+        {hasPlaceholder && !imageLoaded && !imageLoadFailed ? (
+          <span className="image-preview-loading">正在加载原图...</span>
+        ) : null}
+        {imageLoadFailed ? <span className="image-preview-loading is-error">原图加载失败，正在显示预览图</span> : null}
       </div>
       <div className="preview-modal-meta">
         <span>{activeImage.meta}</span>

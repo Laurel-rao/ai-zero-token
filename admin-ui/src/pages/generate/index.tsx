@@ -71,6 +71,17 @@ type GenerateHistoryItem = {
   }>;
 };
 
+type GenerateHistoryResponse = {
+  items: GenerateHistoryItem[];
+  page?: number;
+  limit?: number;
+  total?: number;
+  totalPages?: number;
+  hasMore?: boolean;
+};
+
+const GENERATE_HISTORY_PAGE_SIZE = 10;
+
 function referencePreviewItems(images: ReferenceImageState[]): ModalImageItem[] {
   return images.map((image) => ({
     src: image.src,
@@ -82,6 +93,7 @@ function referencePreviewItems(images: ReferenceImageState[]): ModalImageItem[] 
 function generatedPreviewItems(images: PreviewImage[], fallbackRatio: string): ModalImageItem[] {
   return images.map((image) => ({
     src: image.fullSrc || image.src,
+    placeholderSrc: image.fullSrc && image.fullSrc !== image.src ? image.src : undefined,
     meta: image.fullMeta || image.meta,
     filename: image.filename,
     ratio: image.width && image.height ? `${image.width}:${image.height}` : fallbackRatio,
@@ -91,6 +103,7 @@ function generatedPreviewItems(images: PreviewImage[], fallbackRatio: string): M
 function historyPreviewItems(item: GenerateHistoryItem): ModalImageItem[] {
   return item.images.map((image) => ({
     src: image.url,
+    placeholderSrc: image.previewUrl && image.previewUrl !== image.url ? image.previewUrl : undefined,
     meta: `${image.mimeType}${image.width && image.height ? ` · ${image.width}×${image.height}` : ""} · ${(image.size / 1024).toFixed(1)} KB`,
     filename: image.filename,
     ratio: image.width && image.height ? `${image.width}:${image.height}` : item.ratio || item.size,
@@ -559,6 +572,9 @@ export function GeneratePage(props: {
   const [responseBody, setResponseBody] = useState("生成结果会显示在这里。");
   const [history, setHistory] = useState<GenerateHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyTotalPages, setHistoryTotalPages] = useState(1);
   const [historyPromptQuery, setHistoryPromptQuery] = useState("");
   const [historyStartTime, setHistoryStartTime] = useState("");
   const [historyEndTime, setHistoryEndTime] = useState("");
@@ -603,6 +619,8 @@ export function GeneratePage(props: {
     });
   }, [history, historyEndTime, historyPromptQuery, historyStartTime]);
   const reportStats = useMemo(() => buildGenerateReportStats(filteredHistory), [filteredHistory]);
+  const canGoPreviousHistoryPage = historyPage > 1 && !historyLoading;
+  const canGoNextHistoryPage = historyPage < historyTotalPages && !historyLoading;
   const historyOwnerOptions = useMemo(() => {
     const names = new Set<string>();
     if (props.currentUser) {
@@ -645,7 +663,10 @@ export function GeneratePage(props: {
         <>
           <label className="field">
             <span>用户范围</span>
-            <select className="control" value={historyOwnerFilter} onChange={(event) => setHistoryOwnerFilter(event.target.value)}>
+            <select className="control" value={historyOwnerFilter} onChange={(event) => {
+              setHistoryOwnerFilter(event.target.value);
+              setHistoryPage(1);
+            }}>
               <option value="">我的数据</option>
               <option value="all">全部用户</option>
               {historyOwnerOptions.map((owner) => (
@@ -666,10 +687,14 @@ export function GeneratePage(props: {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     setHistoryOwnerFilter(historyCustomOwner.trim());
+                    setHistoryPage(1);
                   }
                 }}
               />
-              <button className="history-owner-apply" type="button" onClick={() => setHistoryOwnerFilter(historyCustomOwner.trim())}>
+              <button className="history-owner-apply" type="button" onClick={() => {
+                setHistoryOwnerFilter(historyCustomOwner.trim());
+                setHistoryPage(1);
+              }}>
                 查看
               </button>
             </div>
@@ -688,6 +713,28 @@ export function GeneratePage(props: {
       >
         <RotateCcw size={16} />
         重置
+      </button>
+    </div>
+  );
+
+  const renderHistoryPager = () => (
+    <div className="generate-history-pager" aria-label="生图历史分页">
+      <button
+        className="btn-secondary"
+        type="button"
+        onClick={() => setHistoryPage((value) => Math.max(1, value - 1))}
+        disabled={!canGoPreviousHistoryPage}
+      >
+        上一页
+      </button>
+      <span>第 {historyPage} / {historyTotalPages} 页 · 每页 {GENERATE_HISTORY_PAGE_SIZE} 条 · 共 {historyTotal} 条</span>
+      <button
+        className="btn-secondary"
+        type="button"
+        onClick={() => setHistoryPage((value) => Math.min(historyTotalPages, value + 1))}
+        disabled={!canGoNextHistoryPage}
+      >
+        下一页
       </button>
     </div>
   );
@@ -765,12 +812,22 @@ export function GeneratePage(props: {
       setHistoryLoading(true);
     }
     try {
-      const params = new URLSearchParams({ limit: "100", light: "true" });
+      const params = new URLSearchParams({
+        limit: String(GENERATE_HISTORY_PAGE_SIZE),
+        page: String(historyPage),
+        light: "true",
+      });
       if (props.role === "admin" && historyOwnerFilter) {
         params.set("owner", historyOwnerFilter);
       }
-      const next = await fetchJson<{ items: GenerateHistoryItem[] }>(`/_gateway/generations/history?${params.toString()}`);
+      const next = await fetchJson<GenerateHistoryResponse>(`/_gateway/generations/history?${params.toString()}`);
       setHistory(next.items);
+      setHistoryTotal(next.total ?? next.items.length);
+      const nextTotalPages = next.totalPages ?? Math.max(1, Math.ceil((next.total ?? next.items.length) / GENERATE_HISTORY_PAGE_SIZE));
+      setHistoryTotalPages(nextTotalPages);
+      if (historyPage > nextTotalPages) {
+        setHistoryPage(nextTotalPages);
+      }
     } catch (error) {
       if (!options?.silent) {
         props.setStatus(`读取生图历史失败：${errorMessage(error)}`);
@@ -784,7 +841,7 @@ export function GeneratePage(props: {
 
   useEffect(() => {
     refreshHistory({ silent: true }).catch(() => undefined);
-  }, [historyOwnerFilter]);
+  }, [historyOwnerFilter, historyPage]);
 
   useEffect(() => {
     if (!generationStartedAt || props.busy !== "test") {
@@ -1208,7 +1265,7 @@ export function GeneratePage(props: {
                         }}
                         aria-label={`预览参考图 ${image.name}`}
                       >
-                        <img className="reference-preview" src={image.previewSrc} alt={`参考图 ${index + 1}: ${image.name}`} />
+                        <img className="reference-preview" src={image.previewSrc} alt={`参考图 ${index + 1}: ${image.name}`} loading="lazy" decoding="async" />
                       </button>
                       <figcaption>
                         <strong title={image.name}>{image.name}</strong>
@@ -1278,7 +1335,7 @@ export function GeneratePage(props: {
                         props.setPreviewImage({ ...gallery[index], gallery, index });
                       }}
                     >
-                      <img src={image.src} alt={image.meta} />
+                      <img src={image.src} alt={image.meta} loading="lazy" decoding="async" />
                     </button>
                     <figcaption>{image.meta}</figcaption>
                     <a href={image.fullSrc || image.src} download={image.filename}>
@@ -1330,13 +1387,14 @@ export function GeneratePage(props: {
       ) : tab === "history" ? (
         <div className="generate-history">
           <div className="generate-history-actions">
-            <span>{historyLoading ? "正在读取服务端历史..." : `显示 ${filteredHistory.length} / ${history.length} 条服务器记录。`}</span>
+            <span>{historyLoading ? "正在读取服务端历史..." : `当前页显示 ${filteredHistory.length} / ${history.length} 条，服务器共 ${historyTotal} 条。`}</span>
             <button className="btn-secondary" type="button" onClick={() => refreshHistory()} disabled={historyLoading}>
               <RotateCcw size={16} />
               刷新
             </button>
           </div>
           {renderHistoryFilters()}
+          {renderHistoryPager()}
           {history.length === 0 ? (
             <div className="empty-state">暂无生图历史。</div>
           ) : filteredHistory.length === 0 ? (
@@ -1360,7 +1418,7 @@ export function GeneratePage(props: {
                         }}
                         aria-label={`预览第 ${index + 1} 张生成图`}
                       >
-                        <img src={image.previewUrl || image.url} alt={`${item.prompt} - 第 ${index + 1} 张`} />
+                        <img src={image.previewUrl || image.url} alt={`${item.prompt} - 第 ${index + 1} 张`} loading="lazy" decoding="async" />
                         {item.images.length > 1 ? <span>{index + 1}</span> : null}
                       </button>
                     )) : (
@@ -1412,17 +1470,19 @@ export function GeneratePage(props: {
               })}
             </div>
           )}
+          {renderHistoryPager()}
         </div>
       ) : (
         <div className="generate-report">
           <div className="generate-history-actions">
-            <span>{historyLoading ? "正在读取服务端历史..." : `统计 ${filteredHistory.length} / ${history.length} 条服务器记录。`}</span>
+            <span>{historyLoading ? "正在读取服务端历史..." : `统计当前页 ${filteredHistory.length} / ${history.length} 条，服务器共 ${historyTotal} 条。`}</span>
             <button className="btn-secondary" type="button" onClick={() => refreshHistory()} disabled={historyLoading}>
               <RotateCcw size={16} />
               刷新
             </button>
           </div>
           {renderHistoryFilters()}
+          {renderHistoryPager()}
           <div className="generate-report-summary">
             <div className="generate-report-stat">
               <span>总次数</span>

@@ -64,7 +64,7 @@ export type TrendWindow = 60 | 180 | 720;
 
 export type PreviewImage = { src: string; fullSrc?: string; filename: string; meta: string; fullMeta?: string; width?: number; height?: number };
 
-export type ModalImageItem = { src: string; meta: string; filename?: string; ratio?: string };
+export type ModalImageItem = { src: string; meta: string; filename?: string; ratio?: string; placeholderSrc?: string };
 
 export type ModalImage = ModalImageItem & { gallery?: ModalImageItem[]; index?: number };
 
@@ -83,6 +83,7 @@ export type SettingDraft = {
   quotaSyncConcurrency: string;
   accountMaxConcurrency: string;
   freeAccountWebGenerationEnabled: boolean;
+  imageGenerationTimeoutMinutes: string;
   imageLimitsEnabled: boolean;
   imageLimitDaily: string;
   imageLimitHourly: string;
