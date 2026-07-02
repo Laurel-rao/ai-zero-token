@@ -1,0 +1,91 @@
+name: ${COMPOSE_PROJECT_NAME:-ai-zero-token}
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE_NAME:-ai-zero-token:local}
+    container_name: ${CONTAINER_NAME:-ai-zero-token}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      AI_ZERO_TOKEN_HOME: /data
+      AZT_DATABASE_URL: ${AZT_DATABASE_URL:-postgresql://${POSTGRES_USER:-azt}:${POSTGRES_PASSWORD:-change-me-please}@postgres:5432/${POSTGRES_DB:-ai_zero_token}}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-azt}:${POSTGRES_PASSWORD:-change-me-please}@postgres:5432/${POSTGRES_DB:-ai_zero_token}}
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-ai_zero_token}
+      PGUSER: ${POSTGRES_USER:-azt}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me-please}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      AZT_REDIS_URL: ${AZT_REDIS_URL:-redis://redis:6379/0}
+      AZT_REDIS_KEY_PREFIX: ${AZT_REDIS_KEY_PREFIX:-azt}
+      AZT_REDIS_COMMAND_TIMEOUT_MS: ${AZT_REDIS_COMMAND_TIMEOUT_MS:-5000}
+      AZT_REDIS_THROTTLE_SLOT_TTL_MS: ${AZT_REDIS_THROTTLE_SLOT_TTL_MS:-600000}
+      AZT_REDIS_THROTTLE_POLL_MS: ${AZT_REDIS_THROTTLE_POLL_MS:-250}
+      AZT_DB_POOL_MAX: ${AZT_DB_POOL_MAX:-20}
+      AZT_ADMIN_USER: ${AZT_ADMIN_USER:-admin}
+      AZT_ADMIN_PASSWORD: ${AZT_ADMIN_PASSWORD:-}
+      AZT_API_KEY: ${AZT_API_KEY:-}
+      AZT_SESSION_SECRET: ${AZT_SESSION_SECRET:-change-me}
+      AZT_CORS_ORIGIN: ${AZT_CORS_ORIGIN:-*}
+      AZT_BODY_LIMIT_MB: ${AZT_BODY_LIMIT_MB:-128}
+      AZT_ACCOUNT_MAX_CONCURRENCY: ${AZT_ACCOUNT_MAX_CONCURRENCY:-4}
+      AZT_CODEX_REQUEST_SERIALIZATION_ENABLED: ${AZT_CODEX_REQUEST_SERIALIZATION_ENABLED:-1}
+      AZT_CODEX_REQUEST_MIN_DELAY_MS: ${AZT_CODEX_REQUEST_MIN_DELAY_MS:-0}
+      AZT_CODEX_REQUEST_JITTER_MS: ${AZT_CODEX_REQUEST_JITTER_MS:-0}
+    ports:
+      - "${HOST_PORT:-80}:8787"
+    volumes:
+      - ${AI_ZERO_TOKEN_STATE_DIR:-./state}:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:8787/_gateway/auth/status').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    container_name: ${POSTGRES_CONTAINER_NAME:-ai-zero-token-postgres}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_zero_token}
+      POSTGRES_USER: ${POSTGRES_USER:-azt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-please}
+    ports:
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - ${POSTGRES_DATA_DIR:-./state/postgres}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: ${REDIS_CONTAINER_NAME:-ai-zero-token-redis}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - ${REDIS_DATA_DIR:-./state/redis}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s

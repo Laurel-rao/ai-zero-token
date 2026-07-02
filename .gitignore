@@ -1,6 +1,8 @@
 .DS_Store
 .npmrc
 .state/
+state/
+tmp/
 dist/
 admin-ui/dist/
 release/
