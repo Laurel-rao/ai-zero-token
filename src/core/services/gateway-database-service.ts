@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import sharp from "sharp";
-import { getDatabasePath, getGenerationAssetsDir, getStateDir } from "../store/state-paths.js";
+import { getGatewaySqlDatabase, type GatewaySqlDatabase } from "../store/gateway-sql-database.js";
+import { getGenerationAssetsDir, getStateDir } from "../store/state-paths.js";
 
 export type PersistedRequestLog = {
   id: string;
@@ -274,6 +274,9 @@ const MAX_CHAT_MESSAGE_PAGE_SIZE = 200;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
 
 function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
   if (typeof value !== "string" || !value) {
     return undefined;
   }
@@ -286,6 +289,9 @@ function parseJsonObject(value: unknown): Record<string, unknown> | undefined {
 }
 
 function parseJsonArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) {
+    return value as T[];
+  }
   if (typeof value !== "string" || !value) {
     return [];
   }
@@ -415,7 +421,6 @@ function calculateWaitDurationMs(createdAt: number, startedAt: number | undefine
 }
 
 export class GatewayDatabaseService {
-  private db: DatabaseSync | null = null;
   private initialized = false;
 
   async init(): Promise<void> {
@@ -424,7 +429,7 @@ export class GatewayDatabaseService {
     }
     await fs.mkdir(getStateDir(), { recursive: true });
     await fs.mkdir(getGenerationAssetsDir(), { recursive: true });
-    this.database.exec(`
+    await this.database.exec(`
       CREATE TABLE IF NOT EXISTS gateway_user_groups (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -512,20 +517,20 @@ export class GatewayDatabaseService {
       );
       CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_created_at ON chat_messages(conversation_id, created_at ASC);
     `);
-    this.addColumnIfMissing("request_logs", "owner", "TEXT");
-    this.addColumnIfMissing("gateway_users", "group_id", "TEXT");
-    this.addColumnIfMissing("gateway_users", "display_name", "TEXT");
-    this.addColumnIfMissing("gateway_users", "api_key_hash", "TEXT");
-    this.addColumnIfMissing("gateway_user_groups", "per_user_daily", "INTEGER");
-    this.addColumnIfMissing("gateway_user_groups", "per_user_hourly", "INTEGER");
-    this.addColumnIfMissing("gateway_user_groups", "min_interval_seconds", "INTEGER");
-    this.addColumnIfMissing("generation_history", "owner", "TEXT");
-    this.addColumnIfMissing("generation_history", "started_at", "INTEGER");
-    this.ensureDefaultUserGroups();
-    this.database.exec(`
+    await this.addColumnIfMissing("request_logs", "owner", "TEXT");
+    await this.addColumnIfMissing("gateway_users", "group_id", "TEXT");
+    await this.addColumnIfMissing("gateway_users", "display_name", "TEXT");
+    await this.addColumnIfMissing("gateway_users", "api_key_hash", "TEXT");
+    await this.addColumnIfMissing("gateway_user_groups", "per_user_daily", "INTEGER");
+    await this.addColumnIfMissing("gateway_user_groups", "per_user_hourly", "INTEGER");
+    await this.addColumnIfMissing("gateway_user_groups", "min_interval_seconds", "INTEGER");
+    await this.addColumnIfMissing("generation_history", "owner", "TEXT");
+    await this.addColumnIfMissing("generation_history", "started_at", "INTEGER");
+    await this.ensureDefaultUserGroups();
+    await this.database.exec(`
       CREATE INDEX IF NOT EXISTS idx_request_logs_owner_time ON request_logs(owner, time DESC);
       CREATE INDEX IF NOT EXISTS idx_generation_history_owner_created_at ON generation_history(owner, created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_created_rowid ON chat_messages(conversation_id, created_at DESC, id);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation_created_id ON chat_messages(conversation_id, created_at DESC, id);
     `);
     this.initialized = true;
   }
@@ -535,42 +540,35 @@ export class GatewayDatabaseService {
     const now = Date.now();
     const existing = await this.getUserByUsername(username);
     if (existing) {
-      this.database
-        .prepare("UPDATE gateway_users SET password_hash = ?, role = 'admin', group_id = COALESCE(group_id, ?), disabled = 0, updated_at = ? WHERE id = ?")
-        .run(passwordHash, DEFAULT_USER_GROUP_ID, now, existing.id);
+      await this.database.run("UPDATE gateway_users SET password_hash = ?, role = 'admin', group_id = COALESCE(group_id, ?), disabled = 0, updated_at = ? WHERE id = ?", passwordHash, DEFAULT_USER_GROUP_ID, now, existing.id);
       return;
     }
-    this.database
-      .prepare(`
+    await this.database.run(`
         INSERT INTO gateway_users (id, username, display_name, password_hash, role, group_id, created_at, updated_at, disabled)
         VALUES (?, ?, NULL, ?, 'admin', ?, ?, ?, 0)
-      `)
-      .run(crypto.randomUUID(), username, passwordHash, DEFAULT_USER_GROUP_ID, now, now);
+      `, crypto.randomUUID(), username, passwordHash, DEFAULT_USER_GROUP_ID, now, now);
   }
 
   async hasUsers(): Promise<boolean> {
     await this.init();
-    const row = this.database.prepare("SELECT COUNT(1) AS count FROM gateway_users").get() as { count?: unknown };
-    return Number(row.count ?? 0) > 0;
+    const row = await this.database.get<{ count?: unknown }>("SELECT COUNT(1) AS count FROM gateway_users");
+    return Number(row?.count ?? 0) > 0;
   }
 
   async getUserByUsername(username: string): Promise<GatewayUserRecord | null> {
     await this.init();
-    const row = this.database
-      .prepare(`
+    const row = await this.database.get(`
         SELECT id, username, password_hash AS passwordHash, api_key_hash AS apiKeyHash, role, created_at AS createdAt,
                updated_at AS updatedAt, disabled, group_id AS groupId, display_name AS displayName
         FROM gateway_users
         WHERE username = ?
-      `)
-      .get(username) as Record<string, unknown> | undefined;
+      `, username);
     return row ? this.mapUserRecord(row) : null;
   }
 
   async getUserWithGroupByUsername(username: string): Promise<GatewayUserRecord | null> {
     await this.init();
-    const row = this.database
-      .prepare(`
+    const row = await this.database.get(`
         SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
                u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
                g.name AS groupName, g.sort_order AS groupSortOrder,
@@ -581,15 +579,13 @@ export class GatewayDatabaseService {
         FROM gateway_users u
         LEFT JOIN gateway_user_groups g ON g.id = u.group_id
         WHERE u.username = ?
-      `)
-      .get(username) as Record<string, unknown> | undefined;
+      `, username) as Record<string, unknown> | undefined;
     return row ? this.mapUserRecord(row) : null;
   }
 
   async getUserByApiKeyHash(apiKeyHash: string): Promise<GatewayUserRecord | null> {
     await this.init();
-    const row = this.database
-      .prepare(`
+    const row = await this.database.get(`
         SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
                u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
                g.name AS groupName, g.sort_order AS groupSortOrder,
@@ -602,17 +598,14 @@ export class GatewayDatabaseService {
         WHERE u.api_key_hash = ?
           AND u.disabled = 0
         LIMIT 1
-      `)
-      .get(apiKeyHash) as Record<string, unknown> | undefined;
+      `, apiKeyHash) as Record<string, unknown> | undefined;
     return row ? this.mapUserRecord(row) : null;
   }
 
   async setUserApiKey(username: string, apiKeyHash: string | null): Promise<GatewayUser | null> {
     await this.init();
     const now = Date.now();
-    const result = this.database
-      .prepare("UPDATE gateway_users SET api_key_hash = ?, updated_at = ? WHERE username = ? AND disabled = 0")
-      .run(apiKeyHash?.trim() || null, now, username);
+    const result = await this.database.run("UPDATE gateway_users SET api_key_hash = ?, updated_at = ? WHERE username = ? AND disabled = 0", apiKeyHash?.trim() || null, now, username);
     if (result.changes <= 0) {
       return null;
     }
@@ -626,8 +619,7 @@ export class GatewayDatabaseService {
 
   async listUsers(): Promise<GatewayUser[]> {
     await this.init();
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
                u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
                g.name AS groupName, g.sort_order AS groupSortOrder,
@@ -637,9 +629,8 @@ export class GatewayDatabaseService {
                g.min_interval_seconds AS groupMinIntervalSeconds
         FROM gateway_users u
         LEFT JOIN gateway_user_groups g ON g.id = u.group_id
-        ORDER BY role = 'admin' DESC, COALESCE(g.sort_order, 0) DESC, u.created_at ASC
-      `)
-      .all() as Array<Record<string, unknown>>;
+        ORDER BY CASE WHEN role = 'admin' THEN 1 ELSE 0 END DESC, COALESCE(g.sort_order, 0) DESC, u.created_at ASC
+      `);
     return rows.map((row) => {
       const { passwordHash: _passwordHash, apiKeyHash: _apiKeyHash, ...user } = this.mapUserRecord(row);
       return user;
@@ -650,12 +641,10 @@ export class GatewayDatabaseService {
     await this.init();
     const now = Date.now();
     const id = crypto.randomUUID();
-    this.database
-      .prepare(`
+    await this.database.run(`
         INSERT INTO gateway_users (id, username, display_name, password_hash, role, group_id, created_at, updated_at, disabled)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(id, params.username, params.displayName?.trim() || null, params.passwordHash, params.role, params.groupId ?? DEFAULT_USER_GROUP_ID, now, now, params.disabled ? 1 : 0);
+      `, id, params.username, params.displayName?.trim() || null, params.passwordHash, params.role, params.groupId ?? DEFAULT_USER_GROUP_ID, now, now, params.disabled ? 1 : 0);
     const created = await this.getUserByUsername(params.username);
     if (!created) {
       throw new Error("用户创建失败。");
@@ -669,22 +658,18 @@ export class GatewayDatabaseService {
     params: Partial<Pick<SaveGatewayUserParams, "passwordHash" | "role" | "groupId" | "disabled">>,
   ): Promise<GatewayUser | null> {
     await this.init();
-    const current = this.database
-      .prepare(`
+    const current = await this.database.get(`
         SELECT id, username, password_hash AS passwordHash, api_key_hash AS apiKeyHash, role, created_at AS createdAt,
                updated_at AS updatedAt, disabled, group_id AS groupId, display_name AS displayName
         FROM gateway_users
         WHERE id = ?
-      `)
-      .get(id) as Record<string, unknown> | undefined;
+      `, id) as Record<string, unknown> | undefined;
     if (!current) {
       return null;
     }
     const now = Date.now();
     const record = this.mapUserRecord(current);
-    this.database
-      .prepare("UPDATE gateway_users SET password_hash = ?, role = ?, group_id = ?, disabled = ?, updated_at = ? WHERE id = ?")
-      .run(
+    await this.database.run("UPDATE gateway_users SET password_hash = ?, role = ?, group_id = ?, disabled = ?, updated_at = ? WHERE id = ?",
         params.passwordHash ?? record.passwordHash,
         params.role ?? record.role,
         params.groupId === undefined ? (record.groupId ?? DEFAULT_USER_GROUP_ID) : params.groupId,
@@ -692,8 +677,7 @@ export class GatewayDatabaseService {
         now,
         id,
       );
-    const updated = this.database
-      .prepare(`
+    const updated = await this.database.get(`
         SELECT u.id, u.username, u.password_hash AS passwordHash, u.api_key_hash AS apiKeyHash, u.role, u.created_at AS createdAt,
                u.updated_at AS updatedAt, u.disabled, u.group_id AS groupId, u.display_name AS displayName,
                g.name AS groupName, g.sort_order AS groupSortOrder,
@@ -704,8 +688,7 @@ export class GatewayDatabaseService {
         FROM gateway_users u
         LEFT JOIN gateway_user_groups g ON g.id = u.group_id
         WHERE u.id = ?
-      `)
-      .get(id) as Record<string, unknown> | undefined;
+      `, id) as Record<string, unknown> | undefined;
     if (!updated) {
       return null;
     }
@@ -723,12 +706,6 @@ export class GatewayDatabaseService {
       skipped: 0,
     };
     const seen = new Set<string>();
-    const insert = this.database.prepare(`
-      INSERT INTO gateway_users (id, username, display_name, password_hash, role, group_id, created_at, updated_at, disabled)
-      VALUES (?, ?, ?, ?, 'user', ?, ?, ?, 0)
-    `);
-    const update = this.database.prepare("UPDATE gateway_users SET display_name = ?, group_id = COALESCE(group_id, ?), updated_at = ? WHERE username = ?");
-    const existingQuery = this.database.prepare("SELECT id FROM gateway_users WHERE username = ?");
 
     for (const contact of params.contacts) {
       const userId = contact.userId.trim();
@@ -745,14 +722,17 @@ export class GatewayDatabaseService {
       }
       seen.add(key);
       const groupId = contact.groupId ?? params.groupId ?? DEFAULT_USER_GROUP_ID;
-      const existing = existingQuery.get(username) as { id?: unknown } | undefined;
+      const existing = await this.database.get<{ id?: unknown }>("SELECT id FROM gateway_users WHERE username = ?", username);
       if (existing) {
-        update.run(displayName, groupId, now, username);
+        await this.database.run("UPDATE gateway_users SET display_name = ?, group_id = COALESCE(group_id, ?), updated_at = ? WHERE username = ?", displayName, groupId, now, username);
         result.updated += 1;
         continue;
       }
       const passwordHash = crypto.createHash("sha256").update(`wecom-import:${userId}:${crypto.randomUUID()}:${now}`).digest("hex");
-      insert.run(crypto.randomUUID(), username, displayName, passwordHash, groupId, now, now);
+      await this.database.run(`
+        INSERT INTO gateway_users (id, username, display_name, password_hash, role, group_id, created_at, updated_at, disabled)
+        VALUES (?, ?, ?, ?, 'user', ?, ?, ?, 0)
+      `, crypto.randomUUID(), username, displayName, passwordHash, groupId, now, now);
       result.created += 1;
     }
     return result;
@@ -760,34 +740,30 @@ export class GatewayDatabaseService {
 
   async deleteUser(id: string): Promise<boolean> {
     await this.init();
-    const result = this.database.prepare("DELETE FROM gateway_users WHERE id = ?").run(id);
+    const result = await this.database.run("DELETE FROM gateway_users WHERE id = ?", id);
     return result.changes > 0;
   }
 
   async countActiveAdmins(exceptId?: string): Promise<number> {
     await this.init();
-    const row = this.database
-      .prepare(`
+    const row = await this.database.get<{ count?: unknown }>(`
         SELECT COUNT(1) AS count
         FROM gateway_users
         WHERE role = 'admin' AND disabled = 0 AND (? IS NULL OR id <> ?)
-      `)
-      .get(exceptId ?? null, exceptId ?? null) as { count?: unknown };
-    return Number(row.count ?? 0);
+      `, exceptId ?? null, exceptId ?? null);
+    return Number(row?.count ?? 0);
   }
 
   async listUserGroups(): Promise<GatewayUserGroup[]> {
     await this.init();
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
                per_user_daily AS perUserDaily, per_user_hourly AS perUserHourly,
                min_interval_seconds AS minIntervalSeconds,
                created_at AS createdAt, updated_at AS updatedAt
         FROM gateway_user_groups
         ORDER BY sort_order DESC, created_at ASC
-      `)
-      .all() as Array<Record<string, unknown>>;
+      `);
     return rows.map((row) => this.mapUserGroup(row));
   }
 
@@ -795,22 +771,18 @@ export class GatewayDatabaseService {
     await this.init();
     const now = Date.now();
     const id = crypto.randomUUID();
-    this.database
-      .prepare(`
+    await this.database.run(`
         INSERT INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, per_user_daily, per_user_hourly, min_interval_seconds, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(id, params.name, params.sortOrder, params.imageLimitsDisabled ? 1 : 0, params.perUserDaily ?? null, params.perUserHourly ?? null, params.minIntervalSeconds ?? null, now, now);
-    const created = this.database
-      .prepare(`
+      `, id, params.name, params.sortOrder, params.imageLimitsDisabled ? 1 : 0, params.perUserDaily ?? null, params.perUserHourly ?? null, params.minIntervalSeconds ?? null, now, now);
+    const created = await this.database.get(`
         SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
                per_user_daily AS perUserDaily, per_user_hourly AS perUserHourly,
                min_interval_seconds AS minIntervalSeconds,
                created_at AS createdAt, updated_at AS updatedAt
         FROM gateway_user_groups
         WHERE id = ?
-      `)
-      .get(id) as Record<string, unknown> | undefined;
+      `, id) as Record<string, unknown> | undefined;
     if (!created) {
       throw new Error("用户组创建失败。");
     }
@@ -819,24 +791,20 @@ export class GatewayDatabaseService {
 
   async updateUserGroup(id: string, params: Partial<SaveGatewayUserGroupParams>): Promise<GatewayUserGroup | null> {
     await this.init();
-    const current = this.database
-      .prepare(`
+    const current = await this.database.get(`
         SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
                per_user_daily AS perUserDaily, per_user_hourly AS perUserHourly,
                min_interval_seconds AS minIntervalSeconds,
                created_at AS createdAt, updated_at AS updatedAt
         FROM gateway_user_groups
         WHERE id = ?
-      `)
-      .get(id) as Record<string, unknown> | undefined;
+      `, id) as Record<string, unknown> | undefined;
     if (!current) {
       return null;
     }
     const record = this.mapUserGroup(current);
     const now = Date.now();
-    this.database
-      .prepare("UPDATE gateway_user_groups SET name = ?, sort_order = ?, image_limits_disabled = ?, per_user_daily = ?, per_user_hourly = ?, min_interval_seconds = ?, updated_at = ? WHERE id = ?")
-      .run(
+    await this.database.run("UPDATE gateway_user_groups SET name = ?, sort_order = ?, image_limits_disabled = ?, per_user_daily = ?, per_user_hourly = ?, min_interval_seconds = ?, updated_at = ? WHERE id = ?",
         params.name ?? record.name,
         params.sortOrder ?? record.sortOrder,
         params.imageLimitsDisabled === undefined ? (record.imageLimitsDisabled ? 1 : 0) : (params.imageLimitsDisabled ? 1 : 0),
@@ -846,16 +814,14 @@ export class GatewayDatabaseService {
         now,
         id,
       );
-    const updated = this.database
-      .prepare(`
+    const updated = await this.database.get(`
         SELECT id, name, sort_order AS sortOrder, image_limits_disabled AS imageLimitsDisabled,
                per_user_daily AS perUserDaily, per_user_hourly AS perUserHourly,
                min_interval_seconds AS minIntervalSeconds,
                created_at AS createdAt, updated_at AS updatedAt
         FROM gateway_user_groups
         WHERE id = ?
-      `)
-      .get(id) as Record<string, unknown> | undefined;
+      `, id) as Record<string, unknown> | undefined;
     return updated ? this.mapUserGroup(updated) : null;
   }
 
@@ -865,24 +831,22 @@ export class GatewayDatabaseService {
     if (!fallbackId) {
       return false;
     }
-    this.database.prepare("UPDATE gateway_users SET group_id = ? WHERE group_id = ?").run(fallbackId, id);
-    const result = this.database.prepare("DELETE FROM gateway_user_groups WHERE id = ?").run(id);
+    await this.database.run("UPDATE gateway_users SET group_id = ? WHERE group_id = ?", fallbackId, id);
+    const result = await this.database.run("DELETE FROM gateway_user_groups WHERE id = ?", id);
     return result.changes > 0;
   }
 
   async listRequestLogs(limit = 100, owner?: string, options?: { includeDetails?: boolean }): Promise<PersistedRequestLog[]> {
     await this.init();
     const includeDetails = Boolean(options?.includeDetails);
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT id, owner, time, method, endpoint, account, model, status_code AS statusCode,
                duration_ms AS durationMs, source${includeDetails ? ", details_json AS detailsJson" : ""}
         FROM request_logs
         WHERE (? IS NULL OR owner = ?)
         ORDER BY time DESC
         LIMIT ?
-      `)
-      .all(owner ?? null, owner ?? null, clampLimit(limit, MAX_REQUEST_LOGS)) as Array<Record<string, unknown>>;
+      `, owner ?? null, owner ?? null, clampLimit(limit, MAX_REQUEST_LOGS)) as Array<Record<string, unknown>>;
 
     return rows.map((row) => ({
       id: String(row.id),
@@ -901,13 +865,22 @@ export class GatewayDatabaseService {
 
   async saveRequestLog(log: PersistedRequestLog): Promise<void> {
     await this.init();
-    this.database
-      .prepare(`
-        INSERT OR REPLACE INTO request_logs
+    await this.database.run(`
+        INSERT INTO request_logs
           (id, owner, time, method, endpoint, account, model, status_code, duration_ms, source, details_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
+        ON CONFLICT(id) DO UPDATE SET
+          owner = excluded.owner,
+          time = excluded.time,
+          method = excluded.method,
+          endpoint = excluded.endpoint,
+          account = excluded.account,
+          model = excluded.model,
+          status_code = excluded.status_code,
+          duration_ms = excluded.duration_ms,
+          source = excluded.source,
+          details_json = excluded.details_json
+      `,
         log.id,
         log.owner ?? null,
         log.time,
@@ -920,30 +893,27 @@ export class GatewayDatabaseService {
         log.source,
         log.details ? JSON.stringify(log.details) : null,
       );
-    this.prune("request_logs", "time", MAX_REQUEST_LOGS);
+    await this.prune("request_logs", "time", MAX_REQUEST_LOGS);
   }
 
   async countGenerationHistory(owner?: string): Promise<number> {
     await this.init();
-    this.deleteCoveredRunningGenerations(owner);
-    const row = this.database
-      .prepare(`
+    await this.deleteCoveredRunningGenerations(owner);
+    const row = await this.database.get(`
         SELECT COUNT(*) AS count
         FROM generation_history
         WHERE (? IS NULL OR owner = ?)
-      `)
-      .get(owner ?? null, owner ?? null) as { count?: unknown } | undefined;
+      `, owner ?? null, owner ?? null) as { count?: unknown } | undefined;
     return Number(row?.count ?? 0);
   }
 
   async listGenerationHistory(limit = 10, owner?: string, options?: { light?: boolean; offset?: number }): Promise<GenerationHistoryItem[]> {
     await this.init();
-    this.deleteCoveredRunningGenerations(owner);
+    await this.deleteCoveredRunningGenerations(owner);
     const light = Boolean(options?.light);
     const safeLimit = clampLimit(limit, MAX_GENERATION_HISTORY);
     const safeOffset = Math.max(0, Math.trunc(options?.offset ?? 0));
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
                prompt, ratio, size, quality, output_format AS outputFormat, duration_ms AS durationMs,
                ${light ? "NULL AS requestJson, NULL AS responseSummaryJson" : "request_json AS requestJson, response_summary_json AS responseSummaryJson"}, error,
@@ -953,8 +923,7 @@ export class GatewayDatabaseService {
         ORDER BY created_at DESC
         LIMIT ?
         OFFSET ?
-      `)
-      .all(owner ?? null, owner ?? null, safeLimit, safeOffset) as Array<Record<string, unknown>>;
+      `, owner ?? null, owner ?? null, safeLimit, safeOffset) as Array<Record<string, unknown>>;
 
     const now = Date.now();
     return rows.map((row) => ({
@@ -984,9 +953,8 @@ export class GatewayDatabaseService {
 
   async getGenerationHistoryItem(id: string, owner?: string): Promise<GenerationHistoryItem | null> {
     await this.init();
-    this.deleteCoveredRunningGenerations(owner);
-    const row = this.database
-      .prepare(`
+    await this.deleteCoveredRunningGenerations(owner);
+    const row = await this.database.get(`
         SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
                prompt, ratio, size, quality, output_format AS outputFormat, duration_ms AS durationMs,
                request_json AS requestJson, response_summary_json AS responseSummaryJson, error,
@@ -995,8 +963,7 @@ export class GatewayDatabaseService {
         WHERE id = ?
           AND (? IS NULL OR owner = ?)
         LIMIT 1
-      `)
-      .get(id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
+      `, id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
     if (!row) {
       return null;
     }
@@ -1029,13 +996,13 @@ export class GatewayDatabaseService {
   async clearGenerationHistory(owner?: string): Promise<void> {
     await this.init();
     if (!owner) {
-      this.database.prepare("DELETE FROM generation_history").run();
+      await this.database.run("DELETE FROM generation_history");
       await fs.rm(getGenerationAssetsDir(), { recursive: true, force: true });
       await fs.mkdir(getGenerationAssetsDir(), { recursive: true });
       return;
     }
     const items = await this.listGenerationHistory(MAX_GENERATION_HISTORY, owner);
-    this.database.prepare("DELETE FROM generation_history WHERE owner = ?").run(owner);
+    await this.database.run("DELETE FROM generation_history WHERE owner = ?", owner);
     await Promise.all(
       items.map((item) => fs.rm(path.join(getGenerationAssetsDir(), item.id), { recursive: true, force: true })),
     );
@@ -1043,24 +1010,20 @@ export class GatewayDatabaseService {
 
   async getGenerationOwner(id: string): Promise<string | undefined> {
     await this.init();
-    const row = this.database
-      .prepare("SELECT owner FROM generation_history WHERE id = ?")
-      .get(id) as { owner?: unknown } | undefined;
+    const row = await this.database.get("SELECT owner FROM generation_history WHERE id = ?", id) as { owner?: unknown } | undefined;
     return typeof row?.owner === "string" ? row.owner : undefined;
   }
 
   async getGenerationLimitUsage(owner: string, since: number): Promise<GenerationLimitUsage> {
     await this.init();
-    this.deleteCoveredRunningGenerations(owner);
-    const row = this.database
-      .prepare(`
+    await this.deleteCoveredRunningGenerations(owner);
+    const row = await this.database.get(`
         SELECT COUNT(1) AS sinceCount, MAX(created_at) AS lastCreatedAt
         FROM generation_history
         WHERE owner = ?
           AND created_at >= ?
           AND status IN ('queued', 'running', 'success')
-      `)
-      .get(owner, since) as { sinceCount?: unknown; lastCreatedAt?: unknown } | undefined;
+      `, owner, since) as { sinceCount?: unknown; lastCreatedAt?: unknown } | undefined;
 
     const lastCreatedAt = typeof row?.lastCreatedAt === "number" ? row.lastCreatedAt : undefined;
     return {
@@ -1071,8 +1034,7 @@ export class GatewayDatabaseService {
 
   async listChatConversations(limit = 100, owner?: string): Promise<ChatConversation[]> {
     await this.init();
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT c.id, c.owner, c.title, c.model, c.created_at AS createdAt, c.updated_at AS updatedAt,
                (
                  SELECT COUNT(1)
@@ -1085,15 +1047,14 @@ export class GatewayDatabaseService {
                  FROM chat_messages latest
                  WHERE latest.conversation_id = c.id
                    AND (? IS NULL OR latest.owner = ?)
-                 ORDER BY latest.created_at DESC, latest.rowid DESC
+                 ORDER BY latest.created_at DESC, latest.id DESC
                  LIMIT 1
                ) AS lastMessage
         FROM chat_conversations c
         WHERE (? IS NULL OR c.owner = ?)
         ORDER BY c.updated_at DESC
         LIMIT ?
-      `)
-      .all(owner ?? null, owner ?? null, owner ?? null, owner ?? null, owner ?? null, owner ?? null, clampLimit(limit, MAX_CHAT_CONVERSATIONS)) as Array<Record<string, unknown>>;
+      `, owner ?? null, owner ?? null, owner ?? null, owner ?? null, owner ?? null, owner ?? null, clampLimit(limit, MAX_CHAT_CONVERSATIONS)) as Array<Record<string, unknown>>;
 
     return rows.map((row) => this.mapChatConversation(row));
   }
@@ -1102,24 +1063,21 @@ export class GatewayDatabaseService {
     await this.init();
     const now = Date.now();
     const id = crypto.randomUUID();
-    this.database
-      .prepare(`
+    await this.database.run(`
         INSERT INTO chat_conversations (id, owner, title, model, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
-      `)
-      .run(id, params.owner ?? null, normalizeChatTitle(params.title), params.model ?? null, now, now);
+      `, id, params.owner ?? null, normalizeChatTitle(params.title), params.model ?? null, now, now);
     const detail = await this.getChatConversation(id, params.owner);
     if (!detail) {
       throw new Error("创建聊天会话失败。");
     }
-    this.pruneChatConversations(params.owner);
+    await this.pruneChatConversations(params.owner);
     return detail;
   }
 
   async getChatConversation(id: string, owner?: string, options?: ChatConversationMessagePageOptions): Promise<ChatConversationDetail | null> {
     await this.init();
-    const row = this.database
-      .prepare(`
+    const row = await this.database.get(`
         SELECT c.id, c.owner, c.title, c.model, c.created_at AS createdAt, c.updated_at AS updatedAt,
                (
                  SELECT COUNT(1)
@@ -1132,20 +1090,19 @@ export class GatewayDatabaseService {
                  FROM chat_messages latest
                  WHERE latest.conversation_id = c.id
                    AND (? IS NULL OR latest.owner = ?)
-                 ORDER BY latest.created_at DESC, latest.rowid DESC
+                 ORDER BY latest.created_at DESC, latest.id DESC
                  LIMIT 1
                ) AS lastMessage
         FROM chat_conversations c
         WHERE c.id = ? AND (? IS NULL OR c.owner = ?)
-      `)
-      .get(owner ?? null, owner ?? null, owner ?? null, owner ?? null, id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
+      `, owner ?? null, owner ?? null, owner ?? null, owner ?? null, id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
     if (!row) {
       return null;
     }
 
     const page = options?.messageLimit || options?.beforeMessageId
-      ? this.getChatMessagePage(id, owner, options)
-      : this.getAllChatMessages(id, owner);
+      ? await this.getChatMessagePage(id, owner, options)
+      : await this.getAllChatMessages(id, owner);
     const conversation = this.mapChatConversation(row);
 
     return {
@@ -1164,13 +1121,11 @@ export class GatewayDatabaseService {
       return null;
     }
     const now = Date.now();
-    this.database
-      .prepare(`
+    await this.database.run(`
         UPDATE chat_conversations
         SET title = ?, model = ?, updated_at = ?
         WHERE id = ? AND (? IS NULL OR owner = ?)
-      `)
-      .run(
+      `,
         typeof params.title === "string" ? normalizeChatTitle(params.title) : existing.title,
         typeof params.model === "string" ? params.model : existing.model ?? null,
         now,
@@ -1187,10 +1142,8 @@ export class GatewayDatabaseService {
     if (!existing) {
       return false;
     }
-    this.database.prepare("DELETE FROM chat_messages WHERE conversation_id = ?").run(id);
-    this.database
-      .prepare("DELETE FROM chat_conversations WHERE id = ? AND (? IS NULL OR owner = ?)")
-      .run(id, owner ?? null, owner ?? null);
+    await this.database.run("DELETE FROM chat_messages WHERE conversation_id = ?", id);
+    await this.database.run("DELETE FROM chat_conversations WHERE id = ? AND (? IS NULL OR owner = ?)", id, owner ?? null, owner ?? null);
     return true;
   }
 
@@ -1201,13 +1154,22 @@ export class GatewayDatabaseService {
     const createdAt = params.createdAt ?? now;
     const status = params.status ?? "success";
     const metadata = mergeChatMetadata(params.metadata, params.attachments);
-    this.database
-      .prepare(`
-        INSERT OR REPLACE INTO chat_messages
+    await this.database.run(`
+        INSERT INTO chat_messages
           (id, conversation_id, owner, role, content, status, model, error, created_at, updated_at, metadata_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
+        ON CONFLICT(id) DO UPDATE SET
+          conversation_id = excluded.conversation_id,
+          owner = excluded.owner,
+          role = excluded.role,
+          content = excluded.content,
+          status = excluded.status,
+          model = excluded.model,
+          error = excluded.error,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          metadata_json = excluded.metadata_json
+      `,
         id,
         params.conversationId,
         params.owner ?? null,
@@ -1220,7 +1182,7 @@ export class GatewayDatabaseService {
         now,
         metadata ? JSON.stringify(metadata) : null,
       );
-    this.touchChatConversation(params.conversationId, now);
+    await this.touchChatConversation(params.conversationId, now);
     const message = await this.getChatMessage(id, params.owner);
     if (!message) {
       throw new Error("保存聊天消息失败。");
@@ -1235,13 +1197,11 @@ export class GatewayDatabaseService {
       return null;
     }
     const now = Date.now();
-    this.database
-      .prepare(`
+    await this.database.run(`
         UPDATE chat_messages
         SET content = ?, status = ?, model = ?, error = ?, updated_at = ?, metadata_json = ?
         WHERE id = ? AND (? IS NULL OR owner = ?)
-      `)
-      .run(
+      `,
         typeof params.content === "string" ? params.content : existing.content,
         params.status ?? existing.status,
         typeof params.model === "string" ? params.model : existing.model ?? null,
@@ -1252,20 +1212,18 @@ export class GatewayDatabaseService {
         owner ?? null,
         owner ?? null,
       );
-    this.touchChatConversation(existing.conversationId, now);
+    await this.touchChatConversation(existing.conversationId, now);
     return this.getChatMessage(id, owner);
   }
 
   async deleteChatMessagesAfter(conversationId: string, messageId: string, owner?: string): Promise<number | null> {
     await this.init();
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT id
         FROM chat_messages
         WHERE conversation_id = ? AND (? IS NULL OR owner = ?)
-        ORDER BY created_at ASC, rowid ASC
-      `)
-      .all(conversationId, owner ?? null, owner ?? null) as Array<{ id?: unknown }>;
+        ORDER BY created_at ASC, id ASC
+      `, conversationId, owner ?? null, owner ?? null) as Array<{ id?: unknown }>;
     const targetIndex = rows.findIndex((row) => row.id === messageId);
     if (targetIndex < 0) {
       return null;
@@ -1279,11 +1237,10 @@ export class GatewayDatabaseService {
       return 0;
     }
 
-    const deleteMessage = this.database.prepare("DELETE FROM chat_messages WHERE id = ? AND (? IS NULL OR owner = ?)");
     for (const id of staleIds) {
-      deleteMessage.run(id, owner ?? null, owner ?? null);
+      await this.database.run("DELETE FROM chat_messages WHERE id = ? AND (? IS NULL OR owner = ?)", id, owner ?? null, owner ?? null);
     }
-    this.touchChatConversation(conversationId);
+    await this.touchChatConversation(conversationId);
     return staleIds.length;
   }
 
@@ -1294,17 +1251,15 @@ export class GatewayDatabaseService {
 
   async listSuccessfulChatMessages(conversationId: string, owner?: string): Promise<ChatMessage[]> {
     await this.init();
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT id, conversation_id AS conversationId, owner, role, content, status, model, error,
                created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
         FROM chat_messages
         WHERE conversation_id = ?
           AND (? IS NULL OR owner = ?)
           AND status = 'success'
-        ORDER BY created_at ASC, rowid ASC
-      `)
-      .all(conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
+        ORDER BY created_at ASC, id ASC
+      `, conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
     return rows.map((row) => this.mapChatMessage(row));
   }
 
@@ -1348,14 +1303,32 @@ export class GatewayDatabaseService {
       images,
     };
 
-    this.database
-      .prepare(`
-        INSERT OR REPLACE INTO generation_history
+    await this.database.run(`
+        INSERT INTO generation_history
           (id, owner, created_at, started_at, updated_at, status, endpoint, account, model, prompt, ratio, size, quality,
            output_format, duration_ms, request_json, response_summary_json, error, reference_images_json, images_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
+        ON CONFLICT(id) DO UPDATE SET
+          owner = excluded.owner,
+          created_at = excluded.created_at,
+          started_at = excluded.started_at,
+          updated_at = excluded.updated_at,
+          status = excluded.status,
+          endpoint = excluded.endpoint,
+          account = excluded.account,
+          model = excluded.model,
+          prompt = excluded.prompt,
+          ratio = excluded.ratio,
+          size = excluded.size,
+          quality = excluded.quality,
+          output_format = excluded.output_format,
+          duration_ms = excluded.duration_ms,
+          request_json = excluded.request_json,
+          response_summary_json = excluded.response_summary_json,
+          error = excluded.error,
+          reference_images_json = excluded.reference_images_json,
+          images_json = excluded.images_json
+      `,
         item.id,
         item.owner ?? null,
         item.createdAt,
@@ -1378,7 +1351,7 @@ export class GatewayDatabaseService {
         JSON.stringify(item.images),
       );
     if (item.status !== "queued" && item.status !== "running") {
-      this.deleteCoveredRunningGenerations(item.owner, {
+      await this.deleteCoveredRunningGenerations(item.owner, {
         id: item.id,
         owner: item.owner,
         endpoint: item.endpoint,
@@ -1386,15 +1359,14 @@ export class GatewayDatabaseService {
         createdAt: item.createdAt,
       });
     }
-    this.prune("generation_history", "created_at", MAX_GENERATION_HISTORY);
+    await this.prune("generation_history", "created_at", MAX_GENERATION_HISTORY);
     return item;
   }
 
-  private deleteCoveredRunningGenerations(owner?: string, target?: GenerationDedupTarget): void {
+  private async deleteCoveredRunningGenerations(owner?: string, target?: GenerationDedupTarget): Promise<void> {
     const oneHourMs = 60 * 60 * 1000;
     if (target) {
-      this.database
-        .prepare(`
+      await this.database.run(`
           DELETE FROM generation_history
           WHERE status IN ('queued', 'running')
             AND id <> ?
@@ -1402,13 +1374,11 @@ export class GatewayDatabaseService {
             AND prompt = ?
             AND (? IS NULL OR owner = ?)
             AND ABS(created_at - ?) <= ?
-        `)
-        .run(target.id, target.endpoint, target.prompt, target.owner ?? null, target.owner ?? null, target.createdAt, oneHourMs);
+        `, target.id, target.endpoint, target.prompt, target.owner ?? null, target.owner ?? null, target.createdAt, oneHourMs);
       return;
     }
 
-    this.database
-      .prepare(`
+    await this.database.run(`
         DELETE FROM generation_history
         WHERE status IN ('queued', 'running')
           AND (? IS NULL OR owner = ?)
@@ -1422,60 +1392,53 @@ export class GatewayDatabaseService {
               AND COALESCE(done.owner, '') = COALESCE(generation_history.owner, '')
               AND ABS(done.created_at - generation_history.created_at) <= ?
           )
-      `)
-      .run(owner ?? null, owner ?? null, oneHourMs);
+      `, owner ?? null, owner ?? null, oneHourMs);
   }
 
-  private get database(): DatabaseSync {
-    if (!this.db) {
-      this.db = new DatabaseSync(getDatabasePath());
-    }
-    return this.db;
+  private get database(): GatewaySqlDatabase {
+    return getGatewaySqlDatabase();
   }
 
-  private prune(table: string, orderColumn: string, max: number): void {
-    this.database.prepare(`
+  private async prune(table: string, orderColumn: string, max: number): Promise<void> {
+    await this.database.run(`
       DELETE FROM ${table}
       WHERE id NOT IN (
         SELECT id FROM ${table}
         ORDER BY ${orderColumn} DESC
         LIMIT ?
       )
-    `).run(max);
+    `, max);
   }
 
-  private addColumnIfMissing(table: string, column: string, definition: string): void {
+  private async addColumnIfMissing(table: string, column: string, definition: string): Promise<void> {
     try {
-      this.database.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+      await this.database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!message.toLowerCase().includes("duplicate column")) {
+      const lower = message.toLowerCase();
+      if (!lower.includes("duplicate column") && !lower.includes("already exists")) {
         throw error;
       }
     }
   }
 
-  private ensureDefaultUserGroups(): void {
+  private async ensureDefaultUserGroups(): Promise<void> {
     const now = Date.now();
-    this.database
-      .prepare(`
-        INSERT OR IGNORE INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, per_user_daily, per_user_hourly, min_interval_seconds, created_at, updated_at)
+    await this.database.run(`
+        INSERT INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, per_user_daily, per_user_hourly, min_interval_seconds, created_at, updated_at)
         VALUES (?, '普通用户组', 0, 0, NULL, NULL, NULL, ?, ?)
-      `)
-      .run(DEFAULT_USER_GROUP_ID, now, now);
-    this.database
-      .prepare(`
-        INSERT OR IGNORE INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, per_user_daily, per_user_hourly, min_interval_seconds, created_at, updated_at)
+        ON CONFLICT(id) DO NOTHING
+      `, DEFAULT_USER_GROUP_ID, now, now);
+    await this.database.run(`
+        INSERT INTO gateway_user_groups (id, name, sort_order, image_limits_disabled, per_user_daily, per_user_hourly, min_interval_seconds, created_at, updated_at)
         VALUES (?, 'VIP 用户组', 100, 1, NULL, NULL, NULL, ?, ?)
-      `)
-      .run(DEFAULT_VIP_GROUP_ID, now, now);
-    this.database.prepare("UPDATE gateway_users SET group_id = ? WHERE group_id IS NULL OR group_id = ''").run(DEFAULT_USER_GROUP_ID);
+        ON CONFLICT(id) DO NOTHING
+      `, DEFAULT_VIP_GROUP_ID, now, now);
+    await this.database.run("UPDATE gateway_users SET group_id = ? WHERE group_id IS NULL OR group_id = ''", DEFAULT_USER_GROUP_ID);
   }
 
   private async ensureUserGroupFallback(deletingId: string): Promise<string | null> {
-    const fallback = this.database
-      .prepare("SELECT id FROM gateway_user_groups WHERE id <> ? ORDER BY sort_order ASC, created_at ASC LIMIT 1")
-      .get(deletingId) as { id?: unknown } | undefined;
+    const fallback = await this.database.get("SELECT id FROM gateway_user_groups WHERE id <> ? ORDER BY sort_order ASC, created_at ASC LIMIT 1", deletingId) as { id?: unknown } | undefined;
     if (typeof fallback?.id === "string" && fallback.id) {
       return fallback.id;
     }
@@ -1552,34 +1515,31 @@ export class GatewayDatabaseService {
     };
   }
 
-  private getChatMessagePage(
+  private async getChatMessagePage(
     conversationId: string,
     owner?: string,
     options?: ChatConversationMessagePageOptions,
-  ): { messages: ChatMessage[]; hasMoreMessages: boolean; nextBeforeMessageId?: string } {
+  ): Promise<{ messages: ChatMessage[]; hasMoreMessages: boolean; nextBeforeMessageId?: string }> {
     const limit = clampLimit(options?.messageLimit ?? DEFAULT_CHAT_MESSAGE_PAGE_SIZE, MAX_CHAT_MESSAGE_PAGE_SIZE);
     let beforeCreatedAt: number | null = null;
-    let beforeRowid: number | null = null;
+    let beforeId: string | null = null;
 
     if (options?.beforeMessageId) {
-      const before = this.database
-        .prepare(`
-          SELECT created_at AS createdAt, rowid AS rowid
+      const before = await this.database.get<{ createdAt?: unknown; id?: unknown }>(`
+          SELECT created_at AS createdAt, id
           FROM chat_messages
           WHERE id = ?
             AND conversation_id = ?
             AND (? IS NULL OR owner = ?)
-        `)
-        .get(options.beforeMessageId, conversationId, owner ?? null, owner ?? null) as { createdAt?: unknown; rowid?: unknown } | undefined;
+        `, options.beforeMessageId, conversationId, owner ?? null, owner ?? null);
       if (!before) {
         return { messages: [], hasMoreMessages: false };
       }
       beforeCreatedAt = Number(before.createdAt);
-      beforeRowid = Number(before.rowid);
+      beforeId = typeof before.id === "string" ? before.id : null;
     }
 
-    const rows = this.database
-      .prepare(`
+    const rows = await this.database.all(`
         SELECT id, conversation_id AS conversationId, owner, role, content, status, model, error,
                created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
         FROM chat_messages
@@ -1588,19 +1548,18 @@ export class GatewayDatabaseService {
           AND (
             ? IS NULL
             OR created_at < ?
-            OR (created_at = ? AND rowid < ?)
+            OR (created_at = ? AND id < ?)
           )
-        ORDER BY created_at DESC, rowid DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT ?
-      `)
-      .all(
+      `,
         conversationId,
         owner ?? null,
         owner ?? null,
         beforeCreatedAt,
         beforeCreatedAt,
         beforeCreatedAt,
-        beforeRowid,
+        beforeId,
         limit + 1,
       ) as Array<Record<string, unknown>>;
 
@@ -1614,16 +1573,14 @@ export class GatewayDatabaseService {
     };
   }
 
-  private getAllChatMessages(conversationId: string, owner?: string): { messages: ChatMessage[]; hasMoreMessages: boolean; nextBeforeMessageId?: string } {
-    const rows = this.database
-      .prepare(`
+  private async getAllChatMessages(conversationId: string, owner?: string): Promise<{ messages: ChatMessage[]; hasMoreMessages: boolean; nextBeforeMessageId?: string }> {
+    const rows = await this.database.all(`
         SELECT id, conversation_id AS conversationId, owner, role, content, status, model, error,
                created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
         FROM chat_messages
         WHERE conversation_id = ? AND (? IS NULL OR owner = ?)
-        ORDER BY created_at ASC, rowid ASC
-      `)
-      .all(conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
+        ORDER BY created_at ASC, id ASC
+      `, conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
     return {
       messages: rows.map((row) => this.mapChatMessage(row)),
       hasMoreMessages: false,
@@ -1632,26 +1589,21 @@ export class GatewayDatabaseService {
   }
 
   private async getChatMessage(id: string, owner?: string): Promise<ChatMessage | null> {
-    const row = this.database
-      .prepare(`
+    const row = await this.database.get(`
         SELECT id, conversation_id AS conversationId, owner, role, content, status, model, error,
                created_at AS createdAt, updated_at AS updatedAt, metadata_json AS metadataJson
         FROM chat_messages
         WHERE id = ? AND (? IS NULL OR owner = ?)
-      `)
-      .get(id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
+      `, id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
     return row ? this.mapChatMessage(row) : null;
   }
 
-  private touchChatConversation(id: string, updatedAt = Date.now()): void {
-    this.database
-      .prepare("UPDATE chat_conversations SET updated_at = ? WHERE id = ?")
-      .run(updatedAt, id);
+  private async touchChatConversation(id: string, updatedAt = Date.now()): Promise<void> {
+    await this.database.run("UPDATE chat_conversations SET updated_at = ? WHERE id = ?", updatedAt, id);
   }
 
-  private pruneChatConversations(owner?: string): void {
-    const staleRows = this.database
-      .prepare(`
+  private async pruneChatConversations(owner?: string): Promise<void> {
+    const staleRows = await this.database.all<{ id?: unknown }>(`
         SELECT id
         FROM chat_conversations
         WHERE (? IS NULL OR owner = ?)
@@ -1662,14 +1614,13 @@ export class GatewayDatabaseService {
             ORDER BY updated_at DESC
             LIMIT ?
           )
-      `)
-      .all(owner ?? null, owner ?? null, owner ?? null, owner ?? null, MAX_CHAT_CONVERSATIONS) as Array<{ id?: unknown }>;
+      `, owner ?? null, owner ?? null, owner ?? null, owner ?? null, MAX_CHAT_CONVERSATIONS);
     for (const row of staleRows) {
       if (typeof row.id !== "string") {
         continue;
       }
-      this.database.prepare("DELETE FROM chat_messages WHERE conversation_id = ?").run(row.id);
-      this.database.prepare("DELETE FROM chat_conversations WHERE id = ?").run(row.id);
+      await this.database.run("DELETE FROM chat_messages WHERE conversation_id = ?", row.id);
+      await this.database.run("DELETE FROM chat_conversations WHERE id = ?", row.id);
     }
   }
 

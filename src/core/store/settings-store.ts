@@ -1,16 +1,14 @@
 import fs from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
 import type { GatewaySettings } from "../types.js";
+import { getGatewaySqlDatabase } from "./gateway-sql-database.js";
 import {
   ensureStateMigrated,
-  getDatabasePath,
   getSettingsPath,
   getStateDir,
 } from "./state-paths.js";
 
 const SETTINGS_ROW_ID = "gateway";
 
-let settingsDb: DatabaseSync | null = null;
 let settingsDbReady = false;
 
 export function createDefaultSettings(): GatewaySettings {
@@ -121,12 +119,13 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
 export async function loadSettings(): Promise<GatewaySettings> {
   try {
     await ensureSettingsDatabase();
-    const database = getSettingsDatabase();
-    const row = database
-      .prepare("SELECT value_json AS valueJson FROM gateway_settings WHERE id = ?")
-      .get(SETTINGS_ROW_ID) as { valueJson?: unknown } | undefined;
+    const row = await getGatewaySqlDatabase().get<{ valueJson?: unknown }>("SELECT value_json AS valueJson FROM gateway_settings WHERE id = ?", SETTINGS_ROW_ID);
     if (typeof row?.valueJson === "string" && row.valueJson) {
       const parsed = JSON.parse(row.valueJson) as Partial<GatewaySettings>;
+      return normalizeSettings(parsed);
+    }
+    if (row?.valueJson && typeof row.valueJson === "object" && !Array.isArray(row.valueJson)) {
+      const parsed = row.valueJson as Partial<GatewaySettings>;
       return normalizeSettings(parsed);
     }
 
@@ -263,14 +262,11 @@ let settingsSaveQueue = Promise.resolve();
 async function ensureSettingsDatabase(): Promise<void> {
   await ensureStateMigrated();
   await fs.mkdir(getStateDir(), { recursive: true });
-  if (!settingsDb) {
-    settingsDb = new DatabaseSync(getDatabasePath());
-  }
   if (settingsDbReady) {
     return;
   }
 
-  getSettingsDatabase().exec(`
+  await getGatewaySqlDatabase().exec(`
     CREATE TABLE IF NOT EXISTS gateway_settings (
       id TEXT PRIMARY KEY,
       value_json TEXT NOT NULL,
@@ -279,13 +275,6 @@ async function ensureSettingsDatabase(): Promise<void> {
     );
   `);
   settingsDbReady = true;
-}
-
-function getSettingsDatabase(): DatabaseSync {
-  if (!settingsDb) {
-    settingsDb = new DatabaseSync(getDatabasePath());
-  }
-  return settingsDb;
 }
 
 async function importLegacySettings(): Promise<GatewaySettings> {
@@ -301,15 +290,19 @@ async function importLegacySettings(): Promise<GatewaySettings> {
 async function writeSettingsToDatabase(settings: GatewaySettings): Promise<void> {
   await ensureSettingsDatabase();
   const now = Date.now();
-  getSettingsDatabase()
-    .prepare(`
+  await getGatewaySqlDatabase().run(
+    `
       INSERT INTO gateway_settings (id, value_json, created_at, updated_at)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         value_json = excluded.value_json,
         updated_at = excluded.updated_at
-    `)
-    .run(SETTINGS_ROW_ID, JSON.stringify(normalizeSettings(settings)), now, now);
+    `,
+    SETTINGS_ROW_ID,
+    JSON.stringify(normalizeSettings(settings)),
+    now,
+    now,
+  );
 }
 
 export async function saveSettings(settings: GatewaySettings): Promise<void> {

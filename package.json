@@ -57,6 +57,8 @@
     "typecheck": "npm run typecheck:server && npm run typecheck:ui",
     "typecheck:server": "bunx tsc -p tsconfig.json --noEmit",
     "typecheck:ui": "tsc -p admin-ui/tsconfig.json --noEmit",
+    "test:postgres-redis": "node scripts/postgres-redis-test-agent.mjs",
+    "review:postgres-redis": "node scripts/postgres-redis-review-agent.mjs",
     "prepack": "npm run build",
     "pack:dry": "npm pack --dry-run"
   },
@@ -65,12 +67,14 @@
     "@wecom/jssdk": "^2.4.1",
     "fastify": "^5.8.2",
     "fflate": "^0.8.2",
+    "pg": "^8.22.0",
     "sharp": "^0.35.1",
     "xlsx": "^0.18.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",

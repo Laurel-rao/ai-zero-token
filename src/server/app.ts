@@ -3927,10 +3927,11 @@ export function createApp(params?: {
   });
 
   app.get("/_gateway/generations/history/:id", async (request, reply) => {
+    const parsed = generationHistoryQuerySchema.safeParse(request.query);
     const params = request.params as { id?: string };
     const session = await getSessionFromRequest(request);
     const apiOwner = (request as GatewayAuthedRequest).gatewayApiAuth?.owner;
-    const owner = apiOwner || resolveDataOwnerFilter(session);
+    const owner = apiOwner || resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
     const item = await ctx.gatewayDatabaseService.getGenerationHistoryItem(String(params.id ?? ""), owner);
     if (!item) {
       reply.code(404);
