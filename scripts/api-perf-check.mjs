@@ -4,6 +4,9 @@ const DEFAULT_BASE_URL = "http://43.128.120.182";
 const DEFAULT_THRESHOLD_MS = 2000;
 const DEFAULT_ROUNDS = 3;
 const DEFAULT_TIMEOUT_MS = 8000;
+const DEFAULT_CONCURRENCY = 200;
+const DEFAULT_REQUESTS = 200;
+const DEFAULT_CONCURRENT_PATH = "/_gateway/auth/status";
 let requestTimeoutMs = DEFAULT_TIMEOUT_MS;
 
 function parseArgs(argv) {
@@ -14,6 +17,12 @@ function parseArgs(argv) {
     rounds: Number.parseInt(process.env.AZT_PERF_ROUNDS || "", 10) || DEFAULT_ROUNDS,
     thresholdMs: Number.parseInt(process.env.AZT_PERF_THRESHOLD_MS || "", 10) || DEFAULT_THRESHOLD_MS,
     timeoutMs: Number.parseInt(process.env.AZT_PERF_TIMEOUT_MS || "", 10) || DEFAULT_TIMEOUT_MS,
+    concurrency: Number.parseInt(process.env.AZT_PERF_CONCURRENCY || "", 10) || DEFAULT_CONCURRENCY,
+    requests: Number.parseInt(process.env.AZT_PERF_REQUESTS || "", 10) || DEFAULT_REQUESTS,
+    concurrentPath: process.env.AZT_PERF_CONCURRENT_PATH || DEFAULT_CONCURRENT_PATH,
+    concurrentThresholdMs: Number.parseInt(process.env.AZT_PERF_CONCURRENT_THRESHOLD_MS || "", 10) || 0,
+    acceptance200: process.env.AZT_PERF_ACCEPTANCE_200 === "1",
+    skipEndpoints: process.env.AZT_PERF_SKIP_ENDPOINTS === "1",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -37,6 +46,24 @@ function parseArgs(argv) {
     } else if (item === "--timeout-ms" && next) {
       args.timeoutMs = Number.parseInt(next, 10);
       index += 1;
+    } else if (item === "--concurrency" && next) {
+      args.concurrency = Number.parseInt(next, 10);
+      index += 1;
+    } else if (item === "--requests" && next) {
+      args.requests = Number.parseInt(next, 10);
+      index += 1;
+    } else if (item === "--concurrent-path" && next) {
+      args.concurrentPath = next;
+      index += 1;
+    } else if (item === "--concurrent-threshold-ms" && next) {
+      args.concurrentThresholdMs = Number.parseInt(next, 10);
+      index += 1;
+    } else if (item === "--acceptance-200") {
+      args.acceptance200 = true;
+      args.concurrency = Math.max(args.concurrency, DEFAULT_CONCURRENCY);
+      args.requests = Math.max(args.requests, DEFAULT_REQUESTS);
+    } else if (item === "--skip-endpoints") {
+      args.skipEndpoints = true;
     } else if (item === "--help" || item === "-h") {
       console.log(`Usage: node scripts/api-perf-check.mjs [options]
 
@@ -47,10 +74,20 @@ Options:
   --rounds <n>           Samples per endpoint. Default: ${DEFAULT_ROUNDS}
   --threshold-ms <n>     Slow threshold. Default: ${DEFAULT_THRESHOLD_MS}
   --timeout-ms <n>       Per-request timeout. Default: ${DEFAULT_TIMEOUT_MS}
+  --acceptance-200       Run 200-concurrency acceptance check
+  --concurrency <n>      Concurrent workers for acceptance. Default: ${DEFAULT_CONCURRENCY}
+  --requests <n>         Total acceptance requests. Default: ${DEFAULT_REQUESTS}
+  --concurrent-path <p>  Acceptance endpoint. Default: ${DEFAULT_CONCURRENT_PATH}
+  --concurrent-threshold-ms <n>
+                         Acceptance p95 threshold. Default: threshold-ms
+  --skip-endpoints       Skip sequential endpoint checks
 
 Environment:
   AZT_PERF_BASE_URL, AZT_PERF_USERNAME, AZT_PERF_PASSWORD,
-  AZT_PERF_ROUNDS, AZT_PERF_THRESHOLD_MS, AZT_PERF_TIMEOUT_MS
+  AZT_PERF_ROUNDS, AZT_PERF_THRESHOLD_MS, AZT_PERF_TIMEOUT_MS,
+  AZT_PERF_CONCURRENCY, AZT_PERF_REQUESTS, AZT_PERF_CONCURRENT_PATH,
+  AZT_PERF_CONCURRENT_THRESHOLD_MS, AZT_PERF_ACCEPTANCE_200,
+  AZT_PERF_SKIP_ENDPOINTS
 `);
       process.exit(0);
     }
@@ -64,6 +101,22 @@ Environment:
   }
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs < 1) {
     args.timeoutMs = DEFAULT_TIMEOUT_MS;
+  }
+  if (!Number.isFinite(args.concurrency) || args.concurrency < 1) {
+    args.concurrency = DEFAULT_CONCURRENCY;
+  }
+  if (!Number.isFinite(args.requests) || args.requests < 1) {
+    args.requests = DEFAULT_REQUESTS;
+  }
+  if (args.acceptance200) {
+    args.concurrency = Math.max(args.concurrency, DEFAULT_CONCURRENCY);
+    args.requests = Math.max(args.requests, DEFAULT_REQUESTS);
+  }
+  if (!Number.isFinite(args.concurrentThresholdMs) || args.concurrentThresholdMs < 1) {
+    args.concurrentThresholdMs = args.thresholdMs;
+  }
+  if (!args.concurrentPath.startsWith("/")) {
+    args.concurrentPath = `/${args.concurrentPath}`;
   }
 
   args.baseUrl = args.baseUrl.replace(/\/+$/, "");
@@ -159,6 +212,85 @@ async function request(baseUrl, cookieJar, endpoint) {
   }
 }
 
+async function runConcurrentCheck(baseUrl, cookieJar, args) {
+  const endpoint = {
+    name: "concurrent acceptance",
+    path: args.concurrentPath,
+  };
+  const total = args.requests;
+  const concurrency = Math.min(args.concurrency, total);
+  const samples = [];
+  const failures = [];
+  let nextRequest = 0;
+  let completed = 0;
+  let bytes = 0;
+  const started = performance.now();
+
+  console.log(`\n200 concurrency acceptance: path=${endpoint.path} requests=${total} concurrency=${concurrency} threshold=${args.concurrentThresholdMs}ms`);
+
+  async function worker() {
+    while (true) {
+      const requestIndex = nextRequest;
+      nextRequest += 1;
+      if (requestIndex >= total) {
+        return;
+      }
+
+      try {
+        const result = await request(baseUrl, cookieJar, endpoint);
+        samples.push(result.ms);
+        bytes += result.bytes;
+        if (!result.ok) {
+          failures.push({
+            index: requestIndex + 1,
+            status: result.status,
+            error: result.text.slice(0, 160).replace(/\s+/g, " "),
+          });
+        }
+      } catch (caught) {
+        samples.push(args.timeoutMs);
+        failures.push({
+          index: requestIndex + 1,
+          status: "-",
+          error: caught instanceof Error ? caught.message : String(caught),
+        });
+      } finally {
+        completed += 1;
+        if (completed % Math.max(1, Math.floor(total / 10)) === 0 || completed === total) {
+          process.stdout.write(`\rcompleted ${String(completed).padStart(String(total).length, " ")}/${total}`);
+        }
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  process.stdout.write("\n");
+
+  const elapsedMs = performance.now() - started;
+  const p50 = percentile(samples, 0.5);
+  const p95 = percentile(samples, 0.95);
+  const p99 = percentile(samples, 0.99);
+  const max = Math.max(...samples);
+  const rps = total / (elapsedMs / 1000);
+  const ok = failures.length === 0 && p95 <= args.concurrentThresholdMs;
+
+  console.log("concurrency summary");
+  console.log("-------------------");
+  console.log(`requests=${total} concurrency=${concurrency} failures=${failures.length}`);
+  console.log(`elapsed=${formatMs(elapsedMs)} rps=${rps.toFixed(1)} bytes=${formatBytes(bytes)}`);
+  console.log(`p50=${formatMs(p50)} p95=${formatMs(p95)} p99=${formatMs(p99)} max=${formatMs(max)}`);
+  console.log(`result=${ok ? "OK" : "FAIL"}`);
+
+  if (failures.length > 0) {
+    console.log("\nfirst failures");
+    for (const failure of failures.slice(0, 10)) {
+      console.log(`#${failure.index} HTTP ${failure.status} ${failure.error}`);
+    }
+  }
+
+  return ok;
+}
+
 const readOnlyEndpoints = [
   { name: "auth status", path: "/_gateway/auth/status" },
   { name: "admin config", path: "/_gateway/admin/config" },
@@ -199,64 +331,76 @@ async function main() {
   }
   console.log(`login ${formatMs(login.ms)} ${formatBytes(login.bytes)}`);
 
+  let hasFailure = false;
   const results = [];
-  for (const endpoint of readOnlyEndpoints) {
-    process.stdout.write(`checking ${endpoint.name} ... `);
-    const samples = [];
-    let bytes = 0;
-    let status = 0;
-    let ok = true;
-    let error = "";
-    for (let round = 0; round < args.rounds; round += 1) {
-      try {
-        const result = await request(args.baseUrl, cookieJar, endpoint);
-        samples.push(result.ms);
-        bytes = result.bytes;
-        status = result.status;
-        ok = ok && result.ok;
-        if (!result.ok) {
-          error = result.text.slice(0, 160).replace(/\s+/g, " ");
+  if (!args.skipEndpoints) {
+    for (const endpoint of readOnlyEndpoints) {
+      process.stdout.write(`checking ${endpoint.name} ... `);
+      const samples = [];
+      let bytes = 0;
+      let status = 0;
+      let ok = true;
+      let error = "";
+      for (let round = 0; round < args.rounds; round += 1) {
+        try {
+          const result = await request(args.baseUrl, cookieJar, endpoint);
+          samples.push(result.ms);
+          bytes = result.bytes;
+          status = result.status;
+          ok = ok && result.ok;
+          if (!result.ok) {
+            error = result.text.slice(0, 160).replace(/\s+/g, " ");
+          }
+        } catch (caught) {
+          ok = false;
+          error = caught instanceof Error ? caught.message : String(caught);
+          samples.push(args.timeoutMs);
+          break;
         }
-      } catch (caught) {
-        ok = false;
-        error = caught instanceof Error ? caught.message : String(caught);
-        samples.push(args.timeoutMs);
-        break;
       }
+      const item = {
+        endpoint,
+        ok,
+        status,
+        bytes,
+        error,
+        min: Math.min(...samples),
+        p50: percentile(samples, 0.5),
+        p95: percentile(samples, 0.95),
+        max: Math.max(...samples),
+      };
+      results.push(item);
+      console.log(`${ok ? "done" : "failed"} max=${formatMs(item.max)} size=${formatBytes(bytes)}`);
     }
-    const item = {
-      endpoint,
-      ok,
-      status,
-      bytes,
-      error,
-      min: Math.min(...samples),
-      p50: percentile(samples, 0.5),
-      p95: percentile(samples, 0.95),
-      max: Math.max(...samples),
-    };
-    results.push(item);
-    console.log(`${ok ? "done" : "failed"} max=${formatMs(item.max)} size=${formatBytes(bytes)}`);
+
+    const slow = results.filter((item) => item.max > args.thresholdMs || !item.ok);
+    console.log("\nendpoint                         status   size      min     p50     p95     max  result");
+    console.log("--------------------------------------------------------------------------------------");
+    for (const item of results) {
+      const failed = !item.ok;
+      const slowFlag = item.max > args.thresholdMs;
+      const label = item.endpoint.name.padEnd(32, " ");
+      const status = String(item.status || "-").padStart(6, " ");
+      const size = formatBytes(item.bytes).padStart(8, " ");
+      const result = failed ? `FAIL ${item.error}` : slowFlag ? "SLOW" : "OK";
+      console.log(`${label}${status} ${size} ${formatMs(item.min)} ${formatMs(item.p50)} ${formatMs(item.p95)} ${formatMs(item.max)}  ${result}`);
+    }
+
+    if (slow.length > 0) {
+      console.log(`\n${slow.length} endpoint(s) failed or exceeded ${args.thresholdMs}ms.`);
+      hasFailure = true;
+    } else {
+      console.log(`\nAll measured endpoints are within ${args.thresholdMs}ms.`);
+    }
   }
 
-  const slow = results.filter((item) => item.max > args.thresholdMs || !item.ok);
-  console.log("\nendpoint                         status   size      min     p50     p95     max  result");
-  console.log("--------------------------------------------------------------------------------------");
-  for (const item of results) {
-    const failed = !item.ok;
-    const slowFlag = item.max > args.thresholdMs;
-    const label = item.endpoint.name.padEnd(32, " ");
-    const status = String(item.status || "-").padStart(6, " ");
-    const size = formatBytes(item.bytes).padStart(8, " ");
-    const result = failed ? `FAIL ${item.error}` : slowFlag ? "SLOW" : "OK";
-    console.log(`${label}${status} ${size} ${formatMs(item.min)} ${formatMs(item.p50)} ${formatMs(item.p95)} ${formatMs(item.max)}  ${result}`);
+  if (args.acceptance200) {
+    const concurrentOk = await runConcurrentCheck(args.baseUrl, cookieJar, args);
+    hasFailure = hasFailure || !concurrentOk;
   }
 
-  if (slow.length > 0) {
-    console.log(`\n${slow.length} endpoint(s) failed or exceeded ${args.thresholdMs}ms.`);
+  if (hasFailure) {
     process.exitCode = 1;
-  } else {
-    console.log(`\nAll measured endpoints are within ${args.thresholdMs}ms.`);
   }
 }
 
