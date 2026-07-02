@@ -63,6 +63,10 @@ export function getGenerationAssetsDir(): string {
   return path.join(stateDir, "generations", "images");
 }
 
+export function getBrandingAssetsDir(): string {
+  return path.join(stateDir, "branding");
+}
+
 export function getUsageLifetimePath(): string {
   return path.join(getUsageDir(), "lifetime.json");
 }

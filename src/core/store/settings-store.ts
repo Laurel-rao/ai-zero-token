@@ -48,6 +48,7 @@ export function createDefaultSettings(): GatewaySettings {
     },
     image: {
       freeAccountWebGenerationEnabled: false,
+      generationTimeoutMs: 10 * 60 * 1000,
       limits: {
         enabled: false,
         perUserDaily: 0,
@@ -101,6 +102,7 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
     },
     image: {
       freeAccountWebGenerationEnabled: parsed.image?.freeAccountWebGenerationEnabled ?? defaults.image.freeAccountWebGenerationEnabled,
+      generationTimeoutMs: normalizeMilliseconds(parsed.image?.generationTimeoutMs, defaults.image.generationTimeoutMs, 60_000, 30 * 60 * 1000),
       limits: normalizeImageLimits(parsed.image?.limits, defaults.image.limits),
     },
     wecom: {

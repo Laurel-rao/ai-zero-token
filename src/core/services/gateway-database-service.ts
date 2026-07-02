@@ -923,10 +923,25 @@ export class GatewayDatabaseService {
     this.prune("request_logs", "time", MAX_REQUEST_LOGS);
   }
 
-  async listGenerationHistory(limit = 100, owner?: string, options?: { light?: boolean }): Promise<GenerationHistoryItem[]> {
+  async countGenerationHistory(owner?: string): Promise<number> {
+    await this.init();
+    this.deleteCoveredRunningGenerations(owner);
+    const row = this.database
+      .prepare(`
+        SELECT COUNT(*) AS count
+        FROM generation_history
+        WHERE (? IS NULL OR owner = ?)
+      `)
+      .get(owner ?? null, owner ?? null) as { count?: unknown } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  async listGenerationHistory(limit = 10, owner?: string, options?: { light?: boolean; offset?: number }): Promise<GenerationHistoryItem[]> {
     await this.init();
     this.deleteCoveredRunningGenerations(owner);
     const light = Boolean(options?.light);
+    const safeLimit = clampLimit(limit, MAX_GENERATION_HISTORY);
+    const safeOffset = Math.max(0, Math.trunc(options?.offset ?? 0));
     const rows = this.database
       .prepare(`
         SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
@@ -937,8 +952,9 @@ export class GatewayDatabaseService {
         WHERE (? IS NULL OR owner = ?)
         ORDER BY created_at DESC
         LIMIT ?
+        OFFSET ?
       `)
-      .all(owner ?? null, owner ?? null, clampLimit(limit, MAX_GENERATION_HISTORY)) as Array<Record<string, unknown>>;
+      .all(owner ?? null, owner ?? null, safeLimit, safeOffset) as Array<Record<string, unknown>>;
 
     const now = Date.now();
     return rows.map((row) => ({

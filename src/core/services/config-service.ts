@@ -237,6 +237,7 @@ export class ConfigService {
     };
     image?: {
       freeAccountWebGenerationEnabled?: boolean;
+      generationTimeoutMs?: number;
       limits?: Partial<GatewaySettings["image"]["limits"]>;
     };
     wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
@@ -319,6 +320,7 @@ export class ConfigService {
         image: {
           ...next.image,
           freeAccountWebGenerationEnabled: params.image.freeAccountWebGenerationEnabled ?? next.image.freeAccountWebGenerationEnabled,
+          generationTimeoutMs: normalizeMilliseconds(params.image.generationTimeoutMs, next.image.generationTimeoutMs, 60_000, 30 * 60 * 1000),
           limits: normalizeImageLimits(params.image.limits, next.image.limits),
         },
       };

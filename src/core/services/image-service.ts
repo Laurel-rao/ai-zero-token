@@ -52,6 +52,9 @@ type ImageResult = {
   _gatewayProfile?: OAuthProfile;
 };
 
+type ImageUsage = NonNullable<ImageResult["usage"]>;
+type ImageTokenDetails = NonNullable<ImageUsage["input_tokens_details"]>;
+
 type ImageGenerationOutput = {
   id?: string;
   type?: string;
@@ -85,6 +88,7 @@ const SUPPORTED_IMAGE_MODELS = new Set([
 ]);
 
 const IMAGE_ORCHESTRATOR_MODEL = "gpt-5.4-mini";
+const MAX_IMAGE_REQUEST_COUNT = 10;
 
 const SUPPORTED_IMAGE_QUALITIES = new Set([
   "low",
@@ -105,6 +109,59 @@ const SUPPORTED_IMAGE_BACKGROUNDS = new Set([
 
 const IMAGE_GENERATION_MAX_ATTEMPTS = 3;
 const IMAGE_GENERATION_RETRY_DELAYS_MS = [1500, 4000];
+
+function normalizeImageRequestCount(value: unknown): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : 1;
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.min(MAX_IMAGE_REQUEST_COUNT, Math.max(1, Math.trunc(parsed)));
+}
+
+function sumTokenDetails(
+  left: ImageTokenDetails | undefined,
+  right: ImageTokenDetails | undefined,
+): ImageTokenDetails | undefined {
+  if (!left && !right) {
+    return undefined;
+  }
+  return {
+    image_tokens: (left?.image_tokens ?? 0) + (right?.image_tokens ?? 0),
+    text_tokens: (left?.text_tokens ?? 0) + (right?.text_tokens ?? 0),
+  };
+}
+
+function sumImageUsage(left: ImageResult["usage"] | undefined, right: ImageResult["usage"] | undefined): ImageResult["usage"] | undefined {
+  if (!left && !right) {
+    return undefined;
+  }
+  return {
+    input_tokens: (left?.input_tokens ?? 0) + (right?.input_tokens ?? 0),
+    input_tokens_details: sumTokenDetails(left?.input_tokens_details, right?.input_tokens_details),
+    output_tokens: (left?.output_tokens ?? 0) + (right?.output_tokens ?? 0),
+    output_tokens_details: sumTokenDetails(left?.output_tokens_details, right?.output_tokens_details),
+    total_tokens: (left?.total_tokens ?? 0) + (right?.total_tokens ?? 0),
+  };
+}
+
+function mergeImageResults(results: ImageResult[], count: number): ImageResult {
+  const first = results[0];
+  if (!first) {
+    throw createError("图片生成失败：上游未返回图片。", 502);
+  }
+  const data = results.flatMap((result) => result.data).slice(0, count);
+  const lastProfile = [...results].reverse().find((result) => result._gatewayProfile)?._gatewayProfile;
+  return {
+    created: first.created,
+    data,
+    background: first.background,
+    output_format: first.output_format,
+    quality: first.quality,
+    size: first.size,
+    usage: results.reduce<ImageResult["usage"] | undefined>((usage, result) => sumImageUsage(usage, result.usage), undefined),
+    _gatewayProfile: lastProfile ?? first._gatewayProfile,
+  };
+}
 
 function truncateForLog(value: string, max = 160): string {
   if (value.length <= max) {
@@ -700,6 +757,19 @@ export class ImageService {
   }
 
   async generate(request: ImageRequest, lifecycle?: ImageRequestLifecycle): Promise<ImageResult> {
+    const count = normalizeImageRequestCount(request.n);
+    const results: ImageResult[] = [];
+    while (results.reduce((total, result) => total + result.data.length, 0) < count) {
+      const result = await this.generateSingle(request, lifecycle);
+      results.push(result);
+      if (result.data.length === 0) {
+        break;
+      }
+    }
+    return mergeImageResults(results, count);
+  }
+
+  private async generateSingle(request: ImageRequest, lifecycle?: ImageRequestLifecycle): Promise<ImageResult> {
     const profile = await this.deps.authService.requireUsableProfile("openai-codex");
     const orchestratorModel = IMAGE_ORCHESTRATOR_MODEL;
     const requestedImageModel = this.resolveRequestedImageModel(request.model);
@@ -732,6 +802,7 @@ export class ImageService {
             inputImages: request.inputImages,
             size: request.size,
             responseFormat: "b64_json",
+            timeoutMs: settings.image.generationTimeoutMs,
           }),
           {
             requestId: lifecycle?.requestId,
@@ -888,6 +959,7 @@ export class ImageService {
                 inputImages: request.inputImages,
                 size: request.size,
                 responseFormat: "b64_json",
+                timeoutMs: settings.image.generationTimeoutMs,
               }),
               {
                 requestId: lifecycle?.requestId,

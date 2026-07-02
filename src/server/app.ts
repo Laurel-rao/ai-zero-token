@@ -26,7 +26,7 @@ import {
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
 import type { ChatAttachment, ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
-import { getGenerationAssetsDir } from "../core/store/state-paths.js";
+import { getBrandingAssetsDir, getGenerationAssetsDir } from "../core/store/state-paths.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 const adminUiDistDir = path.join(packageRoot, "admin-ui", "dist");
@@ -36,7 +36,7 @@ const MAX_GATEWAY_REQUEST_LOGS = 100;
 const MAX_PERSISTED_REQUEST_LOGS = 200;
 const MAX_CODEX_RESPONSE_PROFILE_BINDINGS = 5000;
 const CODEX_STREAM_DRAIN_AFTER_CLIENT_CLOSE_MS = 30_000;
-const IMAGE_GENERATION_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_ROUTE_BODY_LIMIT_BYTES = 128 * BYTES_PER_MIB;
 const CODEX_COMPACT_BODY_LIMIT_BYTES = 256 * BYTES_PER_MIB;
 const MAX_CHAT_ATTACHMENTS = 8;
@@ -44,6 +44,7 @@ const MAX_CHAT_IMAGE_ATTACHMENT_BYTES = 10 * BYTES_PER_MIB;
 const MAX_CHAT_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_CHAT_TEXT_ATTACHMENT_CHARS = 512 * 1024;
 const MAX_CHAT_MESSAGE_CHARS = 100_000;
+const MAX_BRANDING_ASSET_BYTES = 512 * 1024;
 const ADMIN_SESSION_COOKIE = "azt_admin_session";
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const WECOM_LOGIN_STATE_COOKIE = "azt_wecom_login_state";
@@ -385,6 +386,7 @@ function isPublicPath(method: string, url: string): boolean {
     pathOnly === "/_gateway/auth/wecom/callback" ||
     pathOnly === "/_gateway/auth/wecom/complete" ||
     pathOnly === "/_gateway/auth/logout" ||
+    pathOnly.startsWith("/_gateway/branding-assets/") ||
     pathOnly.startsWith("/assets/");
 }
 
@@ -515,6 +517,86 @@ async function readAdminUiAsset(assetPath: string): Promise<{ body: Buffer; file
   }
 }
 
+function sanitizeAssetFilename(filename: string): string {
+  const base = path.basename(filename).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return base || "branding-asset";
+}
+
+function parseDataUrl(dataUrl: string): { mimeType: string; data: Buffer } | null {
+  const match = /^data:([^;,]*)(?:;[^,]*)?;base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(dataUrl.trim());
+  if (!match) {
+    return null;
+  }
+  return {
+    mimeType: match[1].toLowerCase(),
+    data: Buffer.from(match[2].replace(/\s+/g, ""), "base64"),
+  };
+}
+
+function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+function normalizeBrandingAssetMime(filename: string, mimeType: string): string {
+  if (mimeType) {
+    return mimeType;
+  }
+  const extension = path.extname(filename).toLowerCase();
+  if (extension === ".svg") {
+    return "image/svg+xml";
+  }
+  if (extension === ".ico") {
+    return "image/x-icon";
+  }
+  return "";
+}
+
+function brandingAssetExtension(kind: "app-icon" | "favicon", filename: string, mimeType: string): ".svg" | ".ico" | null {
+  const extension = path.extname(filename).toLowerCase();
+  const normalizedMimeType = normalizeBrandingAssetMime(filename, mimeType);
+  if (kind === "app-icon" && extension === ".svg" && normalizedMimeType === "image/svg+xml") {
+    return ".svg";
+  }
+  if (
+    kind === "favicon" &&
+    extension === ".ico" &&
+    (normalizedMimeType === "image/x-icon" || normalizedMimeType === "image/vnd.microsoft.icon" || normalizedMimeType === "image/ico" || normalizedMimeType === "application/octet-stream")
+  ) {
+    return ".ico";
+  }
+  return null;
+}
+
+async function saveBrandingAsset(params: { kind: "app-icon" | "favicon"; filename: string; dataUrl: string }): Promise<{ url: string; filename: string; mimeType: string; size: number }> {
+  const parsed = parseDataUrl(params.dataUrl);
+  if (!parsed || parsed.data.length === 0) {
+    throw createHttpError("上传文件格式无效，请选择 SVG 或 ICO 文件。", 400);
+  }
+  if (parsed.data.length > MAX_BRANDING_ASSET_BYTES) {
+    throw createHttpError(`上传文件过大，请控制在 ${Math.round(MAX_BRANDING_ASSET_BYTES / 1024)} KB 内。`, 413);
+  }
+
+  const extension = brandingAssetExtension(params.kind, params.filename, parsed.mimeType);
+  if (!extension) {
+    throw createHttpError(params.kind === "app-icon" ? "设置图标只支持 SVG 文件。" : "网站 favicon 只支持 ICO 文件。", 400);
+  }
+
+  const directory = path.join(getBrandingAssetsDir(), params.kind);
+  await fs.mkdir(directory, { recursive: true });
+  const safeName = sanitizeAssetFilename(params.filename).replace(/\.[^.]+$/u, "");
+  const filename = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}${extension}`;
+  const filePath = path.join(directory, filename);
+  await fs.writeFile(filePath, parsed.data);
+  return {
+    url: `/_gateway/branding-assets/${params.kind}/${encodeURIComponent(filename)}`,
+    filename,
+    mimeType: extension === ".svg" ? "image/svg+xml" : "image/x-icon",
+    size: parsed.data.length,
+  };
+}
+
 const responsesBodySchema = z.object({
   model: z.string().optional(),
   input: z.unknown().optional(),
@@ -630,6 +712,12 @@ const wecomContactImportSchema = z.object({
     .max(5000),
 });
 
+const brandingAssetUploadSchema = z.object({
+  kind: z.enum(["app-icon", "favicon"]),
+  filename: z.string().trim().min(1).max(160),
+  dataUrl: z.string().min(1),
+});
+
 const gatewayUserParamsSchema = z.object({
   id: z.string().min(1),
 });
@@ -702,6 +790,7 @@ const settingsUpdateSchema = z.object({
   image: z
     .object({
       freeAccountWebGenerationEnabled: z.boolean().optional(),
+      generationTimeoutMs: z.number().int().min(60_000).max(30 * 60 * 1000).optional(),
       limits: z
         .object({
           enabled: z.boolean().optional(),
@@ -804,7 +893,8 @@ const githubImageBedHistoryParamsSchema = z.object({
 });
 
 const generationHistoryQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(500).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  page: z.coerce.number().int().min(1).optional(),
   owner: z.string().min(1).max(120).optional(),
   light: z.coerce.boolean().optional(),
 });
@@ -900,7 +990,7 @@ const imageGenerationsBodySchema = z
   .object({
     prompt: z.string().min(1),
     model: z.string().optional(),
-    n: z.number().int().positive().optional(),
+    n: z.number().int().positive().max(10).optional(),
     quality: z.enum(["low", "medium", "high", "auto"]).optional(),
     size: z.string().min(1).optional(),
     background: z.enum(["transparent", "opaque", "auto"]).optional(),
@@ -931,7 +1021,7 @@ const imageEditsBodySchema = z
     image: z.union([imageReferenceSchema, z.array(imageReferenceSchema).min(1).max(16)]).optional(),
     mask: imageReferenceSchema.optional(),
     model: z.string().optional(),
-    n: z.number().int().positive().optional(),
+    n: z.number().int().positive().max(10).optional(),
     quality: z.enum(["low", "medium", "high", "auto"]).optional(),
     size: z.string().min(1).optional(),
     background: z.enum(["transparent", "opaque", "auto"]).optional(),
@@ -1906,6 +1996,7 @@ function extractGatewayChatDeltasFromBufferedText(bufferedText: string, flush = 
 function summarizeImageRequestForLog(body: z.infer<typeof imageGenerationsBodySchema>): Record<string, unknown> {
   return {
     model: body.model ?? "default",
+    n: body.n ?? 1,
     promptLength: body.prompt.length,
     size: body.size ?? "default",
     quality: body.quality ?? "default",
@@ -2086,6 +2177,13 @@ function withDeferredTimeout<T>(
       clearTimeout(timer);
     }
   });
+}
+
+function getImageGenerationTimeoutMs(settings: GatewaySettings): number {
+  const value = settings.image?.generationTimeoutMs;
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(30 * 60 * 1000, Math.max(60_000, Math.trunc(value)))
+    : DEFAULT_IMAGE_GENERATION_TIMEOUT_MS;
 }
 
 function buildResponseApiBody(result: ChatResult, includeRaw?: boolean): Record<string, unknown> {
@@ -3809,11 +3907,22 @@ export function createApp(params?: {
 
   app.get("/_gateway/generations/history", async (request) => {
     const parsed = generationHistoryQuerySchema.safeParse(request.query);
-    const limit = parsed.success ? parsed.data.limit ?? 100 : 100;
+    const limit = parsed.success ? parsed.data.limit ?? 10 : 10;
+    const page = parsed.success ? parsed.data.page ?? 1 : 1;
+    const offset = (page - 1) * limit;
     const session = await getSessionFromRequest(request);
     const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
+    const [items, total] = await Promise.all([
+      ctx.gatewayDatabaseService.listGenerationHistory(limit, owner, { light: parsed.success ? parsed.data.light ?? true : true, offset }),
+      ctx.gatewayDatabaseService.countGenerationHistory(owner),
+    ]);
     return {
-      items: await ctx.gatewayDatabaseService.listGenerationHistory(limit, owner, { light: parsed.success ? parsed.data.light ?? true : true }),
+      items,
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      hasMore: offset + items.length < total,
     };
   });
 
@@ -3866,6 +3975,37 @@ export function createApp(params?: {
     } catch {
       reply.code(404);
       return { error: { type: "not_found", message: "图片不存在。" } };
+    }
+  });
+
+  app.get("/_gateway/branding-assets/:kind/:filename", async (request, reply) => {
+    const params = request.params as { kind?: string; filename?: string };
+    if (params.kind !== "app-icon" && params.kind !== "favicon") {
+      reply.code(404);
+      return { error: { type: "not_found", message: "资源不存在。" } };
+    }
+
+    const filename = path.basename(params.filename ?? "");
+    if (!filename || filename !== params.filename || filename.includes("/") || filename.includes("\\")) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: "资源文件名无效。" } };
+    }
+
+    const root = path.resolve(getBrandingAssetsDir(), params.kind);
+    const filePath = path.resolve(root, filename);
+    if (!filePath.startsWith(`${root}${path.sep}`)) {
+      reply.code(403);
+      return { error: { type: "forbidden", message: "禁止访问该文件。" } };
+    }
+
+    try {
+      const data = await fs.readFile(filePath);
+      reply.header("Content-Type", getContentType(filePath));
+      reply.header("Cache-Control", "public, max-age=31536000, immutable");
+      return reply.send(data);
+    } catch {
+      reply.code(404);
+      return { error: { type: "not_found", message: "资源不存在。" } };
     }
   });
 
@@ -4899,6 +5039,34 @@ export function createApp(params?: {
         providerId: parsed.data.providerId,
       }),
       config: await buildAdminConfig(request),
+    };
+  });
+
+  app.post("/_gateway/admin/branding-assets", async (request, reply) => {
+    const session = await getSessionFromRequest(request);
+    if (!isAdminSession(session)) {
+      reply.code(403);
+      return {
+        error: {
+          type: "forbidden",
+          message: "只有管理员可以上传外观资源。",
+        },
+      };
+    }
+
+    const parsed = brandingAssetUploadSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message: parsed.error.issues[0]?.message ?? "请求体格式错误",
+        },
+      };
+    }
+
+    return {
+      asset: await saveBrandingAsset(parsed.data),
     };
   });
 
@@ -6058,42 +6226,6 @@ export function createApp(params?: {
       };
     }
 
-    if (typeof parsed.data.n === "number" && parsed.data.n > 1) {
-      console.error("[gateway:image] not supported", {
-        method: request.method,
-        url: request.url,
-        summary: summarizeImageRequestForLog(parsed.data),
-        issue: "当前网关暂不支持 images.generations 一次返回多张图（n > 1）",
-      });
-      pushGatewayRequestLog({
-        owner: requestOwner,
-        method: request.method,
-        endpoint: request.url,
-        account: "-",
-        model: parsed.data.model ?? "gpt-image-2",
-        statusCode: 501,
-        durationMs: performance.now() - startedAt,
-        source: requestSourceFromUserAgent(request.headers["user-agent"]),
-        details: {
-          requestId: request.id,
-          remoteAddress: request.ip,
-          userAgent: request.headers["user-agent"],
-          request: summarizeImageRequestForLog(parsed.data),
-          error: {
-            type: "not_supported",
-            message: "当前网关暂不支持 images.generations 一次返回多张图（n > 1）",
-          },
-        },
-      });
-      reply.code(501);
-      return {
-        error: {
-          type: "not_supported",
-          message: "当前网关暂不支持 images.generations 一次返回多张图（n > 1）",
-        },
-      };
-    }
-
     const requestSummary = summarizeImageRequestForLog(parsed.data);
     console.info("[gateway:image] request accepted", {
       method: request.method,
@@ -6103,6 +6235,7 @@ export function createApp(params?: {
 
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
+    const imageGenerationTimeoutMs = getImageGenerationTimeoutMs(settings);
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
     const ownerPolicy = await getImageOwnerPolicy(requestOwner);
     const limit = await checkImageGenerationLimit(requestOwner, settings);
@@ -6228,8 +6361,8 @@ export function createApp(params?: {
               });
             },
           }),
-          IMAGE_GENERATION_TIMEOUT_MS,
-          `图片生成超过 ${Math.floor(IMAGE_GENERATION_TIMEOUT_MS / 1000)} 秒仍未完成，已超时。`,
+          imageGenerationTimeoutMs,
+          `图片生成超过 ${Math.floor(imageGenerationTimeoutMs / 1000)} 秒仍未完成，已超时。`,
         );
       } catch (error) {
         const normalized = normalizeError(error);
@@ -6521,42 +6654,6 @@ export function createApp(params?: {
       };
     }
 
-    if (typeof parsed.data.n === "number" && parsed.data.n > 1) {
-      console.error("[gateway:image:edit] not supported", {
-        method: request.method,
-        url: request.url,
-        summary: summarizeImageEditRequestForLog(parsed.data),
-        issue: "当前网关暂不支持 images.edits 一次返回多张图（n > 1）",
-      });
-      pushGatewayRequestLog({
-        owner: requestOwner,
-        method: request.method,
-        endpoint: request.url,
-        account: "-",
-        model: parsed.data.model ?? "gpt-image-2",
-        statusCode: 501,
-        durationMs: performance.now() - startedAt,
-        source: requestSourceFromUserAgent(request.headers["user-agent"]),
-        details: {
-          requestId: request.id,
-          remoteAddress: request.ip,
-          userAgent: request.headers["user-agent"],
-          request: summarizeImageEditRequestForLog(parsed.data),
-          error: {
-            type: "not_supported",
-            message: "当前网关暂不支持 images.edits 一次返回多张图（n > 1）",
-          },
-        },
-      });
-      reply.code(501);
-      return {
-        error: {
-          type: "not_supported",
-          message: "当前网关暂不支持 images.edits 一次返回多张图（n > 1）",
-        },
-      };
-    }
-
     const imageReferences = getImageEditReferences(parsed.data)
       .map((reference) => normalizeJsonImageReference(reference))
       .map((reference) => ({
@@ -6571,6 +6668,7 @@ export function createApp(params?: {
 
     const activeProfile = await ctx.authService.getActiveProfile();
     const settings = await ctx.configService.getSettings();
+    const imageGenerationTimeoutMs = getImageGenerationTimeoutMs(settings);
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
     const ownerPolicy = await getImageOwnerPolicy(requestOwner);
     const limit = await checkImageGenerationLimit(requestOwner, settings);
@@ -6699,8 +6797,8 @@ export function createApp(params?: {
             });
           },
         }),
-        IMAGE_GENERATION_TIMEOUT_MS,
-        `图片生成超过 ${Math.floor(IMAGE_GENERATION_TIMEOUT_MS / 1000)} 秒仍未完成，已超时。`,
+        imageGenerationTimeoutMs,
+        `图片生成超过 ${Math.floor(imageGenerationTimeoutMs / 1000)} 秒仍未完成，已超时。`,
       );
     } catch (error) {
       const normalized = normalizeError(error);

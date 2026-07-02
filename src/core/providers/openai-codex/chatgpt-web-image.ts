@@ -24,6 +24,7 @@ export type ChatGPTWebImageRequest = {
   inputImages?: Array<{ imageUrl: string }>;
   size?: string;
   responseFormat?: "b64_json" | "url";
+  timeoutMs?: number;
 };
 
 export type ChatGPTWebImageResult = {
@@ -1355,6 +1356,7 @@ async function runImageConversation(params: {
   prompt: string;
   model?: string;
   references: UploadedImage[];
+  timeoutMs?: number;
 }): Promise<ConversationState> {
   const path = "/backend-api/f/conversation";
   const parts = attachmentParts(params.references);
@@ -1413,7 +1415,7 @@ async function runImageConversation(params: {
       paragen_cot_summary_display_override: "allow",
       force_parallel_switch: "auto",
     }),
-    timeoutMs: 300_000,
+    timeoutMs: params.timeoutMs ?? 10 * 60 * 1000,
   });
   if (response.status < 200 || response.status >= 300) {
     const body = await readStreamText(response.body).catch(() => "");
@@ -1638,6 +1640,7 @@ export async function generateChatGPTWebImage(request: ChatGPTWebImageRequest): 
     prompt,
     model: request.model,
     references,
+    timeoutMs: request.timeoutMs,
   });
   const images = await resolveImages(request.profile, state, references.map((reference) => reference.fileId));
 

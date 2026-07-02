@@ -25,7 +25,7 @@ export type ExportedProfile = {
 export type ExportedProfileBundle = {
   type: "codex_profiles";
   exported_at: string;
-  profiles: ExportedProfile[];
+  profiles: Array<ExportedProfile | Record<string, unknown>>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
