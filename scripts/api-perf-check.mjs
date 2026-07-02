@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const DEFAULT_BASE_URL = "http://43.134.21.160";
+const DEFAULT_BASE_URL = "http://43.128.120.182";
 const DEFAULT_THRESHOLD_MS = 2000;
 const DEFAULT_ROUNDS = 3;
 const DEFAULT_TIMEOUT_MS = 8000;

@@ -291,7 +291,7 @@ For JSON image editing, base64 payloads are about 33% larger than the original i
 - `/v1/chat/completions` supports OpenAI-style SSE for `stream=true`; Codex custom providers use the dedicated `/codex/v1/responses` and `/codex/v1/responses/compact` routes for upstream Responses SSE passthrough.
 - `/v1/chat/completions` supports common tool/function-calling fields, but `n > 1` is not supported.
 - `/v1/images/generations` currently returns `b64_json`; hosted image URLs are not supported.
-- `/v1/images/generations` does not support `n > 1`.
+- `/v1/images/generations` and `/v1/images/edits` support `n` up to `10`; the gateway runs multiple upstream image jobs when needed and merges the result.
 - `/v1/images/edits` currently supports JSON only. `multipart/form-data`, `mask`, and `file_id` are not yet supported.
 - Very large base64 JSON requests are constrained by `AZT_BODY_LIMIT_MB` and local memory.
 - OpenAI Responses API compatibility is partial and focused on common local client workflows.

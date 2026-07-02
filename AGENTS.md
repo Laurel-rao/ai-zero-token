@@ -4,7 +4,7 @@
 
 This project was customized and deployed as a Docker service for:
 
-- Public URL: `http://43.134.21.160/`
+- Public URL: `http://43.128.120.182/`
 - Public port: `80`
 - Container name: `ai-zero-token`
 - Docker image tag: `ai-zero-token:local`
@@ -34,8 +34,8 @@ Deploy by syncing the built workspace to the server, rebuilding the Docker image
 ```bash
 cd /Users/raojiajun/mypro/server/nodejs/ai-zero-token
 npm run build && \
-rsync -az --delete --exclude node_modules ./ root@43.134.21.160:/opt/ai-zero-token/src/ && \
-ssh root@43.134.21.160 '
+rsync -az --delete --exclude node_modules ./ root@43.128.120.182:/opt/ai-zero-token/src/ && \
+ssh root@43.128.120.182 '
   cd /opt/ai-zero-token/src &&
   docker build -t ai-zero-token:local . >/tmp/azt-build.log &&
   docker rm -f ai-zero-token >/dev/null 2>&1 || true &&
@@ -60,9 +60,9 @@ The service listens on `8787` inside the container and is published as host port
 Run these checks after deployment:
 
 ```bash
-curl -s http://43.134.21.160/ | sed -n '1,40p'
-ssh root@43.134.21.160 'docker logs --tail 80 ai-zero-token'
-ssh root@43.134.21.160 'docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+curl -s http://43.128.120.182/ | sed -n '1,40p'
+ssh root@43.128.120.182 'docker logs --tail 80 ai-zero-token'
+ssh root@43.128.120.182 'docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 ```
 
 Expected auth status without browser cookie:
@@ -83,7 +83,7 @@ This means the admin auth system is configured and the unauthenticated curl is c
 - If a UI change appears stale, check the asset hash in the served HTML:
 
   ```bash
-  curl -s http://43.134.21.160/ | sed -n '1,40p'
+  curl -s http://43.128.120.182/ | sed -n '1,40p'
   ```
 
 ### Useful Server Debug Commands
@@ -91,13 +91,13 @@ This means the admin auth system is configured and the unauthenticated curl is c
 Inspect recent generated image files:
 
 ```bash
-ssh root@43.134.21.160 'find /opt/ai-zero-token/state -path "*generations*" -type f -printf "%T@ %s %p\n" | sort -nr | head -40'
+ssh root@43.128.120.182 'find /opt/ai-zero-token/state -path "*generations*" -type f -printf "%T@ %s %p\n" | sort -nr | head -40'
 ```
 
 Inspect recent generation history rows:
 
 ```bash
-ssh root@43.134.21.160 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
+ssh root@43.128.120.182 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
 const { DatabaseSync } = require("node:sqlite");
 const db = new DatabaseSync("/data/.state/gateway.sqlite");
 for (const row of db.prepare("SELECT id, owner, created_at, status, endpoint, substr(prompt,1,60) AS prompt, duration_ms FROM generation_history ORDER BY created_at DESC LIMIT 12").all()) {
@@ -109,7 +109,7 @@ NODE'"'"''
 Inspect request logs:
 
 ```bash
-ssh root@43.134.21.160 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
+ssh root@43.128.120.182 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
 const { DatabaseSync } = require("node:sqlite");
 const db = new DatabaseSync("/data/.state/gateway.sqlite");
 for (const row of db.prepare("SELECT id, owner, time, method, endpoint, model, status_code, duration_ms, source FROM request_logs ORDER BY time DESC LIMIT 20").all()) {

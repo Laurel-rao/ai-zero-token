@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE_HOST="${REMOTE_HOST:-root@43.134.21.160}"
+REMOTE_HOST="${REMOTE_HOST:-root@43.128.120.182}"
 REMOTE_SRC="${REMOTE_SRC:-/opt/ai-zero-token/src}"
 REMOTE_ENV="${REMOTE_ENV:-/opt/ai-zero-token/.env}"
 REMOTE_STATE="${REMOTE_STATE:-/opt/ai-zero-token/state}"
@@ -60,4 +60,4 @@ curl -s --max-time 10 "http://127.0.0.1:${HOST_PORT}/_gateway/auth/status"
 echo
 REMOTE_SCRIPT
 
-echo "==> Remote deploy done: http://43.134.21.160/"
+echo "==> Remote deploy done: http://43.128.120.182/"
