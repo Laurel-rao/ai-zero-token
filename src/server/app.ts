@@ -461,6 +461,20 @@ function getContentType(filePath: string): string {
   return assetContentTypes[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
 }
 
+function resolveGenerationImageFile(imagePath: string): { filePath: string; generationId: string } | null {
+  const normalized = path.normalize(imagePath).replace(/^(\.\.(\/|\\|$))+/, "");
+  const root = getGenerationAssetsDir();
+  const filePath = path.resolve(root, normalized);
+  const rootPath = path.resolve(root);
+  if (!filePath.startsWith(`${rootPath}${path.sep}`)) {
+    return null;
+  }
+  return {
+    filePath,
+    generationId: normalized.split(path.sep)[0] || normalized.split("/")[0] || "",
+  };
+}
+
 async function decodeJsonRequestBody(body: Buffer, contentEncoding: string | string[] | undefined): Promise<Buffer> {
   const encodings = (Array.isArray(contentEncoding) ? contentEncoding.join(",") : contentEncoding ?? "")
     .split(",")
@@ -2092,6 +2106,65 @@ function normalizeJsonImageUrl(value: string): string {
   }
 
   return trimmed;
+}
+
+function localGenerationImagePathFromUrl(request: FastifyRequest, imageUrl: string): string | null {
+  const localPrefix = "/_gateway/generations/images/";
+  if (imageUrl.startsWith(localPrefix)) {
+    return imageUrl.slice(localPrefix.length);
+  }
+
+  try {
+    const parsed = new URL(imageUrl);
+    const requestHost = request.headers.host;
+    if (requestHost && parsed.host === requestHost && parsed.pathname.startsWith(localPrefix)) {
+      return parsed.pathname.slice(localPrefix.length) + parsed.search;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function resolveImageEditReferences(
+  request: FastifyRequest,
+  references: Array<{ imageUrl: string }>,
+  params: {
+    session: AdminSession | null;
+    requestOwner?: string;
+    gatewayDatabaseService: ReturnType<typeof createGatewayContext>["gatewayDatabaseService"];
+  },
+): Promise<Array<{ imageUrl: string }>> {
+  const resolved: Array<{ imageUrl: string }> = [];
+
+  for (const reference of references) {
+    const imageUrl = reference.imageUrl.trim();
+    const localImagePath = localGenerationImagePathFromUrl(request, imageUrl);
+
+    if (!localImagePath) {
+      resolved.push(reference);
+      continue;
+    }
+
+    const file = resolveGenerationImageFile(decodeURIComponent(localImagePath));
+    if (!file) {
+      throw new Error("历史图片路径无效。");
+    }
+    if (!isAdminSession(params.session) && file.generationId) {
+      const owner = await params.gatewayDatabaseService.getGenerationOwner(file.generationId);
+      if (!owner || owner !== params.requestOwner) {
+        throw new Error("无权使用该历史图片。");
+      }
+    }
+
+    const data = await fs.readFile(file.filePath);
+    resolved.push({
+      imageUrl: `data:${getContentType(file.filePath)};base64,${data.toString("base64")}`,
+    });
+  }
+
+  return resolved;
 }
 
 function summarizeImageEditRequestForLog(body: z.infer<typeof imageEditsBodySchema>): Record<string, unknown> {
@@ -3952,25 +4025,21 @@ export function createApp(params?: {
     const session = await getSessionFromRequest(request);
     const requestOwner = await getRequestOwner(request);
     const wildcard = (request.params as { "*": string })["*"] ?? "";
-    const normalized = path.normalize(wildcard).replace(/^(\.\.(\/|\\|$))+/, "");
-    const root = getGenerationAssetsDir();
-    const filePath = path.resolve(root, normalized);
-    const rootPath = path.resolve(root);
-    if (!filePath.startsWith(`${rootPath}${path.sep}`)) {
+    const file = resolveGenerationImageFile(wildcard);
+    if (!file) {
       reply.code(403);
       return { error: { type: "forbidden", message: "禁止访问该文件。" } };
     }
-    const generationId = normalized.split(path.sep)[0] || normalized.split("/")[0];
-    if (!isAdminSession(session) && generationId) {
-      const owner = await ctx.gatewayDatabaseService.getGenerationOwner(generationId);
+    if (!isAdminSession(session) && file.generationId) {
+      const owner = await ctx.gatewayDatabaseService.getGenerationOwner(file.generationId);
       if (!owner || owner !== requestOwner) {
         reply.code(403);
         return { error: { type: "forbidden", message: "禁止访问该图片。" } };
       }
     }
     try {
-      const data = await fs.readFile(filePath);
-      reply.header("Content-Type", getContentType(filePath));
+      const data = await fs.readFile(file.filePath);
+      reply.header("Content-Type", getContentType(file.filePath));
       reply.header("Cache-Control", "private, max-age=3600");
       return reply.send(data);
     } catch {
@@ -6553,6 +6622,7 @@ export function createApp(params?: {
   app.post("/v1/images/edits", async (request, reply) => {
     const startedAt = performance.now();
     const requestOwner = await getRequestOwner(request);
+    const session = await getSessionFromRequest(request);
     const contentType = request.headers["content-type"] ?? "";
     if (!String(contentType).toLowerCase().includes("application/json")) {
       pushGatewayRequestLog({
@@ -6655,11 +6725,57 @@ export function createApp(params?: {
       };
     }
 
-    const imageReferences = getImageEditReferences(parsed.data)
-      .map((reference) => normalizeJsonImageReference(reference))
-      .map((reference) => ({
-        imageUrl: reference.imageUrl ?? "",
-      }));
+    let imageReferences: Array<{ imageUrl: string }>;
+    try {
+      imageReferences = await resolveImageEditReferences(
+        request,
+        getImageEditReferences(parsed.data)
+          .map((reference) => normalizeJsonImageReference(reference))
+          .map((reference) => ({
+            imageUrl: reference.imageUrl ?? "",
+          })),
+        {
+          session,
+          requestOwner,
+          gatewayDatabaseService: ctx.gatewayDatabaseService,
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[gateway:image:edit] failed to resolve image references", {
+        method: request.method,
+        url: request.url,
+        summary: summarizeImageEditRequestForLog(parsed.data),
+        error: message,
+      });
+      pushGatewayRequestLog({
+        owner: requestOwner,
+        method: request.method,
+        endpoint: request.url,
+        account: "-",
+        model: parsed.data.model ?? "gpt-image-2",
+        statusCode: 400,
+        durationMs: performance.now() - startedAt,
+        source: requestSourceFromUserAgent(request.headers["user-agent"]),
+        details: {
+          requestId: request.id,
+          remoteAddress: request.ip,
+          userAgent: request.headers["user-agent"],
+          request: summarizeImageEditRequestForLog(parsed.data),
+          error: {
+            type: "validation_error",
+            message,
+          },
+        },
+      });
+      reply.code(400);
+      return {
+        error: {
+          type: "validation_error",
+          message,
+        },
+      };
+    }
     const requestSummary = summarizeImageEditRequestForLog(parsed.data);
     console.info("[gateway:image:edit] request accepted", {
       method: request.method,

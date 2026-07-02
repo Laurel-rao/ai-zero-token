@@ -477,33 +477,6 @@ function buildLinePath(points: Array<{ x: number; y: number }>): string {
   return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
 }
 
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") {
-        resolve(reader.result);
-        return;
-      }
-      reject(new Error("图片转换结果不是字符串。"));
-    };
-    reader.onerror = () => reject(reader.error || new Error("图片转换失败。"));
-    reader.readAsDataURL(blob);
-  });
-}
-
-async function imageUrlToDataUrl(url: string): Promise<{ dataUrl: string; size: number }> {
-  const response = await fetch(url, { credentials: "include" });
-  if (!response.ok) {
-    throw new Error(`读取历史图片失败：HTTP ${response.status}`);
-  }
-  const blob = await response.blob();
-  return {
-    dataUrl: await blobToDataUrl(blob),
-    size: blob.size,
-  };
-}
-
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -1108,36 +1081,30 @@ export function GeneratePage(props: {
     props.setStatus("已带入历史提示词和参数。");
   }
 
-  async function editFromHistory(item: GenerateHistoryItem) {
+  function editFromHistory(item: GenerateHistoryItem) {
     const image = item.images[0];
     if (!image?.url) {
       props.setStatus("这条历史没有可编辑的生成图。");
       return;
     }
 
-    props.setBusy("test");
-    try {
-      const { dataUrl, size } = await imageUrlToDataUrl(image.url);
-      setPrompt(item.prompt);
-      setRatio(item.ratio && ratioOptions.some((option) => option.ratio === item.ratio) ? item.ratio : "1:1");
-      setQuality(item.quality || "low");
-      setOutputFormat(item.outputFormat || "png");
-      setReferenceImages([{
-        id: createClientId("history-image-reference"),
-        src: dataUrl,
-        previewSrc: image.previewUrl || await createReferencePreview(dataUrl, size),
-        name: image.filename || "history-image.png",
-        size,
-      }]);
-      setResultImages([]);
-      setResponseBody("已将历史图片作为参考图，本次会走 images.edits。");
-      setTab("create");
-      props.setStatus("已将历史图片作为编辑参考图。");
-    } catch (error) {
-      props.setStatus(`载入历史图片失败：${errorMessage(error)}`);
-    } finally {
-      props.setBusy(null);
-    }
+    const imageUrl = new URL(image.url, window.location.origin).toString();
+    const previewUrl = image.previewUrl ? new URL(image.previewUrl, window.location.origin).toString() : imageUrl;
+    setPrompt(item.prompt);
+    setRatio(item.ratio && ratioOptions.some((option) => option.ratio === item.ratio) ? item.ratio : "1:1");
+    setQuality(item.quality || "low");
+    setOutputFormat(item.outputFormat || "png");
+    setReferenceImages([{
+      id: createClientId("history-image-reference"),
+      src: imageUrl,
+      previewSrc: previewUrl,
+      name: image.filename || "history-image.png",
+      size: image.size || image.previewSize || 0,
+    }]);
+    setResultImages([]);
+    setResponseBody("已将历史图片作为参考图，本次会走 images.edits。");
+    setTab("create");
+    props.setStatus("已将历史图片作为编辑参考图，提交时会由服务端读取原图。");
   }
 
   function copyHistoryPrompt(item: GenerateHistoryItem) {
