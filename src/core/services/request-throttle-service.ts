@@ -1,5 +1,6 @@
 import type { OAuthProfile } from "../types.js";
 import { ConfigService } from "./config-service.js";
+import { RedisThrottleStore } from "./redis-throttle-store.js";
 
 type ThrottleSettings = {
   enabled: boolean;
@@ -46,6 +47,7 @@ export class RequestThrottleService {
   private readonly queues = new Map<string, Promise<void>>();
   private readonly concurrencyQueues = new Map<string, ProfileQueueState>();
   private readonly lastStartTimes = new Map<string, number>();
+  private readonly redisStore = RedisThrottleStore.fromEnv();
 
   constructor(private readonly configService: ConfigService) {}
 
@@ -125,6 +127,103 @@ export class RequestThrottleService {
     };
   }
 
+  private async acquireRedisProfileSlot(
+    queueKey: string,
+    maxConcurrency: number,
+    details?: { requestId?: string; route?: string; model?: string; priority?: number; onQueued?: () => void | Promise<void> },
+  ): Promise<{ token: string; release: () => Promise<void> }> {
+    const redisStore = this.redisStore;
+    if (!redisStore) {
+      throw new Error("Redis throttle store is not configured.");
+    }
+
+    const token = redisStore.createLeaseToken(queueKey);
+    let queued = false;
+    while (true) {
+      const result = await redisStore.tryAcquireSlot(queueKey, token, maxConcurrency);
+      if (result.acquired) {
+        return {
+          token,
+          release: async () => {
+            await redisStore.releaseSlot(queueKey, token);
+          },
+        };
+      }
+
+      if (!queued) {
+        queued = true;
+        console.info("[gateway:throttle] queued Codex request in Redis", {
+          profileId: queueKey,
+          route: details?.route,
+          model: details?.model,
+          requestId: details?.requestId,
+          priority: Number.isFinite(details?.priority) ? Number(details?.priority) : 0,
+          running: result.running,
+          maxConcurrency,
+          retryAfterMs: result.retryAfterMs,
+        });
+        await details?.onQueued?.();
+      }
+
+      await sleep(redisStore.getPollDelayMs(result.retryAfterMs));
+    }
+  }
+
+  private startRedisSlotHeartbeat(queueKey: string, token: string): () => void {
+    const redisStore = this.redisStore;
+    if (!redisStore) {
+      return () => undefined;
+    }
+
+    let stopped = false;
+    const timer = setInterval(() => {
+      if (stopped) {
+        return;
+      }
+      void redisStore.refreshSlot(queueKey, token).catch((error) => {
+        console.warn("[gateway:throttle] failed to refresh Redis throttle slot", {
+          profileId: queueKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, redisStore.heartbeatIntervalMs);
+    timer.unref();
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }
+
+  private async waitForRedisStartTurn(
+    profile: OAuthProfile,
+    settings: ThrottleSettings,
+    details?: { requestId?: string; route?: string; model?: string },
+  ): Promise<void> {
+    const redisStore = this.redisStore;
+    if (!redisStore || !settings.enabled) {
+      return;
+    }
+
+    const queueKey = profile.profileId;
+    while (true) {
+      const jitterMs = settings.jitterMs > 0 ? Math.floor(Math.random() * settings.jitterMs) : 0;
+      const reservation = await redisStore.reserveStart(queueKey, settings.minDelayMs, jitterMs);
+      if (reservation.reserved) {
+        return;
+      }
+
+      console.info("[gateway:throttle] delaying Codex request in Redis", {
+        profileId: queueKey,
+        route: details?.route,
+        model: details?.model,
+        requestId: details?.requestId,
+        waitMs: reservation.waitMs,
+      });
+      await sleep(Math.max(50, Math.min(reservation.waitMs || redisStore.pollIntervalMs, redisStore.pollIntervalMs)));
+    }
+  }
+
   async runForProfile<T>(
     profile: OAuthProfile,
     operation: () => Promise<T>,
@@ -139,6 +238,46 @@ export class RequestThrottleService {
   ): Promise<T> {
     const settings = await this.getThrottleSettings();
     const queueKey = profile.profileId;
+    if (this.redisStore) {
+      const slot = await this.acquireRedisProfileSlot(queueKey, settings.maxConcurrency, details);
+      const stopHeartbeat = this.startRedisSlotHeartbeat(queueKey, slot.token);
+      let released = false;
+      const release = async () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        stopHeartbeat();
+        try {
+          await slot.release();
+        } catch (error) {
+          console.warn("[gateway:throttle] failed to release Redis throttle slot", {
+            profileId: queueKey,
+            route: details?.route,
+            model: details?.model,
+            requestId: details?.requestId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+
+      let started = false;
+      const runOperation = async () => {
+        if (!started) {
+          started = true;
+          await details?.onStart?.();
+        }
+        return operation();
+      };
+
+      try {
+        await this.waitForRedisStartTurn(profile, settings, details);
+        return await runOperation();
+      } finally {
+        await release();
+      }
+    }
+
     const release = await this.acquireProfileSlot(queueKey, settings.maxConcurrency, details);
     let started = false;
     const runOperation = async () => {
