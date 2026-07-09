@@ -104,13 +104,40 @@
 
 .generate-control-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(104px, 124px) minmax(104px, 124px);
-  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px 8px;
   align-items: start;
 }
 
 .generate-control-grid .field {
   min-width: 0;
+}
+
+.generate-control-grid .field:first-child {
+  grid-column: 1 / -1;
+}
+
+.custom-size-field {
+  min-width: 118px;
+}
+
+.custom-size-field .input:disabled {
+  color: var(--text-soft);
+  background: #f8fafc;
+  opacity: 1;
+}
+
+.custom-size-field .input.is-invalid {
+  border-color: #fca5a5;
+  background: #fff7ed;
+}
+
+.field-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .ratio-grid {
@@ -1077,12 +1104,6 @@
     height: 360px;
   }
 
-  .generate-control-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(108px, 150px) minmax(108px, 150px);
-  }
-}
-
-@media (max-width: 1280px) {
   .generate-control-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
