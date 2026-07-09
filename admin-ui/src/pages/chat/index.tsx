@@ -4,7 +4,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
-import type { BusyAction } from "@/shared/lib/app-types";
+import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, errorMessage } from "@/shared/lib/app-utils";
 import { formatFileSize, formatFullTime } from "@/shared/lib/format";
 
@@ -19,6 +19,13 @@ const COMPOSER_MAX_HEIGHT = 150;
 const CHAT_HISTORY_LIMIT = 100;
 const CHAT_MESSAGE_PAGE_SIZE = 80;
 const CHAT_DETAIL_CACHE_LIMIT = 8;
+const CHAT_IMAGE_CLASSIFIER_MODEL = "gpt-5.4";
+const CHAT_IMAGE_GENERATION_MODEL = "gpt-image-2";
+const CHAT_IMAGE_GENERATION_SIZE = "1024x576";
+const CHAT_IMAGE_GENERATION_QUALITY = "medium";
+const CHAT_IMAGE_POLL_INTERVAL_MS = 2000;
+const CHAT_IMAGE_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const CHAT_IMAGE_PROMPT_MAX_LENGTH = 8000;
 const HTML_PREVIEW_CSP = "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src data: blob:; child-src data: blob:; form-action 'none'; base-uri 'none'";
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "txt",
@@ -73,6 +80,9 @@ type ChatAttachment = {
   name: string;
   mimeType: string;
   size: number;
+  url?: string;
+  previewUrl?: string;
+  previewSize?: number;
   dataUrl?: string;
   text?: string;
 };
@@ -112,6 +122,59 @@ type ChatSseEvent = {
 type PendingChatStart = {
   userMessageId: string;
   assistantMessageId: string;
+};
+
+type ChatImageActionState = {
+  status: "checking" | "ready" | "generating" | "success" | "failed";
+  prompt?: string;
+  reason?: string;
+  images?: PreviewImage[];
+  error?: string;
+};
+
+type ChatImageDecision = {
+  shouldGenerate: boolean;
+  prompt: string;
+  reason?: string;
+};
+
+type ChatImagePromptCandidate = ChatImageDecision & {
+  score: number;
+};
+
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string | null;
+    };
+  }>;
+};
+
+type ChatImageJobResponse = {
+  id: string;
+  status: "queued";
+  history_url?: string;
+};
+
+type ChatGenerationHistoryItem = {
+  id: string;
+  status: "queued" | "running" | "success" | "failed";
+  error?: string;
+  images: Array<{
+    filename: string;
+    url: string;
+    mimeType: string;
+    size: number;
+    width?: number;
+    height?: number;
+    previewUrl?: string;
+    previewMimeType?: string;
+    previewSize?: number;
+  }>;
+};
+
+type ChatGenerationHistoryResponse = {
+  item: ChatGenerationHistoryItem;
 };
 
 type ClipboardLike = {
@@ -254,6 +317,10 @@ function normalizeDataUrlMimeType(dataUrl: string, mimeType: string): string {
   return dataUrl.replace(/^data:[^,]*;base64,/i, `data:${mimeType};base64,`);
 }
 
+function attachmentImageSrc(attachment: ChatAttachment): string {
+  return attachment.previewUrl || attachment.url || attachment.dataUrl || "";
+}
+
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
@@ -333,6 +400,191 @@ function parseChatHttpError(text: string, fallback: string): string {
   } catch {
     return text;
   }
+}
+
+function extractJsonObjectText(value: string): string {
+  const trimmed = value.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  const source = fenced || trimmed;
+  const start = source.indexOf("{");
+  const end = source.lastIndexOf("}");
+  return start >= 0 && end > start ? source.slice(start, end + 1) : source;
+}
+
+function parseChatImageDecision(value: string): ChatImageDecision {
+  const parsed = JSON.parse(extractJsonObjectText(value)) as {
+    shouldGenerate?: unknown;
+    should_generate?: unknown;
+    prompt?: unknown;
+    imagePrompt?: unknown;
+    image_prompt?: unknown;
+    reason?: unknown;
+  };
+  const shouldGenerate = parsed.shouldGenerate === true || parsed.should_generate === true;
+  const prompt = [parsed.prompt, parsed.imagePrompt, parsed.image_prompt]
+    .find((item): item is string => typeof item === "string" && item.trim().length > 0)
+    ?.trim() ?? "";
+  return {
+    shouldGenerate: shouldGenerate && prompt.length > 0,
+    prompt,
+    reason: typeof parsed.reason === "string" ? parsed.reason.trim() : undefined,
+  };
+}
+
+function extractMarkdownSections(value: string): Array<{ heading: string; body: string }> {
+  const headings = Array.from(value.matchAll(/^#{1,6}\s+(.+?)\s*$/gm));
+  return headings.map((heading, index) => {
+    const start = (heading.index ?? 0) + heading[0].length;
+    const end = headings[index + 1]?.index ?? value.length;
+    return {
+      heading: heading[1].replace(/\s*#+\s*$/, "").trim(),
+      body: value.slice(start, end).trim(),
+    };
+  });
+}
+
+function firstPromptFence(value: string): string | null {
+  for (const match of value.matchAll(/```[^\n`]*\n([\s\S]*?)```/g)) {
+    const body = match[1].trim();
+    if (body && !isNegativePromptText(body)) {
+      return body;
+    }
+  }
+  return null;
+}
+
+function isNegativePromptText(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return /负面提示词|negative prompt|photorealistic|deformed hands|watermark|bad fingers/.test(normalized) &&
+    !/第一人称|画面|构图|style|animation|screenshot|pov|kitchen|burger|海底|动画/.test(normalized);
+}
+
+function cleanChatImagePrompt(value: string): string {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/^[-*_]{3,}\s*$/gm, "")
+    .replace(/^\s*(中文完整提示词|中文提示词|english prompt|英文提示词|推荐最终组合|更短但更准的版本)\s*[:：]?\s*/gim, "")
+    .trim()
+    .slice(0, CHAT_IMAGE_PROMPT_MAX_LENGTH)
+    .trim();
+}
+
+function isUsableChatImagePrompt(value: string): boolean {
+  if (value.length < 40 || isNegativePromptText(value)) {
+    return false;
+  }
+  const visualMatches = value.match(/生图|提示词|prompt|画面|风格|镜头|构图|海报|插画|摄影|动画|截图|角色|场景|背景|色彩|第一人称|高清|餐厅|厨房|汉堡|海底|screenshot|style|pov|composition|cartoon|animation|cinematic/gi);
+  return (visualMatches?.length ?? 0) >= 3;
+}
+
+function sectionPromptPriority(heading: string): number {
+  const normalized = heading.toLowerCase();
+  if (/负面|negative/.test(normalized)) {
+    return 0;
+  }
+  if (/推荐最终组合|final\s+prompt|最终组合/.test(normalized)) {
+    return 120;
+  }
+  if (/中文完整提示词|完整提示词|中文提示词/.test(normalized)) {
+    return 110;
+  }
+  if (/english\s+prompt|英文提示词/.test(normalized)) {
+    return 100;
+  }
+  if (/更短但更准|短版提示词|精简提示词/.test(normalized)) {
+    return 90;
+  }
+  if (/midjourney|sdxl|关键词|prompt|提示词/.test(normalized)) {
+    return 55;
+  }
+  return 0;
+}
+
+function addChatImagePromptCandidate(candidates: ChatImagePromptCandidate[], value: string, score: number, reason: string) {
+  const prompt = cleanChatImagePrompt(value);
+  if (!isUsableChatImagePrompt(prompt)) {
+    return;
+  }
+  candidates.push({
+    shouldGenerate: true,
+    prompt,
+    reason,
+    score,
+  });
+}
+
+function extractChatImagePromptCandidate(content: string): ChatImageDecision | null {
+  const source = content.trim();
+  if (!source) {
+    return null;
+  }
+  const candidates: ChatImagePromptCandidate[] = [];
+  for (const section of extractMarkdownSections(source)) {
+    const priority = sectionPromptPriority(section.heading);
+    if (priority <= 0) {
+      continue;
+    }
+    addChatImagePromptCandidate(
+      candidates,
+      firstPromptFence(section.body) || section.body,
+      priority,
+      `检测到「${section.heading}」提示词段落。`,
+    );
+  }
+
+  for (const match of source.matchAll(/```[^\n`]*\n([\s\S]*?)```/g)) {
+    const body = match[1].trim();
+    const before = source.slice(Math.max(0, (match.index ?? 0) - 180), match.index ?? 0);
+    if (/负面|negative/i.test(before)) {
+      continue;
+    }
+    if (/推荐最终组合|final\s+prompt|生图|提示词|prompt|midjourney|sdxl/i.test(before)) {
+      addChatImagePromptCandidate(candidates, body, 85, "检测到可直接使用的生图提示词代码块。");
+    }
+  }
+
+  if (candidates.length === 0 && /生图|图片生成|提示词|prompt/i.test(source)) {
+    const withoutNegative = source.split(/\n#{1,6}\s*(?:负面提示词|negative prompt)\b/i)[0]?.trim() || source;
+    addChatImagePromptCandidate(candidates, withoutNegative, 45, "检测到回复包含完整的生图提示词描述。");
+  }
+
+  const best = candidates.sort((left, right) => right.score - left.score || right.prompt.length - left.prompt.length)[0];
+  if (!best) {
+    return null;
+  }
+  return {
+    shouldGenerate: true,
+    prompt: best.prompt,
+    reason: best.reason,
+  };
+}
+
+function chatGeneratedPreviewItems(images: PreviewImage[]): ModalImageItem[] {
+  return images.map((image) => ({
+    src: image.fullSrc || image.src,
+    placeholderSrc: image.fullSrc && image.fullSrc !== image.src ? image.src : undefined,
+    meta: image.fullMeta || image.meta,
+    filename: image.filename,
+    ratio: image.width && image.height ? `${image.width}:${image.height}` : undefined,
+  }));
+}
+
+function previewImagesFromChatHistory(item: ChatGenerationHistoryItem): PreviewImage[] {
+  return item.images.map((image) => {
+    const dimension = image.width && image.height ? `${image.width}×${image.height}` : "";
+    const previewSize = image.previewSize ?? 0;
+    return {
+      src: image.previewUrl || image.url,
+      fullSrc: image.url,
+      filename: image.filename,
+      meta: image.previewUrl && previewSize > 0
+        ? `${dimension ? `${dimension} · ` : ""}预览 ${Math.round(previewSize / 1024)} KB · 原图 ${Math.round(image.size / 1024)} KB`
+        : `${image.mimeType}${dimension ? ` · ${dimension}` : ""} · ${(image.size / 1024).toFixed(1)} KB`,
+      fullMeta: `${image.mimeType}${dimension ? ` · ${dimension}` : ""} · ${(image.size / 1024).toFixed(1)} KB`,
+      width: image.width,
+      height: image.height,
+    };
+  });
 }
 
 function filesFromClipboardData(clipboardData: ClipboardLike): File[] {
@@ -522,6 +774,7 @@ export function ChatPage(props: {
   busy: BusyAction;
   setBusy: (value: BusyAction) => void;
   setStatus: (value: string) => void;
+  setPreviewImage: (value: ModalImage | null) => void;
 }) {
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -540,6 +793,7 @@ export function ChatPage(props: {
   const [editingTitle, setEditingTitle] = useState("");
   const [editingMessage, setEditingMessage] = useState<EditingMessage | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [imageActions, setImageActions] = useState<Record<string, ChatImageActionState>>({});
   const [htmlPreview, setHtmlPreview] = useState<HtmlPreview | null>(null);
   const [htmlPreviewPosition, setHtmlPreviewPosition] = useState<HtmlPreviewPosition | null>(null);
   const [htmlPreviewMaximized, setHtmlPreviewMaximized] = useState(false);
@@ -561,6 +815,7 @@ export function ChatPage(props: {
   const shouldStickToBottomRef = useRef(true);
   const activeIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<ChatConversation[]>([]);
+  const imageActionDetectionRef = useRef<Set<string>>(new Set());
   const lastScrollTopRef = useRef(0);
   const dragDepthRef = useRef(0);
   const previewDragRef = useRef<HtmlPreviewDragState | null>(null);
@@ -608,6 +863,30 @@ export function ChatPage(props: {
     }
     scrollMessagesToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    setImageActions((current) => {
+      const messageIds = new Set(messages.map((message) => message.id));
+      for (const id of Array.from(imageActionDetectionRef.current)) {
+        if (!messageIds.has(id)) {
+          imageActionDetectionRef.current.delete(id);
+        }
+      }
+      const next = Object.fromEntries(Object.entries(current).filter(([id]) => messageIds.has(id)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [messages]);
+
+  useEffect(() => {
+    const candidates = messages
+      .filter((message) => message.role === "assistant" && message.status === "success" && message.content.trim().length >= 12)
+      .slice(-3);
+    for (const message of candidates) {
+      if (!imageActions[message.id] && !imageActionDetectionRef.current.has(message.id)) {
+        void detectImageAction(message);
+      }
+    }
+  }, [messages, imageActions]);
 
   useEffect(() => {
     adjustComposerHeight();
@@ -1291,6 +1570,9 @@ export function ChatPage(props: {
         const replaceDone = (items: ChatMessage[]) => replaceOrAppendMessage(items, message);
         updateCachedConversationMessages(conversationId, replaceDone);
         updateVisibleConversationMessages(conversationId, replaceDone);
+        if (message.role === "assistant" && message.status === "success" && message.content.trim()) {
+          void detectImageAction(message);
+        }
       }
       void loadConversations(conversationId || undefined, { loadActive: false });
       return;
@@ -1304,6 +1586,158 @@ export function ChatPage(props: {
         updateVisibleConversationMessages(conversationId, replaceFailed);
       }
       props.setStatus(`聊天失败：${message}`);
+    }
+  }
+
+  async function detectImageAction(message: ChatMessage) {
+    if (imageActions[message.id] || imageActionDetectionRef.current.has(message.id)) {
+      return;
+    }
+    const content = message.content.trim();
+    if (!content || content.length < 12) {
+      return;
+    }
+    imageActionDetectionRef.current.add(message.id);
+    const localDecision = extractChatImagePromptCandidate(content);
+    if (localDecision?.shouldGenerate) {
+      setImageActions((current) => ({
+        ...current,
+        [message.id]: {
+          status: "ready",
+          prompt: localDecision.prompt,
+          reason: localDecision.reason,
+        },
+      }));
+      return;
+    }
+    setImageActions((current) => ({
+      ...current,
+      [message.id]: { status: "checking" },
+    }));
+    try {
+      const result = await fetchJson<ChatCompletionResponse>("/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: CHAT_IMAGE_CLASSIFIER_MODEL,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "你是聊天内容到生图动作的判定器。",
+                "判断 assistant 回复是否已经给出了可以直接用于图片生成的画面描述、提示词、分镜画面、海报/商品图/插画/摄影等视觉生成需求。",
+                "只有当回复内容适合立即调用图片生成时才返回 shouldGenerate=true。",
+                "如果只是普通问答、代码、表格、解释、拒绝、无明确画面主体或需要继续追问，返回 false。",
+                "返回严格 JSON，不要 Markdown：{\"shouldGenerate\":boolean,\"prompt\":\"中文生图提示词\",\"reason\":\"简短原因\"}",
+              ].join("\n"),
+            },
+            {
+              role: "user",
+              content: `assistant 回复：\n${content.slice(0, 6000)}`,
+            },
+          ],
+          temperature: 0,
+          max_tokens: 900,
+        }),
+      });
+      const text = result.choices?.[0]?.message?.content?.trim() || "";
+      const decision = parseChatImageDecision(text);
+      setImageActions((current) => {
+        if (!current[message.id]) {
+          return current;
+        }
+        if (!decision.shouldGenerate) {
+          const { [message.id]: _removed, ...rest } = current;
+          return rest;
+        }
+        return {
+          ...current,
+          [message.id]: {
+            status: "ready",
+            prompt: decision.prompt,
+            reason: decision.reason,
+          },
+        };
+      });
+    } catch {
+      setImageActions((current) => {
+        const { [message.id]: _removed, ...rest } = current;
+        return rest;
+      });
+    }
+  }
+
+  async function generateFromChatMessage(message: ChatMessage) {
+    const current = imageActions[message.id];
+    const prompt = current?.prompt?.trim() || message.content.trim();
+    if (!prompt || current?.status === "generating") {
+      return;
+    }
+    setImageActions((items) => ({
+      ...items,
+      [message.id]: {
+        ...current,
+        status: "generating",
+        prompt,
+        error: undefined,
+      },
+    }));
+    props.setStatus("正在根据聊天回复生图...");
+    try {
+      const job = await fetchJson<ChatImageJobResponse>("/v1/images/generations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: CHAT_IMAGE_GENERATION_MODEL,
+          prompt,
+          n: 1,
+          size: CHAT_IMAGE_GENERATION_SIZE,
+          quality: CHAT_IMAGE_GENERATION_QUALITY,
+          output_format: "png",
+          response_format: "b64_json",
+          _gateway_background: true,
+        }),
+      });
+      const startedAt = Date.now();
+      let lastItem: ChatGenerationHistoryItem | null = null;
+      while (Date.now() - startedAt < CHAT_IMAGE_POLL_TIMEOUT_MS) {
+        await new Promise((resolve) => window.setTimeout(resolve, CHAT_IMAGE_POLL_INTERVAL_MS));
+        const history = await fetchJson<ChatGenerationHistoryResponse>(`/_gateway/generations/history/${encodeURIComponent(job.id)}`);
+        lastItem = history.item;
+        if (lastItem.status === "success") {
+          const images = previewImagesFromChatHistory(lastItem);
+          if (images.length === 0) {
+            throw new Error("生图完成，但历史记录里没有可预览图片。");
+          }
+          setImageActions((items) => ({
+            ...items,
+            [message.id]: {
+              ...items[message.id],
+              status: "success",
+              prompt,
+              images,
+            },
+          }));
+          props.setStatus("聊天生图完成。");
+          window.setTimeout(() => scrollMessagesToBottom("smooth"), 60);
+          return;
+        }
+        if (lastItem.status === "failed") {
+          throw new Error(lastItem.error || "生图任务失败。");
+        }
+      }
+      throw new Error(lastItem?.status ? `生图任务仍在 ${lastItem.status}，请稍后到生图历史查看。` : "生图任务等待超时。");
+    } catch (error) {
+      setImageActions((items) => ({
+        ...items,
+        [message.id]: {
+          ...items[message.id],
+          status: "failed",
+          prompt,
+          error: errorMessage(error),
+        },
+      }));
+      props.setStatus(`聊天生图失败：${errorMessage(error)}`);
     }
   }
 
@@ -1580,6 +2014,72 @@ export function ChatPage(props: {
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
+  function openChatImagePreview(images: PreviewImage[], index: number) {
+    const gallery = chatGeneratedPreviewItems(images);
+    const active = gallery[index];
+    if (!active) {
+      return;
+    }
+    props.setPreviewImage({ ...active, gallery, index });
+  }
+
+  function renderChatImageResult(message: ChatMessage) {
+    const action = imageActions[message.id];
+    if (!action || (action.status !== "generating" && action.status !== "success" && action.status !== "failed")) {
+      return null;
+    }
+
+    if (action.status === "generating") {
+      return (
+        <div className="chat-image-result is-loading">
+          <Loader2 className="spin" size={16} />
+          <span>正在根据这条回复生成图片...</span>
+        </div>
+      );
+    }
+
+    if (action.status === "failed") {
+      return (
+        <div className="chat-image-result is-failed">
+          <TriangleAlert size={16} />
+          <span>{action.error || "生图失败。"}</span>
+          <button className="chat-image-inline-btn" type="button" onClick={() => void generateFromChatMessage(message)}>
+            <RefreshCw size={14} />
+            重试
+          </button>
+        </div>
+      );
+    }
+
+    const images = action.images ?? [];
+    if (images.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="chat-image-result is-success" aria-label="聊天生图结果">
+        <div className="chat-image-result-head">
+          <strong>生成图片</strong>
+          <span>{images.length} 张</span>
+        </div>
+        <div className="chat-image-grid">
+          {images.map((image, index) => (
+            <figure className="chat-image-card" key={`${message.id}-${image.filename}-${index}`}>
+              <button type="button" onClick={() => openChatImagePreview(images, index)} aria-label={`预览第 ${index + 1} 张图片`}>
+                <img src={image.src} alt={image.meta} loading="lazy" decoding="async" />
+              </button>
+              <figcaption>{image.meta}</figcaption>
+              <a href={image.fullSrc || image.src} download={image.filename}>
+                <Download size={14} />
+                下载
+              </a>
+            </figure>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   function startHtmlPreviewDrag(event: ReactPointerEvent<HTMLDivElement>) {
     if (htmlPreviewMaximized || event.button !== 0) {
       return;
@@ -1743,6 +2243,15 @@ export function ChatPage(props: {
                         重发
                       </button>
                     ) : null}
+                    {message.role === "assistant" && message.status === "success" && imageActions[message.id]?.status === "checking" ? (
+                      <em>识别生图</em>
+                    ) : null}
+                    {message.role === "assistant" && message.status === "success" && imageActions[message.id]?.status === "ready" ? (
+                      <button className="chat-retry-btn chat-image-generate-btn" type="button" onClick={() => void generateFromChatMessage(message)} disabled={sending || props.busy === "chat"} title="根据这条回复生图">
+                        <ImageIcon size={14} />
+                        生图
+                      </button>
+                    ) : null}
                     {message.role === "user" && message.status === "success" ? (
                       <button
                         className="chat-retry-btn"
@@ -1785,12 +2294,13 @@ export function ChatPage(props: {
                   ) : (
                     <ChatMessageContent id={message.id} content={message.content} status={message.status} onPreviewHtml={openHtmlPreview} />
                   )}
+                  {renderChatImageResult(message)}
                   {(message.attachments ?? []).length > 0 ? (
                     <div className="chat-message-attachments" aria-label="消息附件">
                       {(message.attachments ?? []).map((attachment) => (
                         <div className={`chat-message-attachment is-${attachment.kind}`} key={attachment.id}>
-                          {attachment.kind === "image" && attachment.dataUrl ? (
-                            <img src={attachment.dataUrl} alt={attachment.name} />
+                          {attachment.kind === "image" && attachmentImageSrc(attachment) ? (
+                            <img src={attachmentImageSrc(attachment)} alt={attachment.name} />
                           ) : (
                             <FileText size={16} />
                           )}
@@ -1833,8 +2343,8 @@ export function ChatPage(props: {
                 {attachments.map((attachment) => (
                   <div className={`chat-attachment-chip is-${attachment.kind}`} key={attachment.id}>
                     <div className="chat-attachment-thumb">
-                      {attachment.kind === "image" && attachment.dataUrl ? (
-                        <img src={attachment.dataUrl} alt={attachment.name} />
+                      {attachment.kind === "image" && attachmentImageSrc(attachment) ? (
+                        <img src={attachmentImageSrc(attachment)} alt={attachment.name} />
                       ) : attachment.kind === "image" ? (
                         <ImageIcon size={16} />
                       ) : (

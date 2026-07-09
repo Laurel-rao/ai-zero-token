@@ -63,6 +63,10 @@ export function getGenerationAssetsDir(): string {
   return path.join(stateDir, "generations", "images");
 }
 
+export function getChatAttachmentAssetsDir(): string {
+  return path.join(stateDir, "chat-attachments");
+}
+
 export function getBrandingAssetsDir(): string {
   return path.join(stateDir, "branding");
 }

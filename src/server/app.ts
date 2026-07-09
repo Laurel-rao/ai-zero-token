@@ -26,7 +26,7 @@ import {
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
 import type { ChatAttachment, ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
-import { getBrandingAssetsDir, getGenerationAssetsDir } from "../core/store/state-paths.js";
+import { getBrandingAssetsDir, getChatAttachmentAssetsDir, getGenerationAssetsDir } from "../core/store/state-paths.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 const adminUiDistDir = path.join(packageRoot, "admin-ui", "dist");
@@ -418,6 +418,9 @@ function isUserGatewayPath(method: string, url: string): boolean {
   if (method === "GET" && pathOnly.startsWith("/_gateway/generations/images/")) {
     return true;
   }
+  if (method === "GET" && pathOnly.startsWith("/_gateway/chat-attachments/")) {
+    return true;
+  }
   return false;
 }
 
@@ -426,7 +429,8 @@ function isApiPath(url: string): boolean {
   return pathOnly.startsWith("/v1/") ||
     pathOnly.startsWith("/codex/v1/") ||
     pathOnly.startsWith("/_gateway/generations/history/") ||
-    pathOnly.startsWith("/_gateway/generations/images/");
+    pathOnly.startsWith("/_gateway/generations/images/") ||
+    pathOnly.startsWith("/_gateway/chat-attachments/");
 }
 
 function acceptsGzip(request: FastifyRequest): boolean {
@@ -473,6 +477,38 @@ function resolveGenerationImageFile(imagePath: string): { filePath: string; gene
     filePath,
     generationId: normalized.split(path.sep)[0] || normalized.split("/")[0] || "",
   };
+}
+
+function resolveChatAttachmentFile(imagePath: string): { filePath: string; conversationId: string } | null {
+  const normalized = path.normalize(imagePath).replace(/^(\.\.(\/|\\|$))+/, "");
+  const root = getChatAttachmentAssetsDir();
+  const filePath = path.resolve(root, normalized);
+  if (!filePath.startsWith(`${root}${path.sep}`)) {
+    return null;
+  }
+  return {
+    filePath,
+    conversationId: normalized.split(path.sep)[0] || normalized.split("/")[0] || "",
+  };
+}
+
+async function chatAttachmentDataUrl(attachment: ChatAttachment): Promise<string | undefined> {
+  if (attachment.dataUrl) {
+    return attachment.dataUrl;
+  }
+  if (!attachment.path) {
+    return undefined;
+  }
+  const file = resolveChatAttachmentFile(attachment.path);
+  if (!file) {
+    return undefined;
+  }
+  try {
+    const data = await fs.readFile(file.filePath);
+    return `data:${attachment.mimeType || getContentType(file.filePath)};base64,${data.toString("base64")}`;
+  } catch {
+    return undefined;
+  }
 }
 
 async function decodeJsonRequestBody(body: Buffer, contentEncoding: string | string[] | undefined): Promise<Buffer> {
@@ -805,6 +841,7 @@ const settingsUpdateSchema = z.object({
     .object({
       freeAccountWebGenerationEnabled: z.boolean().optional(),
       generationTimeoutMs: z.number().int().min(60_000).max(30 * 60 * 1000).optional(),
+      promptOptimizerSystemPrompt: z.string().trim().min(1).max(8000).optional(),
       limits: z
         .object({
           enabled: z.boolean().optional(),
@@ -1907,7 +1944,7 @@ function buildGatewayChatText(message: ChatMessage): string {
   return sections.join("\n\n---\n\n");
 }
 
-function createGatewayChatContentParts(message: ChatMessage): Array<Record<string, unknown>> {
+async function createGatewayChatContentParts(message: ChatMessage): Promise<Array<Record<string, unknown>>> {
   if (message.role === "assistant") {
     return [
       {
@@ -1923,14 +1960,18 @@ function createGatewayChatContentParts(message: ChatMessage): Array<Record<strin
     parts.push({ type: "input_text", text });
   }
 
-  const imageAttachments = message.attachments.filter((item) => item.kind === "image" && item.dataUrl);
+  const imageAttachments = message.attachments.filter((item) => item.kind === "image" && (item.dataUrl || item.path));
   if (!text && imageAttachments.length > 0) {
     parts.push({ type: "input_text", text: "请根据附件内容回复。" });
   }
   for (const attachment of imageAttachments) {
+    const imageUrl = await chatAttachmentDataUrl(attachment);
+    if (!imageUrl) {
+      continue;
+    }
     parts.push({
       type: "input_image",
-      image_url: attachment.dataUrl,
+      image_url: imageUrl,
     });
   }
 
@@ -1940,10 +1981,10 @@ function createGatewayChatContentParts(message: ChatMessage): Array<Record<strin
   return parts;
 }
 
-function createGatewayChatCodexBody(params: {
+async function createGatewayChatCodexBody(params: {
   model: string;
   messages: ChatMessage[];
-}): Record<string, unknown> {
+}): Promise<Record<string, unknown>> {
   return {
     model: params.model,
     store: false,
@@ -1953,10 +1994,10 @@ function createGatewayChatCodexBody(params: {
     include: ["reasoning.encrypted_content"],
     tool_choice: "auto",
     parallel_tool_calls: true,
-    input: params.messages.map((message) => ({
+    input: await Promise.all(params.messages.map(async (message) => ({
       role: message.role,
-      content: createGatewayChatContentParts(message),
-    })),
+      content: await createGatewayChatContentParts(message),
+    }))),
   };
 }
 
@@ -3581,6 +3622,7 @@ export function createApp(params?: {
     const item = await ctx.gatewayDatabaseService.getChatConversation(id, owner, {
       messageLimit: parsed.success ? parsed.data.messageLimit ?? 80 : 80,
       beforeMessageId: parsed.success ? parsed.data.beforeMessageId : undefined,
+      includeAttachmentData: false,
     });
     if (!item) {
       reply.code(404);
@@ -3629,7 +3671,7 @@ export function createApp(params?: {
   }): Promise<FastifyReply> {
     const startedAt = performance.now();
     const abortController = new AbortController();
-    const codexBody = createGatewayChatCodexBody({ model: params.model, messages: params.contextMessages });
+    const codexBody = await createGatewayChatCodexBody({ model: params.model, messages: params.contextMessages });
     let profile: OAuthProfile | null = null;
     let accumulated = "";
     let sseBuffer = "";
@@ -4045,6 +4087,33 @@ export function createApp(params?: {
     } catch {
       reply.code(404);
       return { error: { type: "not_found", message: "图片不存在。" } };
+    }
+  });
+
+  app.get("/_gateway/chat-attachments/*", async (request, reply) => {
+    const session = await getSessionFromRequest(request);
+    const requestOwner = await getRequestOwner(request);
+    const wildcard = (request.params as { "*": string })["*"] ?? "";
+    const file = resolveChatAttachmentFile(wildcard);
+    if (!file) {
+      reply.code(403);
+      return { error: { type: "forbidden", message: "禁止访问该文件。" } };
+    }
+    if (!isAdminSession(session) && file.conversationId) {
+      const owner = await ctx.gatewayDatabaseService.getChatConversationOwner(file.conversationId);
+      if (!owner || owner !== requestOwner) {
+        reply.code(403);
+        return { error: { type: "forbidden", message: "禁止访问该附件。" } };
+      }
+    }
+    try {
+      const data = await fs.readFile(file.filePath);
+      reply.header("Content-Type", getContentType(file.filePath));
+      reply.header("Cache-Control", "private, max-age=3600");
+      return reply.send(data);
+    } catch {
+      reply.code(404);
+      return { error: { type: "not_found", message: "附件不存在。" } };
     }
   });
 

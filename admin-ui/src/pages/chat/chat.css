@@ -328,7 +328,8 @@
 }
 
 .chat-message-copy,
-.chat-retry-btn {
+.chat-retry-btn,
+.chat-image-inline-btn {
   min-height: 26px;
   padding: 0 8px;
   border: 1px solid rgba(99, 91, 255, 0.16);
@@ -344,15 +345,120 @@
 }
 
 .chat-message-copy:hover,
-.chat-retry-btn:hover {
+.chat-retry-btn:hover,
+.chat-image-inline-btn:hover {
   border-color: rgba(99, 91, 255, 0.28);
   background: rgba(99, 91, 255, 0.11);
 }
 
 .chat-message-copy:disabled,
-.chat-retry-btn:disabled {
+.chat-retry-btn:disabled,
+.chat-image-inline-btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.chat-image-generate-btn {
+  border-color: rgba(5, 150, 105, 0.24);
+  color: #047857;
+  background: rgba(5, 150, 105, 0.08);
+}
+
+.chat-image-result {
+  max-width: min(640px, 100%);
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: grid;
+  gap: 10px;
+  background: #fff;
+}
+
+.chat-image-result.is-loading,
+.chat-image-result.is-failed {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.chat-image-result.is-failed {
+  border-color: rgba(220, 38, 38, 0.18);
+  color: #b91c1c;
+  background: #fff7f7;
+}
+
+.chat-image-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chat-image-result-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.chat-image-result-head span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chat-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 10px;
+}
+
+.chat-image-card {
+  min-width: 0;
+  margin: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.chat-image-card button {
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #f8fafc;
+  cursor: zoom-in;
+}
+
+.chat-image-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.chat-image-card figcaption {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.chat-image-card a {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: var(--brand);
+  background: rgba(99, 91, 255, 0.08);
+  font-size: 12px;
+  font-weight: 850;
+  text-decoration: none;
 }
 
 .chat-message-meta em.is-error,

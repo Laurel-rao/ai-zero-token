@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
 import { getGatewaySqlDatabase, type GatewaySqlDatabase } from "../store/gateway-sql-database.js";
-import { getGenerationAssetsDir, getStateDir } from "../store/state-paths.js";
+import { getChatAttachmentAssetsDir, getGenerationAssetsDir, getStateDir } from "../store/state-paths.js";
 
 export type PersistedRequestLog = {
   id: string;
@@ -84,6 +84,12 @@ export type ChatAttachment = {
   name: string;
   mimeType: string;
   size: number;
+  path?: string;
+  url?: string;
+  previewPath?: string;
+  previewUrl?: string;
+  previewMimeType?: string;
+  previewSize?: number;
   dataUrl?: string;
   text?: string;
 };
@@ -130,6 +136,7 @@ type CreateChatConversationParams = {
 type ChatConversationMessagePageOptions = {
   messageLimit?: number;
   beforeMessageId?: string;
+  includeAttachmentData?: boolean;
 };
 
 type SaveChatMessageParams = {
@@ -317,6 +324,27 @@ function parseDataUrl(value: string): DataUrlPayload | null {
   };
 }
 
+function stripChatAttachmentDataUrl(attachment: ChatAttachment): ChatAttachment {
+  if (attachment.kind !== "image") {
+    return attachment;
+  }
+  const { dataUrl: _dataUrl, ...lightAttachment } = attachment;
+  return lightAttachment;
+}
+
+function stripChatMessageAttachmentDataUrls(message: ChatMessage): ChatMessage {
+  if (message.attachments.length === 0) {
+    return message;
+  }
+  const attachments = message.attachments.map(stripChatAttachmentDataUrl);
+  const metadata = message.metadata ? { ...message.metadata, attachments } : undefined;
+  return {
+    ...message,
+    attachments,
+    metadata,
+  };
+}
+
 function extensionForMimeType(mimeType: string, fallback = "png"): string {
   if (mimeType.includes("jpeg") || mimeType.includes("jpg")) {
     return "jpg";
@@ -387,6 +415,12 @@ function parseChatAttachments(metadata: Record<string, unknown> | undefined): Ch
         name,
         mimeType,
         size,
+        path: typeof record.path === "string" && record.path ? record.path : undefined,
+        url: typeof record.url === "string" && record.url ? record.url : undefined,
+        previewPath: typeof record.previewPath === "string" && record.previewPath ? record.previewPath : undefined,
+        previewUrl: typeof record.previewUrl === "string" && record.previewUrl ? record.previewUrl : undefined,
+        previewMimeType: typeof record.previewMimeType === "string" && record.previewMimeType ? record.previewMimeType : undefined,
+        previewSize: typeof record.previewSize === "number" && Number.isFinite(record.previewSize) ? record.previewSize : undefined,
         dataUrl: typeof record.dataUrl === "string" && record.dataUrl ? record.dataUrl : undefined,
         text: typeof record.text === "string" ? record.text : undefined,
       } satisfies ChatAttachment;
@@ -429,6 +463,7 @@ export class GatewayDatabaseService {
     }
     await fs.mkdir(getStateDir(), { recursive: true });
     await fs.mkdir(getGenerationAssetsDir(), { recursive: true });
+    await fs.mkdir(getChatAttachmentAssetsDir(), { recursive: true });
     await this.database.exec(`
       CREATE TABLE IF NOT EXISTS gateway_user_groups (
         id TEXT PRIMARY KEY,
@@ -1014,6 +1049,12 @@ export class GatewayDatabaseService {
     return typeof row?.owner === "string" ? row.owner : undefined;
   }
 
+  async getChatConversationOwner(id: string): Promise<string | undefined> {
+    await this.init();
+    const row = await this.database.get("SELECT owner FROM chat_conversations WHERE id = ?", id) as { owner?: unknown } | undefined;
+    return typeof row?.owner === "string" ? row.owner : undefined;
+  }
+
   async getGenerationLimitUsage(owner: string, since: number): Promise<GenerationLimitUsage> {
     await this.init();
     await this.deleteCoveredRunningGenerations(owner);
@@ -1107,7 +1148,7 @@ export class GatewayDatabaseService {
 
     return {
       ...conversation,
-      messages: page.messages,
+      messages: options?.includeAttachmentData === false ? page.messages.map(stripChatMessageAttachmentDataUrls) : page.messages,
       hasMoreMessages: page.hasMoreMessages,
       nextBeforeMessageId: page.nextBeforeMessageId,
       loadedMessageCount: page.messages.length,
@@ -1153,7 +1194,10 @@ export class GatewayDatabaseService {
     const id = params.id ?? crypto.randomUUID();
     const createdAt = params.createdAt ?? now;
     const status = params.status ?? "success";
-    const metadata = mergeChatMetadata(params.metadata, params.attachments);
+    const persistedAttachments = params.attachments
+      ? await this.persistChatAttachments(params.conversationId, id, params.attachments)
+      : undefined;
+    const metadata = mergeChatMetadata(params.metadata, persistedAttachments);
     await this.database.run(`
         INSERT INTO chat_messages
           (id, conversation_id, owner, role, content, status, model, error, created_at, updated_at, metadata_json)
@@ -1187,7 +1231,7 @@ export class GatewayDatabaseService {
     if (!message) {
       throw new Error("保存聊天消息失败。");
     }
-    return message;
+    return stripChatMessageAttachmentDataUrls(message);
   }
 
   async updateChatMessage(id: string, owner: string | undefined, params: UpdateChatMessageParams): Promise<ChatMessage | null> {
@@ -1213,7 +1257,8 @@ export class GatewayDatabaseService {
         owner ?? null,
       );
     await this.touchChatConversation(existing.conversationId, now);
-    return this.getChatMessage(id, owner);
+    const message = await this.getChatMessage(id, owner);
+    return message ? stripChatMessageAttachmentDataUrls(message) : null;
   }
 
   async deleteChatMessagesAfter(conversationId: string, messageId: string, owner?: string): Promise<number | null> {
@@ -1260,7 +1305,7 @@ export class GatewayDatabaseService {
           AND status = 'success'
         ORDER BY created_at ASC, id ASC
       `, conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
-    return rows.map((row) => this.mapChatMessage(row));
+    return Promise.all(rows.map((row) => this.normalizeChatMessage(row)));
   }
 
   async saveGeneration(params: SaveGenerationParams): Promise<GenerationHistoryItem> {
@@ -1515,6 +1560,32 @@ export class GatewayDatabaseService {
     };
   }
 
+  private async normalizeChatMessage(row: Record<string, unknown>): Promise<ChatMessage> {
+    const message = this.mapChatMessage(row);
+    const needsMigration = message.attachments.some((attachment) => (
+      attachment.kind === "image" &&
+      Boolean(attachment.dataUrl) &&
+      !attachment.path &&
+      !attachment.url
+    ));
+    if (!needsMigration) {
+      return message;
+    }
+
+    const attachments = await this.persistChatAttachments(message.conversationId, message.id, message.attachments);
+    const metadata = mergeChatMetadata(message.metadata, attachments);
+    await this.database.run(
+      "UPDATE chat_messages SET metadata_json = ? WHERE id = ?",
+      metadata ? JSON.stringify(metadata) : null,
+      message.id,
+    );
+    return {
+      ...message,
+      attachments,
+      metadata,
+    };
+  }
+
   private async getChatMessagePage(
     conversationId: string,
     owner?: string,
@@ -1565,7 +1636,7 @@ export class GatewayDatabaseService {
 
     const hasMoreMessages = rows.length > limit;
     const pageRows = (hasMoreMessages ? rows.slice(0, limit) : rows).reverse();
-    const messages = pageRows.map((row) => this.mapChatMessage(row));
+    const messages = await Promise.all(pageRows.map((row) => this.normalizeChatMessage(row)));
     return {
       messages,
       hasMoreMessages,
@@ -1582,7 +1653,7 @@ export class GatewayDatabaseService {
         ORDER BY created_at ASC, id ASC
       `, conversationId, owner ?? null, owner ?? null) as Array<Record<string, unknown>>;
     return {
-      messages: rows.map((row) => this.mapChatMessage(row)),
+      messages: await Promise.all(rows.map((row) => this.normalizeChatMessage(row))),
       hasMoreMessages: false,
       nextBeforeMessageId: undefined,
     };
@@ -1595,7 +1666,65 @@ export class GatewayDatabaseService {
         FROM chat_messages
         WHERE id = ? AND (? IS NULL OR owner = ?)
       `, id, owner ?? null, owner ?? null) as Record<string, unknown> | undefined;
-    return row ? this.mapChatMessage(row) : null;
+    return row ? this.normalizeChatMessage(row) : null;
+  }
+
+  private chatAttachmentUrl(relativePath: string): string {
+    return `/_gateway/chat-attachments/${relativePath}`;
+  }
+
+  private async persistChatImageAttachment(
+    conversationId: string,
+    messageId: string,
+    attachment: ChatAttachment,
+    index: number,
+  ): Promise<ChatAttachment> {
+    if (attachment.kind !== "image" || !attachment.dataUrl) {
+      return attachment;
+    }
+
+    const parsed = parseDataUrl(attachment.dataUrl);
+    if (!parsed) {
+      return stripChatAttachmentDataUrl(attachment);
+    }
+
+    const dir = path.join(getChatAttachmentAssetsDir(), conversationId, messageId);
+    await fs.mkdir(dir, { recursive: true });
+    const extension = extensionForMimeType(parsed.mimeType);
+    const safeName = sanitizeFileName(attachment.name || `image-${index + 1}.${extension}`);
+    const parsedName = path.parse(safeName);
+    const filename = `${parsedName.name || "image"}-${index + 1}${parsedName.ext || `.${extension}`}`;
+    const relativePath = `${conversationId}/${messageId}/${filename}`;
+    await fs.writeFile(path.join(dir, filename), parsed.bytes);
+    const preview = await this.createImagePreview(dir, `${conversationId}/${messageId}`, filename, parsed.bytes);
+    return {
+      ...stripChatAttachmentDataUrl(attachment),
+      mimeType: parsed.mimeType || attachment.mimeType,
+      size: parsed.bytes.byteLength,
+      path: relativePath,
+      url: this.chatAttachmentUrl(relativePath),
+      previewPath: preview.previewPath,
+      previewUrl: preview.previewUrl ? this.chatAttachmentUrl(preview.previewPath ?? "") : undefined,
+      previewMimeType: preview.previewMimeType,
+      previewSize: preview.previewSize,
+    };
+  }
+
+  private async persistChatAttachments(
+    conversationId: string,
+    messageId: string,
+    attachments: ChatAttachment[],
+  ): Promise<ChatAttachment[]> {
+    const next: ChatAttachment[] = [];
+    for (let index = 0; index < attachments.length; index += 1) {
+      const attachment = attachments[index];
+      if (attachment.kind === "image") {
+        next.push(await this.persistChatImageAttachment(conversationId, messageId, attachment, index));
+      } else {
+        next.push(attachment);
+      }
+    }
+    return next;
   }
 
   private async touchChatConversation(id: string, updatedAt = Date.now()): Promise<void> {
