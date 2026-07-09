@@ -8,6 +8,13 @@ import {
 } from "./state-paths.js";
 
 const SETTINGS_ROW_ID = "gateway";
+const DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
+  "你是专业的 AI 生图提示词优化助手。",
+  "请把用户的原始提示词改写成更适合图像生成模型的中文提示词。",
+  "保留用户明确指定的主体、风格、文字、尺寸、颜色和限制。",
+  "增强画面主体、构图、光线、材质、背景、镜头语言和细节层次。",
+  "只输出优化后的提示词正文，不要解释，不要 Markdown，不要添加标题。",
+].join("\n");
 
 let settingsDbReady = false;
 
@@ -47,6 +54,7 @@ export function createDefaultSettings(): GatewaySettings {
     image: {
       freeAccountWebGenerationEnabled: false,
       generationTimeoutMs: 10 * 60 * 1000,
+      promptOptimizerSystemPrompt: DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT,
       limits: {
         enabled: false,
         perUserDaily: 0,
@@ -101,6 +109,7 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
     image: {
       freeAccountWebGenerationEnabled: parsed.image?.freeAccountWebGenerationEnabled ?? defaults.image.freeAccountWebGenerationEnabled,
       generationTimeoutMs: normalizeMilliseconds(parsed.image?.generationTimeoutMs, defaults.image.generationTimeoutMs, 60_000, 30 * 60 * 1000),
+      promptOptimizerSystemPrompt: normalizeTrimmedString(parsed.image?.promptOptimizerSystemPrompt, defaults.image.promptOptimizerSystemPrompt, 8000),
       limits: normalizeImageLimits(parsed.image?.limits, defaults.image.limits),
     },
     wecom: {
@@ -239,7 +248,7 @@ function normalizeImageLimits(value: unknown, fallback: ImageLimitsSettings): Im
     perUserDaily: normalizeCountLimit(record.perUserDaily, fallback.perUserDaily),
     perUserHourly: normalizeCountLimit(record.perUserHourly, fallback.perUserHourly),
     minIntervalSeconds: normalizeCountLimit(record.minIntervalSeconds, fallback.minIntervalSeconds, 86_400),
-    userOverrides: normalizeImageLimitOverrides(record.userOverrides),
+    userOverrides: record.userOverrides === undefined ? fallback.userOverrides : normalizeImageLimitOverrides(record.userOverrides),
   };
 }
 

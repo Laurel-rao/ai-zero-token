@@ -311,6 +311,10 @@
   line-height: 1.55;
 }
 
+.settings-prompt-textarea {
+  min-height: 168px;
+}
+
 .settings-brand-upload-grid {
   min-width: 0;
   display: grid;

@@ -238,6 +238,7 @@ export class ConfigService {
     image?: {
       freeAccountWebGenerationEnabled?: boolean;
       generationTimeoutMs?: number;
+      promptOptimizerSystemPrompt?: string;
       limits?: Partial<GatewaySettings["image"]["limits"]>;
     };
     wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
@@ -321,6 +322,7 @@ export class ConfigService {
           ...next.image,
           freeAccountWebGenerationEnabled: params.image.freeAccountWebGenerationEnabled ?? next.image.freeAccountWebGenerationEnabled,
           generationTimeoutMs: normalizeMilliseconds(params.image.generationTimeoutMs, next.image.generationTimeoutMs, 60_000, 30 * 60 * 1000),
+          promptOptimizerSystemPrompt: params.image.promptOptimizerSystemPrompt?.trim().slice(0, 8000) || next.image.promptOptimizerSystemPrompt,
           limits: normalizeImageLimits(params.image.limits, next.image.limits),
         },
       };

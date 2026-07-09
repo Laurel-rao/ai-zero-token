@@ -27,6 +27,7 @@ import { formatDuration, formatFileSize, formatFullTime, formatJson } from "@/sh
 import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
 import type { UserRole } from "@/routes/routes";
 import { normalizeBranding } from "@/shared/lib/branding";
+import { DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT } from "@/shared/lib/prompt-optimizer";
 
 function countToDraft(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
@@ -55,6 +56,7 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     accountMaxConcurrency: String(config.settings.runtime?.accountMaxConcurrency || 2),
     freeAccountWebGenerationEnabled: Boolean(config.settings.image?.freeAccountWebGenerationEnabled),
     imageGenerationTimeoutMinutes: timeoutMinutesToDraft(config.settings.image?.generationTimeoutMs),
+    promptOptimizerSystemPrompt: config.settings.image?.promptOptimizerSystemPrompt?.trim() || DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT,
     imageLimitsEnabled: Boolean(imageLimits?.enabled),
     imageLimitDaily: countToDraft(imageLimits?.perUserDaily),
     imageLimitHourly: countToDraft(imageLimits?.perUserHourly),
@@ -143,6 +145,7 @@ export function SettingsPage(props: {
     accountMaxConcurrency: "2",
     freeAccountWebGenerationEnabled: false,
     imageGenerationTimeoutMinutes: "10",
+    promptOptimizerSystemPrompt: DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT,
     imageLimitsEnabled: false,
     imageLimitDaily: "0",
     imageLimitHourly: "0",
@@ -292,8 +295,8 @@ export function SettingsPage(props: {
     },
     {
       id: "limits",
-      title: "生成限制",
-      description: "请求频率与用量限制配置",
+      title: "生成设置",
+      description: "提示词优化、超时与用量限制",
       icon: Gauge,
       tone: "orange",
       status: settingsDraft.imageLimitsEnabled ? "已启用" : "未启用",
@@ -416,6 +419,10 @@ export function SettingsPage(props: {
       props.setStatus("图片生成超时时间必须是 1 到 30 分钟之间的整数。");
       return;
     }
+    if (hasDirtyField("promptOptimizerSystemPrompt") && !settingsDraft.promptOptimizerSystemPrompt.trim()) {
+      props.setStatus("优化按钮 System Prompt 不能为空。");
+      return;
+    }
 
     const imageLimitUserOverrides: Array<{
       username: string;
@@ -470,6 +477,7 @@ export function SettingsPage(props: {
       image?: {
         freeAccountWebGenerationEnabled?: boolean;
         generationTimeoutMs?: number;
+        promptOptimizerSystemPrompt?: string;
         limits?: {
           enabled: boolean;
           perUserDaily: number;
@@ -539,6 +547,7 @@ export function SettingsPage(props: {
       hasDirtyField(
         "freeAccountWebGenerationEnabled",
         "imageGenerationTimeoutMinutes",
+        "promptOptimizerSystemPrompt",
         "imageLimitsEnabled",
         "imageLimitDaily",
         "imageLimitHourly",
@@ -552,6 +561,9 @@ export function SettingsPage(props: {
       }
       if (hasDirtyField("imageGenerationTimeoutMinutes")) {
         payload.image.generationTimeoutMs = imageGenerationTimeoutMinutes * 60_000;
+      }
+      if (hasDirtyField("promptOptimizerSystemPrompt")) {
+        payload.image.promptOptimizerSystemPrompt = settingsDraft.promptOptimizerSystemPrompt.trim();
       }
       if (hasDirtyField("imageLimitsEnabled", "imageLimitDaily", "imageLimitHourly", "imageLimitMinIntervalSeconds", "imageLimitUserOverrides")) {
         payload.image.limits = {
@@ -974,6 +986,16 @@ export function SettingsPage(props: {
                   <input className="input" inputMode="numeric" min={0} max={86400} type="number" value={settingsDraft.imageLimitMinIntervalSeconds} onChange={(event) => markSettingsDirty({ imageLimitMinIntervalSeconds: event.target.value })} />
                 </label>
               </div>
+              <label className="field">
+                <span>优化按钮 System Prompt</span>
+                <textarea
+                  className="textarea settings-prompt-textarea"
+                  maxLength={8000}
+                  value={settingsDraft.promptOptimizerSystemPrompt}
+                  onChange={(event) => markSettingsDirty({ promptOptimizerSystemPrompt: event.target.value })}
+                  spellCheck={false}
+                />
+              </label>
               <p className="settings-status-note">超时对图片生成和图片编辑请求生效，默认 10 分钟；单个数据库用户的覆盖值可在“用户管理”页面直接编辑，留空表示继承这里的全局限额。</p>
             </div>
           ) : null}

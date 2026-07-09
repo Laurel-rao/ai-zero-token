@@ -84,6 +84,7 @@ export type SettingDraft = {
   accountMaxConcurrency: string;
   freeAccountWebGenerationEnabled: boolean;
   imageGenerationTimeoutMinutes: string;
+  promptOptimizerSystemPrompt: string;
   imageLimitsEnabled: boolean;
   imageLimitDaily: string;
   imageLimitHourly: string;
