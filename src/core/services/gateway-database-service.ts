@@ -44,13 +44,15 @@ export type GenerationReferenceAsset = {
   source?: string;
 };
 
+export type GenerationHistoryStatus = "queued" | "running" | "success" | "failed" | "interrupted";
+
 export type GenerationHistoryItem = {
   id: string;
   owner?: string;
   createdAt: number;
   startedAt?: number;
   updatedAt: number;
-  status: "queued" | "running" | "success" | "failed";
+  status: GenerationHistoryStatus;
   endpoint: string;
   account: string;
   model: string;
@@ -71,6 +73,44 @@ export type GenerationHistoryItem = {
 export type GenerationLimitUsage = {
   sinceCount: number;
   lastCreatedAt?: number;
+};
+
+export type GenerationOwnerUsage = {
+  owner: string;
+  count: number;
+};
+
+export type GenerationReport = {
+  startTime?: number;
+  endTime?: number;
+  bucketMs: number;
+  summary: {
+    requestCount: number;
+    imageCount: number;
+    activeUserCount: number;
+    successCount: number;
+    failedCount: number;
+    successRate: number;
+    averageDurationMs: number;
+    averageRequestsPerUser: number;
+  };
+  buckets: Array<{
+    startTime: number;
+    requestCount: number;
+    imageCount: number;
+    activeUserCount: number;
+    successCount: number;
+    failedCount: number;
+    averageDurationMs: number;
+  }>;
+  users: Array<{
+    owner: string;
+    requestCount: number;
+    imageCount: number;
+    successCount: number;
+    failedCount: number;
+    successRate: number;
+  }>;
 };
 
 export type ChatMessageRole = "user" | "assistant";
@@ -166,7 +206,7 @@ type SaveGenerationParams = {
   owner?: string;
   createdAt?: number;
   startedAt?: number;
-  status: "queued" | "running" | "success" | "failed";
+  status: GenerationHistoryStatus;
   endpoint: string;
   account: string;
   model: string;
@@ -452,6 +492,13 @@ function calculateWaitDurationMs(createdAt: number, startedAt: number | undefine
     return Math.max(0, now - createdAt);
   }
   return 0;
+}
+
+function generationHistoryStatus(value: unknown): GenerationHistoryStatus {
+  if (value === "queued" || value === "running" || value === "failed" || value === "interrupted") {
+    return value;
+  }
+  return "success";
 }
 
 export class GatewayDatabaseService {
@@ -942,6 +989,147 @@ export class GatewayDatabaseService {
     return Number(row?.count ?? 0);
   }
 
+  async interruptRunningGenerations(reason = "服务重启，任务已中断。"): Promise<number> {
+    await this.init();
+    const result = await this.database.run(`
+        UPDATE generation_history
+        SET status = 'interrupted',
+            updated_at = ?,
+            error = ?
+        WHERE status = 'running'
+      `, Date.now(), reason);
+    return result.changes;
+  }
+
+  async listGenerationOwnerUsage(owner?: string): Promise<GenerationOwnerUsage[]> {
+    await this.init();
+    await this.deleteCoveredRunningGenerations(owner);
+    const rows = await this.database.all(`
+        SELECT owner, COUNT(*) AS count
+        FROM generation_history
+        WHERE owner IS NOT NULL
+          AND owner <> ''
+          AND (? IS NULL OR owner = ?)
+        GROUP BY owner
+        ORDER BY count DESC, owner ASC
+      `, owner ?? null, owner ?? null) as Array<{ owner?: unknown; count?: unknown }>;
+    return rows
+      .filter((row) => typeof row.owner === "string" && row.owner.length > 0)
+      .map((row) => ({
+        owner: String(row.owner),
+        count: Number(row.count ?? 0),
+      }));
+  }
+
+  async getGenerationReport(owner?: string, options?: { startTime?: number; endTime?: number }): Promise<GenerationReport> {
+    const history = await this.listGenerationHistory(MAX_GENERATION_HISTORY, owner, { light: true });
+    const items = history
+      .filter((item) => !Number.isFinite(options?.startTime) || item.createdAt >= Number(options?.startTime))
+      .filter((item) => !Number.isFinite(options?.endTime) || item.createdAt <= Number(options?.endTime))
+      .sort((left, right) => left.createdAt - right.createdAt);
+    const completed = items.filter((item) => item.status !== "queued" && item.status !== "running" && item.durationMs > 0);
+    const successCount = items.filter((item) => item.status === "success").length;
+    const failedCount = items.filter((item) => item.status === "failed" || item.status === "interrupted").length;
+    const ownerKeys = new Set(items.map((item) => item.owner).filter((value): value is string => Boolean(value)));
+    const imageCount = items.reduce((sum, item) => sum + item.images.length, 0);
+    const emptySummary = {
+      requestCount: items.length,
+      imageCount,
+      activeUserCount: ownerKeys.size,
+      successCount,
+      failedCount,
+      successRate: items.length > 0 ? (successCount / items.length) * 100 : 0,
+      averageDurationMs: completed.length > 0 ? completed.reduce((sum, item) => sum + item.durationMs, 0) / completed.length : 0,
+      averageRequestsPerUser: ownerKeys.size > 0 ? items.length / ownerKeys.size : 0,
+    };
+    if (items.length === 0) {
+      return { bucketMs: 24 * 60 * 60 * 1000, summary: emptySummary, buckets: [], users: [] };
+    }
+
+    const minTime = items[0]?.createdAt ?? Date.now();
+    const maxTime = items.at(-1)?.createdAt ?? minTime;
+    const minute = 60 * 1000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    const spanMs = Math.max(1, maxTime - minTime);
+    const bucketMs = [10 * minute, hour, 6 * hour, day, 7 * day, 30 * day]
+      .find((candidate) => Math.max(1, Math.ceil(spanMs / candidate)) <= 18) ?? 30 * day;
+    const rangeStart = Math.floor(minTime / bucketMs) * bucketMs;
+    const rangeEnd = Math.floor(maxTime / bucketMs) * bucketMs;
+    const buckets = new Map<number, {
+      requestCount: number;
+      imageCount: number;
+      owners: Set<string>;
+      successCount: number;
+      failedCount: number;
+      totalDurationMs: number;
+      durationCount: number;
+    }>();
+    const users = new Map<string, {
+      requestCount: number;
+      imageCount: number;
+      successCount: number;
+      failedCount: number;
+    }>();
+    for (let current = rangeStart; current <= rangeEnd; current += bucketMs) {
+      buckets.set(current, {
+        requestCount: 0,
+        imageCount: 0,
+        owners: new Set<string>(),
+        successCount: 0,
+        failedCount: 0,
+        totalDurationMs: 0,
+        durationCount: 0,
+      });
+    }
+    for (const item of items) {
+      const bucketStart = Math.floor(item.createdAt / bucketMs) * bucketMs;
+      const bucket = buckets.get(bucketStart);
+      if (bucket) {
+        bucket.requestCount += 1;
+        bucket.imageCount += item.images.length;
+        if (item.owner) bucket.owners.add(item.owner);
+        if (item.status === "success") bucket.successCount += 1;
+        if (item.status === "failed" || item.status === "interrupted") bucket.failedCount += 1;
+        if (item.status !== "queued" && item.status !== "running" && item.durationMs > 0) {
+          bucket.totalDurationMs += item.durationMs;
+          bucket.durationCount += 1;
+        }
+      }
+      if (item.owner) {
+        const row = users.get(item.owner) ?? { requestCount: 0, imageCount: 0, successCount: 0, failedCount: 0 };
+        row.requestCount += 1;
+        row.imageCount += item.images.length;
+        if (item.status === "success") row.successCount += 1;
+        if (item.status === "failed" || item.status === "interrupted") row.failedCount += 1;
+        users.set(item.owner, row);
+      }
+    }
+
+    return {
+      startTime: minTime,
+      endTime: maxTime,
+      bucketMs,
+      summary: emptySummary,
+      buckets: Array.from(buckets.entries()).map(([startTime, bucket]) => ({
+        startTime,
+        requestCount: bucket.requestCount,
+        imageCount: bucket.imageCount,
+        activeUserCount: bucket.owners.size,
+        successCount: bucket.successCount,
+        failedCount: bucket.failedCount,
+        averageDurationMs: bucket.durationCount > 0 ? bucket.totalDurationMs / bucket.durationCount : 0,
+      })),
+      users: Array.from(users.entries())
+        .map(([reportOwner, row]) => ({
+          owner: reportOwner,
+          ...row,
+          successRate: row.requestCount > 0 ? (row.successCount / row.requestCount) * 100 : 0,
+        }))
+        .sort((left, right) => right.requestCount - left.requestCount || left.owner.localeCompare(right.owner)),
+    };
+  }
+
   async listGenerationHistory(limit = 10, owner?: string, options?: { light?: boolean; offset?: number }): Promise<GenerationHistoryItem[]> {
     await this.init();
     await this.deleteCoveredRunningGenerations(owner);
@@ -967,7 +1155,7 @@ export class GatewayDatabaseService {
       createdAt: Number(row.createdAt),
       startedAt: typeof row.startedAt === "number" ? row.startedAt : undefined,
       updatedAt: Number(row.updatedAt),
-      status: row.status === "queued" || row.status === "running" || row.status === "failed" ? row.status : "success",
+      status: generationHistoryStatus(row.status),
       endpoint: String(row.endpoint),
       account: String(row.account),
       model: String(row.model),
@@ -1009,7 +1197,7 @@ export class GatewayDatabaseService {
       createdAt: Number(row.createdAt),
       startedAt: typeof row.startedAt === "number" ? row.startedAt : undefined,
       updatedAt: Number(row.updatedAt),
-      status: row.status === "queued" || row.status === "running" || row.status === "failed" ? row.status : "success",
+      status: generationHistoryStatus(row.status),
       endpoint: String(row.endpoint),
       account: String(row.account),
       model: String(row.model),

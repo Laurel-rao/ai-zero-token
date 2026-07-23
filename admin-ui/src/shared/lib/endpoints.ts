@@ -36,7 +36,7 @@ export function buildExample(endpoint: string, model: string): string {
       model: "gpt-image-2",
       prompt: "生成一张白底红苹果商品图，构图简洁，光线干净。",
       size: "1024x576",
-      quality: "medium",
+      quality: "high",
       response_format: "b64_json",
     });
   }
@@ -46,7 +46,7 @@ export function buildExample(endpoint: string, model: string): string {
       prompt: "参考这张图，生成一张更适合科技产品广告的版本。",
       images: [{ image_url: "data:image/png;base64,REPLACE_WITH_IMAGE_BASE64" }],
       size: "1024x576",
-      quality: "medium",
+      quality: "high",
       response_format: "b64_json",
     });
   }

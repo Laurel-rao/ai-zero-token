@@ -1,16 +1,18 @@
-import { BarChart3, CheckCircle2, Copy, Download, ImagePlus, Loader2, Pencil, RotateCcw, Search, Sparkles, Upload, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type SetStateAction } from "react";
+import { Activity, BarChart3, Check, CheckCircle2, ChevronDown, ClipboardPaste, Copy, Download, Images, ImagePlus, LayoutGrid, List, Loader2, Pencil, RotateCcw, Search, Sparkles, Upload, Users, X } from "lucide-react";
+import { zipSync } from "fflate";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
 import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, createClientId, errorMessage, extractPreviewImages, readFileAsDataUrl, summarizeJson } from "@/shared/lib/app-utils";
 import { formatDuration, formatFullTime, formatJson } from "@/shared/lib/format";
 import { profileLabel } from "@/shared/lib/profiles";
-import { userDisplayName, userOptionLabel } from "@/shared/lib/users";
+import { userDisplayName } from "@/shared/lib/users";
 import type { UserRole } from "@/routes/routes";
 import { DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT } from "@/shared/lib/prompt-optimizer";
 
 type GenerateTab = "create" | "history" | "report";
+type HistoryViewMode = "grid" | "list";
 type ImageRatio = "1:1" | "16:9" | "9:16" | "4:3";
 type ResolutionPreset = "1k" | "2k" | "4k" | "custom";
 type ImageQuality = "low" | "medium" | "high" | "auto";
@@ -44,7 +46,7 @@ type GenerateHistoryItem = {
   owner?: string;
   createdAt: number;
   startedAt?: number;
-  status: "queued" | "running" | "success" | "failed";
+  status: "queued" | "running" | "success" | "failed" | "interrupted";
   endpoint: string;
   account: string;
   model: string;
@@ -84,6 +86,19 @@ type GenerateHistoryResponse = {
   hasMore?: boolean;
 };
 
+type GenerationOwnerUsageResponse = {
+  items: Array<{ owner: string; count: number }>;
+  total: number;
+};
+
+type HistoryOwnerOption = {
+  value: string;
+  label: string;
+  searchText: string;
+  count: number;
+  kind: "mine" | "all" | "user";
+};
+
 const GENERATE_HISTORY_PAGE_SIZE = 10;
 
 function referencePreviewItems(images: ReferenceImageState[]): ModalImageItem[] {
@@ -114,35 +129,58 @@ function historyPreviewItems(item: GenerateHistoryItem): ModalImageItem[] {
   }));
 }
 
-type GenerateReportBucket = {
-  key: number;
-  label: string;
-  count: number;
-  success: number;
-  failed: number;
-  running: number;
-  queued: number;
-  imageCount: number;
-  averageDurationMs: number;
-  averageWaitDurationMs: number;
+type GenerateReportResponse = {
+  startTime?: number;
+  endTime?: number;
+  bucketMs: number;
+  summary: {
+    requestCount: number;
+    imageCount: number;
+    activeUserCount: number;
+    successCount: number;
+    failedCount: number;
+    successRate: number;
+    averageDurationMs: number;
+    averageRequestsPerUser: number;
+  };
+  buckets: Array<{
+    startTime: number;
+    requestCount: number;
+    imageCount: number;
+    activeUserCount: number;
+    successCount: number;
+    failedCount: number;
+    averageDurationMs: number;
+  }>;
+  users: Array<{
+    owner: string;
+    requestCount: number;
+    imageCount: number;
+    successCount: number;
+    failedCount: number;
+    successRate: number;
+  }>;
 };
 
-type GenerateReportStats = {
-  total: number;
-  success: number;
-  failed: number;
-  running: number;
-  queued: number;
-  imageCount: number;
-  successRate: number;
-  averageDurationMs: number;
-  averageWaitDurationMs: number;
-  buckets: GenerateReportBucket[];
+const EMPTY_GENERATE_REPORT: GenerateReportResponse = {
+  bucketMs: 24 * 60 * 60 * 1000,
+  summary: {
+    requestCount: 0,
+    imageCount: 0,
+    activeUserCount: 0,
+    successCount: 0,
+    failedCount: 0,
+    successRate: 0,
+    averageDurationMs: 0,
+    averageRequestsPerUser: 0,
+  },
+  buckets: [],
+  users: [],
 };
 
 const DEFAULT_IMAGE_RATIO: ImageRatio = "16:9";
 const DEFAULT_RESOLUTION_PRESET: ResolutionPreset = "1k";
-const DEFAULT_IMAGE_QUALITY: ImageQuality = "medium";
+const DEFAULT_IMAGE_QUALITY: ImageQuality = "high";
 
 const ratioOptions: Array<{ ratio: ImageRatio; label: string }> = [
   { ratio: "1:1", label: "1:1" },
@@ -180,6 +218,38 @@ const resolutionSizes: Record<Exclude<ResolutionPreset, "custom">, Record<ImageR
 const MIN_GENERATION_COUNT = 1;
 const MAX_GENERATION_COUNT = 10;
 const MAX_REFERENCE_IMAGES = 16;
+const HISTORY_VIEW_STORAGE_KEY = "azt:generate-history-view";
+
+function archivePathSegment(value: string, fallback: string): string {
+  const normalized = value
+    .trim()
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .slice(0, 120);
+  return normalized || fallback;
+}
+
+function archiveTimestamp(date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function recoverHistoryReferenceUrl(value: string): string | null {
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (/^data:image\//i.test(normalized)) return normalized;
+
+  const localImagePrefix = "/_gateway/generations/images/";
+  try {
+    const parsed = new URL(normalized, window.location.origin);
+    if (parsed.pathname.startsWith(localImagePrefix)) {
+      return new URL(`${parsed.pathname}${parsed.search}`, window.location.origin).toString();
+    }
+    return /^https?:$/i.test(parsed.protocol) ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 function ratioClassName(value?: string): PreviewRatioClass {
   const normalized = value?.trim();
@@ -316,6 +386,7 @@ function generateStatusMeta(status: GenerateHistoryItem["status"]): { className:
   if (status === "success") return { className: "is-success", label: "成功" };
   if (status === "queued") return { className: "is-queued", label: "排队中" };
   if (status === "running") return { className: "is-running", label: "处理中" };
+  if (status === "interrupted") return { className: "is-interrupted", label: "已中断" };
   return { className: "is-failed", label: "失败" };
 }
 
@@ -427,137 +498,6 @@ function formatReportBucketLabel(value: number, bucketMs: number): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit" }).format(date);
 }
 
-function chooseReportBucketMs(spanMs: number): number {
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  const candidates = [10 * minute, hour, 6 * hour, day, 7 * day, 30 * day];
-  return candidates.find((bucketMs) => Math.max(1, Math.ceil(spanMs / bucketMs)) <= 18) ?? 30 * day;
-}
-
-function buildGenerateReportStats(items: GenerateHistoryItem[]): GenerateReportStats {
-  const total = items.length;
-  const success = items.filter((item) => item.status === "success").length;
-  const failed = items.filter((item) => item.status === "failed").length;
-  const running = items.filter((item) => item.status === "running").length;
-  const queued = items.filter((item) => item.status === "queued").length;
-  const imageCount = items.reduce((sum, item) => sum + item.images.length, 0);
-  const timedItems = items.filter((item) => item.status !== "queued" && item.status !== "running" && Number.isFinite(item.durationMs) && item.durationMs > 0);
-  const averageDurationMs = timedItems.length > 0
-    ? timedItems.reduce((sum, item) => sum + item.durationMs, 0) / timedItems.length
-    : 0;
-  const waitItems = items.filter((item) => Number.isFinite(item.waitDurationMs) && (item.waitDurationMs ?? 0) > 0);
-  const averageWaitDurationMs = waitItems.length > 0
-    ? waitItems.reduce((sum, item) => sum + (item.waitDurationMs ?? 0), 0) / waitItems.length
-    : 0;
-
-  if (items.length === 0) {
-    return {
-      total,
-      success,
-      failed,
-      running,
-      queued,
-      imageCount,
-      successRate: 0,
-      averageDurationMs,
-      averageWaitDurationMs,
-      buckets: [],
-    };
-  }
-
-  const timestamps = items.map((item) => item.createdAt).filter((value) => Number.isFinite(value));
-  const minTime = Math.min(...timestamps);
-  const maxTime = Math.max(...timestamps);
-  const bucketMs = chooseReportBucketMs(Math.max(1, maxTime - minTime));
-  const start = Math.floor(minTime / bucketMs) * bucketMs;
-  const end = Math.floor(maxTime / bucketMs) * bucketMs;
-  const bucketMap = new Map<number, {
-    count: number;
-    success: number;
-    failed: number;
-    running: number;
-    queued: number;
-    imageCount: number;
-    totalDurationMs: number;
-    totalWaitDurationMs: number;
-    timedCount: number;
-    waitCount: number;
-  }>();
-
-  for (let current = start; current <= end; current += bucketMs) {
-    bucketMap.set(current, {
-      count: 0,
-      success: 0,
-      failed: 0,
-      running: 0,
-      queued: 0,
-      imageCount: 0,
-      totalDurationMs: 0,
-      totalWaitDurationMs: 0,
-      timedCount: 0,
-      waitCount: 0,
-    });
-  }
-
-  for (const item of items) {
-    const key = Math.floor(item.createdAt / bucketMs) * bucketMs;
-    const bucket = bucketMap.get(key) ?? {
-      count: 0,
-      success: 0,
-      failed: 0,
-      running: 0,
-      queued: 0,
-      imageCount: 0,
-      totalDurationMs: 0,
-      totalWaitDurationMs: 0,
-      timedCount: 0,
-      waitCount: 0,
-    };
-    bucket.count += 1;
-    bucket.imageCount += item.images.length;
-    if (item.status === "success") bucket.success += 1;
-    if (item.status === "failed") bucket.failed += 1;
-    if (item.status === "running") bucket.running += 1;
-    if (item.status === "queued") bucket.queued += 1;
-    if (item.status !== "queued" && item.status !== "running" && Number.isFinite(item.durationMs) && item.durationMs > 0) {
-      bucket.totalDurationMs += item.durationMs;
-      bucket.timedCount += 1;
-    }
-    if (Number.isFinite(item.waitDurationMs) && (item.waitDurationMs ?? 0) > 0) {
-      bucket.totalWaitDurationMs += item.waitDurationMs ?? 0;
-      bucket.waitCount += 1;
-    }
-    bucketMap.set(key, bucket);
-  }
-
-  return {
-    total,
-    success,
-    failed,
-    running,
-    queued,
-    imageCount,
-    successRate: total > 0 ? (success / total) * 100 : 0,
-    averageDurationMs,
-    averageWaitDurationMs,
-    buckets: Array.from(bucketMap.entries())
-      .sort(([left], [right]) => left - right)
-      .map(([key, bucket]) => ({
-        key,
-        label: formatReportBucketLabel(key, bucketMs),
-        count: bucket.count,
-        success: bucket.success,
-        failed: bucket.failed,
-        running: bucket.running,
-        queued: bucket.queued,
-        imageCount: bucket.imageCount,
-        averageDurationMs: bucket.timedCount > 0 ? bucket.totalDurationMs / bucket.timedCount : 0,
-        averageWaitDurationMs: bucket.waitCount > 0 ? bucket.totalWaitDurationMs / bucket.waitCount : 0,
-      })),
-  };
-}
-
 function buildLinePath(points: Array<{ x: number; y: number }>): string {
   if (points.length === 0) {
     return "";
@@ -614,6 +554,124 @@ async function createReferencePreview(src: string, originalSize: number): Promis
   }
 }
 
+function HistoryOwnerSelect(props: {
+  options: HistoryOwnerOption[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const selected = props.options.find((option) => option.value === props.value) ?? props.options[0];
+  const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+  const visibleOptions = normalizedQuery
+    ? props.options
+        .filter((option) => option.kind === "user" && option.searchText.toLocaleLowerCase("zh-CN").includes(normalizedQuery))
+        .slice(0, 100)
+    : props.options.filter((option) => option.kind !== "user" || option.count > 0 || option.value === props.value);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    window.requestAnimationFrame(() => searchRef.current?.focus());
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [open]);
+
+  function selectOption(option: HistoryOwnerOption) {
+    props.onChange(option.value);
+    setOpen(false);
+    setQuery("");
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
+  return (
+    <div
+      className="history-owner-select"
+      ref={rootRef}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          setOpen(false);
+          triggerRef.current?.focus();
+        }
+      }}
+    >
+      <button
+        className={`control history-owner-trigger ${open ? "is-open" : ""}`}
+        type="button"
+        ref={triggerRef}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls="history-owner-options"
+        aria-label={`用户范围：${selected?.label ?? "我的数据"}，${selected?.count ?? 0} 次`}
+        onClick={() => {
+          setOpen((value) => !value);
+          setQuery("");
+        }}
+      >
+        <span className="history-owner-trigger-copy">
+          <strong>{selected?.label ?? "我的数据"}</strong>
+          <small>{selected?.count ?? 0} 次</small>
+        </span>
+        <ChevronDown size={16} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="history-owner-menu">
+          <div className="history-owner-search">
+            <Search size={16} aria-hidden="true" />
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+                } else if (event.key === "Enter" && visibleOptions.length === 1 && visibleOptions[0]) {
+                  event.preventDefault();
+                  selectOption(visibleOptions[0]);
+                }
+              }}
+              placeholder="搜索姓名或账号"
+              aria-label="搜索用户"
+            />
+          </div>
+          <div className="history-owner-options" id="history-owner-options" role="listbox" ref={menuRef} aria-label="用户范围">
+            {visibleOptions.length > 0 ? visibleOptions.map((option) => (
+              <button
+                className={`history-owner-option ${option.value === props.value ? "is-selected" : ""}`}
+                type="button"
+                role="option"
+                aria-selected={option.value === props.value}
+                key={`${option.kind}:${option.value}`}
+                onClick={() => selectOption(option)}
+              >
+                <Check size={16} aria-hidden="true" />
+                <span>
+                  <strong>{option.label}</strong>
+                  {option.kind === "user" ? <small>{option.value}</small> : null}
+                </span>
+                <em>{option.count} 次</em>
+              </button>
+            )) : (
+              <div className="history-owner-empty">没有匹配的用户</div>
+            )}
+          </div>
+          {!normalizedQuery ? <div className="history-owner-hint">搜索可查看其他暂无使用记录的用户</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function GeneratePage(props: {
   config: AdminConfig | null;
   currentUser: string | null;
@@ -646,7 +704,18 @@ export function GeneratePage(props: {
   const [historyStartTime, setHistoryStartTime] = useState("");
   const [historyEndTime, setHistoryEndTime] = useState("");
   const [historyOwnerFilter, setHistoryOwnerFilter] = useState("");
-  const [historyCustomOwner, setHistoryCustomOwner] = useState("");
+  const [historyOwnerUsage, setHistoryOwnerUsage] = useState<GenerationOwnerUsageResponse>({ items: [], total: 0 });
+  const [historyViewMode, setHistoryViewMode] = useState<HistoryViewMode>(() => {
+    try {
+      return window.localStorage.getItem(HISTORY_VIEW_STORAGE_KEY) === "list" ? "list" : "grid";
+    } catch {
+      return "grid";
+    }
+  });
+  const [selectedHistoryItems, setSelectedHistoryItems] = useState<Map<string, GenerateHistoryItem>>(() => new Map());
+  const [bulkDownloading, setBulkDownloading] = useState(false);
+  const [report, setReport] = useState<GenerateReportResponse>(EMPTY_GENERATE_REPORT);
+  const [reportLoading, setReportLoading] = useState(false);
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null);
   const [manualCopyPrompt, setManualCopyPrompt] = useState<string | null>(null);
   const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
@@ -689,24 +758,64 @@ export function GeneratePage(props: {
       return true;
     });
   }, [history, historyEndTime, historyPromptQuery, historyStartTime]);
-  const reportStats = useMemo(() => buildGenerateReportStats(filteredHistory), [filteredHistory]);
+  const selectableHistory = useMemo(() => filteredHistory.filter((item) => item.status === "success" && item.images.length > 0), [filteredHistory]);
+  const selectedHistory = useMemo(() => Array.from(selectedHistoryItems.values()), [selectedHistoryItems]);
+  const selectedCurrentPageCount = useMemo(() => selectableHistory.filter((item) => selectedHistoryItems.has(item.id)).length, [selectableHistory, selectedHistoryItems]);
+  const selectedHistoryImageCount = useMemo(() => selectedHistory.reduce((total, item) => total + item.images.length, 0), [selectedHistory]);
+  const allSelectableHistorySelected = selectableHistory.length > 0 && selectedCurrentPageCount === selectableHistory.length;
+  const someSelectableHistorySelected = selectedCurrentPageCount > 0 && !allSelectableHistorySelected;
   const canGoPreviousHistoryPage = historyPage > 1 && !historyLoading;
   const canGoNextHistoryPage = historyPage < historyTotalPages && !historyLoading;
   const historyOwnerOptions = useMemo(() => {
+    const usageByOwner = new Map(historyOwnerUsage.items.map((item) => [item.owner, item.count]));
     const names = new Set<string>();
-    if (props.currentUser) {
-      names.add(props.currentUser);
-    }
     for (const user of props.config?.users ?? []) {
       names.add(user.username);
+    }
+    for (const item of historyOwnerUsage.items) {
+      names.add(item.owner);
     }
     for (const item of history) {
       if (item.owner) {
         names.add(item.owner);
       }
     }
-    return Array.from(names).sort((left, right) => userDisplayName(props.config, left).localeCompare(userDisplayName(props.config, right), "zh-CN"));
-  }, [history, props.config, props.currentUser]);
+    if (historyOwnerFilter && historyOwnerFilter !== "all") {
+      names.add(historyOwnerFilter);
+    }
+    if (props.currentUser) {
+      names.delete(props.currentUser);
+    }
+    const userOptions: HistoryOwnerOption[] = Array.from(names)
+      .map((owner) => {
+        const label = userDisplayName(props.config, owner);
+        return {
+          value: owner,
+          label,
+          searchText: `${label} ${owner}`,
+          count: usageByOwner.get(owner) ?? 0,
+          kind: "user" as const,
+        };
+      })
+      .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, "zh-CN"));
+    return [
+      {
+        value: "",
+        label: "我的数据",
+        searchText: "我的数据",
+        count: props.currentUser ? usageByOwner.get(props.currentUser) ?? 0 : 0,
+        kind: "mine" as const,
+      },
+      {
+        value: "all",
+        label: "全部用户",
+        searchText: "全部用户",
+        count: historyOwnerUsage.total,
+        kind: "all" as const,
+      },
+      ...userOptions,
+    ];
+  }, [history, historyOwnerFilter, historyOwnerUsage, props.config, props.currentUser]);
 
   const renderHistoryFilters = () => (
     <div className="generate-history-filters">
@@ -734,41 +843,10 @@ export function GeneratePage(props: {
         <>
           <label className="field">
             <span>用户范围</span>
-            <select className="control" value={historyOwnerFilter} onChange={(event) => {
-              setHistoryOwnerFilter(event.target.value);
+            <HistoryOwnerSelect options={historyOwnerOptions} value={historyOwnerFilter} onChange={(value) => {
+              setHistoryOwnerFilter(value);
               setHistoryPage(1);
-            }}>
-              <option value="">我的数据</option>
-              <option value="all">全部用户</option>
-              {historyOwnerOptions.map((owner) => (
-                <option key={owner} value={owner}>
-                  {userOptionLabel(props.config, owner, props.currentUser)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field history-owner-field">
-            <span>指定用户</span>
-            <div className="history-search-control">
-              <input
-                className="control"
-                placeholder="输入用户名"
-                value={historyCustomOwner}
-                onChange={(event) => setHistoryCustomOwner(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    setHistoryOwnerFilter(historyCustomOwner.trim());
-                    setHistoryPage(1);
-                  }
-                }}
-              />
-              <button className="history-owner-apply" type="button" onClick={() => {
-                setHistoryOwnerFilter(historyCustomOwner.trim());
-                setHistoryPage(1);
-              }}>
-                查看
-              </button>
-            </div>
+            }} />
           </label>
         </>
       ) : null}
@@ -810,8 +888,40 @@ export function GeneratePage(props: {
     </div>
   );
 
+  const renderReportFilters = () => (
+    <div className="generate-report-filters">
+      <label className="field">
+        <span>开始时间</span>
+        <input className="control" type="datetime-local" value={historyStartTime} onChange={(event) => setHistoryStartTime(event.target.value)} />
+      </label>
+      <label className="field">
+        <span>结束时间</span>
+        <input className="control" type="datetime-local" value={historyEndTime} onChange={(event) => setHistoryEndTime(event.target.value)} />
+      </label>
+      {props.role === "admin" ? (
+        <label className="field">
+          <span>用户范围</span>
+          <HistoryOwnerSelect options={historyOwnerOptions} value={historyOwnerFilter} onChange={setHistoryOwnerFilter} />
+        </label>
+      ) : null}
+      <button
+        className="btn-secondary generate-report-filter-reset"
+        type="button"
+        onClick={() => {
+          setHistoryStartTime("");
+          setHistoryEndTime("");
+          setHistoryOwnerFilter("");
+        }}
+        disabled={!historyStartTime && !historyEndTime && !historyOwnerFilter}
+      >
+        <RotateCcw size={16} />
+        重置
+      </button>
+    </div>
+  );
+
   const renderReportChart = () => {
-    const buckets = reportStats.buckets;
+    const buckets = report.buckets;
     if (buckets.length === 0) {
       return (
         <div className="generate-report-empty">
@@ -822,23 +932,23 @@ export function GeneratePage(props: {
     }
 
     const width = 900;
-    const height = 280;
-    const padding = { top: 22, right: 24, bottom: 48, left: 42 };
+    const height = 300;
+    const padding = { top: 26, right: 48, bottom: 52, left: 44 };
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
-    const maxCount = Math.max(1, ...buckets.map((bucket) => bucket.count));
-    const maxDuration = Math.max(1, ...buckets.map((bucket) => bucket.averageDurationMs));
-    const barGap = 8;
-    const barWidth = Math.max(10, (chartWidth - barGap * Math.max(0, buckets.length - 1)) / buckets.length);
+    const maxVolume = Math.max(1, ...buckets.flatMap((bucket) => [bucket.requestCount, bucket.imageCount]));
+    const maxUsers = Math.max(1, ...buckets.map((bucket) => bucket.activeUserCount));
+    const slotWidth = chartWidth / buckets.length;
+    const barWidth = Math.max(5, Math.min(18, slotWidth * 0.28));
     const points = buckets.map((bucket, index) => {
-      const x = padding.left + index * (barWidth + barGap) + barWidth / 2;
-      const y = padding.top + chartHeight - (bucket.averageDurationMs / maxDuration) * chartHeight;
+      const x = padding.left + slotWidth * index + slotWidth / 2;
+      const y = padding.top + chartHeight - (bucket.activeUserCount / maxUsers) * chartHeight;
       return { x, y };
     });
 
     return (
-      <div className="generate-report-chart" role="img" aria-label="生图数量和平均耗时分布">
-        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+      <div className="generate-report-chart" role="img" aria-label="生图次数、生成图片数和活跃人员趋势">
+        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet">
           <line className="chart-axis" x1={padding.left} y1={padding.top} x2={padding.left} y2={padding.top + chartHeight} />
           <line className="chart-axis" x1={padding.left} y1={padding.top + chartHeight} x2={width - padding.right} y2={padding.top + chartHeight} />
           {[0.25, 0.5, 0.75, 1].map((value) => {
@@ -846,31 +956,33 @@ export function GeneratePage(props: {
             return <line className="chart-grid-line" key={value} x1={padding.left} y1={y} x2={width - padding.right} y2={y} />;
           })}
           {buckets.map((bucket, index) => {
-            const x = padding.left + index * (barWidth + barGap);
-            const barHeight = (bucket.count / maxCount) * chartHeight;
-            const y = padding.top + chartHeight - barHeight;
+            const centerX = padding.left + slotWidth * index + slotWidth / 2;
+            const requestHeight = (bucket.requestCount / maxVolume) * chartHeight;
+            const imageHeight = (bucket.imageCount / maxVolume) * chartHeight;
+            const label = formatReportBucketLabel(bucket.startTime, report.bucketMs);
             return (
-              <g key={bucket.key}>
-                <rect className="chart-bar" x={x} y={y} width={barWidth} height={Math.max(2, barHeight)} rx="5" />
-                <text className="chart-bar-label" x={x + barWidth / 2} y={Math.max(14, y - 6)} textAnchor="middle">
-                  {bucket.count}
-                </text>
-                <text className="chart-x-label" x={x + barWidth / 2} y={height - 18} textAnchor="middle">
-                  {bucket.label}
+              <g key={bucket.startTime}>
+                <title>{`${label}：${bucket.requestCount} 次，${bucket.imageCount} 张，${bucket.activeUserCount} 人`}</title>
+                <rect className="chart-bar chart-bar-requests" x={centerX - barWidth - 1} y={padding.top + chartHeight - requestHeight} width={barWidth} height={Math.max(2, requestHeight)} rx="3" />
+                <rect className="chart-bar chart-bar-images" x={centerX + 1} y={padding.top + chartHeight - imageHeight} width={barWidth} height={Math.max(2, imageHeight)} rx="3" />
+                <text className="chart-x-label" x={centerX} y={height - 18} textAnchor="middle">
+                  {label}
                 </text>
               </g>
             );
           })}
           <path className="chart-line" d={buildLinePath(points)} />
           {points.map((point, index) => (
-            <circle className="chart-line-point" key={buckets[index].key} cx={point.x} cy={point.y} r="4" />
+            <circle className="chart-line-point" key={buckets[index]?.startTime} cx={point.x} cy={point.y} r="4" />
           ))}
+          <text className="chart-scale-label" x={padding.left} y={16}>次数 / 图片</text>
+          <text className="chart-scale-label" x={width - padding.right} y={16} textAnchor="end">活跃人员</text>
         </svg>
         <div className="generate-report-bucket-list" aria-label="图表数据明细">
           {buckets.map((bucket) => (
-            <div className="generate-report-bucket" key={bucket.key}>
-              <strong>{bucket.label}</strong>
-              <span>{bucket.count} 次 · {formatDuration(bucket.averageDurationMs)}</span>
+            <div className="generate-report-bucket" key={bucket.startTime}>
+              <strong>{formatReportBucketLabel(bucket.startTime, report.bucketMs)}</strong>
+              <span>{bucket.requestCount} 次 · {bucket.imageCount} 张 · {bucket.activeUserCount} 人</span>
             </div>
           ))}
         </div>
@@ -891,8 +1003,16 @@ export function GeneratePage(props: {
       if (props.role === "admin" && historyOwnerFilter) {
         params.set("owner", historyOwnerFilter);
       }
-      const next = await fetchJson<GenerateHistoryResponse>(`/_gateway/generations/history?${params.toString()}`);
+      const [next, nextOwnerUsage] = await Promise.all([
+        fetchJson<GenerateHistoryResponse>(`/_gateway/generations/history?${params.toString()}`),
+        props.role === "admin"
+          ? fetchJson<GenerationOwnerUsageResponse>("/_gateway/generations/history/owners")
+          : Promise.resolve(null),
+      ]);
       setHistory(next.items);
+      if (nextOwnerUsage) {
+        setHistoryOwnerUsage(nextOwnerUsage);
+      }
       setHistoryTotal(next.total ?? next.items.length);
       const nextTotalPages = next.totalPages ?? Math.max(1, Math.ceil((next.total ?? next.items.length) / GENERATE_HISTORY_PAGE_SIZE));
       setHistoryTotalPages(nextTotalPages);
@@ -910,9 +1030,45 @@ export function GeneratePage(props: {
     }
   }
 
+  async function refreshReport(options?: { silent?: boolean }) {
+    setReportLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (props.role === "admin" && historyOwnerFilter) {
+        params.set("owner", historyOwnerFilter);
+      }
+      const startTime = historyStartTime ? Date.parse(historyStartTime) : Number.NaN;
+      const endTime = historyEndTime ? Date.parse(historyEndTime) : Number.NaN;
+      if (Number.isFinite(startTime)) params.set("startTime", String(startTime));
+      if (Number.isFinite(endTime)) params.set("endTime", String(endTime));
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      setReport(await fetchJson<GenerateReportResponse>(`/_gateway/generations/report${query}`));
+    } catch (error) {
+      if (!options?.silent) {
+        props.setStatus(`读取生图报表失败：${errorMessage(error)}`);
+      }
+    } finally {
+      setReportLoading(false);
+    }
+  }
+
   useEffect(() => {
     refreshHistory({ silent: true }).catch(() => undefined);
   }, [historyOwnerFilter, historyPage]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(HISTORY_VIEW_STORAGE_KEY, historyViewMode);
+    } catch {
+      // Ignore storage failures in restricted browser contexts.
+    }
+  }, [historyViewMode]);
+
+  useEffect(() => {
+    if (tab === "report") {
+      refreshReport({ silent: true }).catch(() => undefined);
+    }
+  }, [tab, historyEndTime, historyOwnerFilter, historyStartTime]);
 
   useEffect(() => {
     if (!generationStartedAt || props.busy !== "test") {
@@ -925,35 +1081,138 @@ export function GeneratePage(props: {
     return () => window.clearInterval(timer);
   }, [generationStartedAt, props.busy]);
 
-  async function handleReferenceUpload(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.currentTarget.files ?? []);
-    event.currentTarget.value = "";
-    if (files.length === 0) return;
+  function toggleHistorySelection(item: GenerateHistoryItem) {
+    setSelectedHistoryItems((current) => {
+      const next = new Map(current);
+      if (next.has(item.id)) {
+        next.delete(item.id);
+      } else {
+        next.set(item.id, item);
+      }
+      return next;
+    });
+  }
 
+  function toggleSelectAllHistory() {
+    setSelectedHistoryItems((current) => {
+      const next = new Map(current);
+      for (const item of selectableHistory) {
+        if (allSelectableHistorySelected) {
+          next.delete(item.id);
+        } else {
+          next.set(item.id, item);
+        }
+      }
+      return next;
+    });
+  }
+
+  async function downloadSelectedHistoryImages() {
+    if (bulkDownloading || selectedHistory.length === 0) return;
+
+    setBulkDownloading(true);
+    props.setStatus(`正在读取 ${selectedHistoryImageCount} 张原图并打包...`);
+    try {
+      const files = selectedHistory.flatMap((item) => item.images.map((image, imageIndex) => ({ item, image, imageIndex })));
+      const entries: Record<string, Uint8Array> = {};
+      const failures: string[] = [];
+      let cursor = 0;
+
+      const workers = Array.from({ length: Math.min(3, files.length) }, async () => {
+        while (cursor < files.length) {
+          const file = files[cursor];
+          cursor += 1;
+          if (!file) continue;
+          const taskId = archivePathSegment(file.item.id, "task");
+          const filename = archivePathSegment(file.image.filename, `generated-${file.imageIndex + 1}.png`);
+          const archivePath = `${taskId}-${String(file.imageIndex + 1).padStart(2, "0")}-${filename}`;
+          try {
+            const response = await fetch(file.image.url, { credentials: "include" });
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            entries[archivePath] = new Uint8Array(await response.arrayBuffer());
+          } catch (error) {
+            failures.push(`${filename}（${errorMessage(error)}）`);
+          }
+        }
+      });
+      await Promise.all(workers);
+
+      const downloadedCount = Object.keys(entries).length;
+      if (downloadedCount === 0) {
+        throw new Error(failures[0] || "没有可打包的图片");
+      }
+
+      const archive = zipSync(entries, { level: 0 });
+      const archiveBuffer = archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength) as ArrayBuffer;
+      const url = URL.createObjectURL(new Blob([archiveBuffer], { type: "application/zip" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `生图历史-${archiveTimestamp()}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+      props.setStatus(failures.length > 0
+        ? `已打包 ${downloadedCount} 张原图，${failures.length} 张下载失败并已跳过。`
+        : `已打包下载 ${downloadedCount} 张原图。`);
+    } catch (error) {
+      props.setStatus(`批量下载失败：${errorMessage(error)}`);
+    } finally {
+      setBulkDownloading(false);
+    }
+  }
+
+  async function addReferenceFiles(files: File[], source: "upload" | "paste") {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (imageFiles.length === 0) {
+      props.setStatus(source === "paste" ? "剪贴板中没有可用的图片。" : "请选择图片文件。");
+      return;
+    }
     const room = MAX_REFERENCE_IMAGES - referenceImages.length;
     if (room <= 0) {
       props.setStatus(`参考图最多支持 ${MAX_REFERENCE_IMAGES} 张。`);
       return;
     }
 
-    const selected = files.slice(0, room);
+    const selected = imageFiles.slice(0, room);
     try {
-      const nextImages = await Promise.all(selected.map(async (file) => {
+      const nextImages = await Promise.all(selected.map(async (file, index) => {
         const src = await readFileAsDataUrl(file);
         return {
           id: createClientId("reference"),
           src,
           previewSrc: await createReferencePreview(src, file.size),
-          name: file.name,
+          name: file.name || `粘贴图片-${archiveTimestamp()}-${index + 1}.png`,
           size: file.size,
         };
       }));
       setReferenceImages((items) => [...items, ...nextImages]);
-      const limitMessage = files.length > room ? `，已达到上限，仅添加前 ${room} 张` : "";
-      props.setStatus(`已添加 ${nextImages.length} 张参考图${limitMessage}，本次将走 images.edits。`);
+      const limitMessage = imageFiles.length > room ? `，已达到上限，仅添加前 ${room} 张` : "";
+      props.setStatus(`已${source === "paste" ? "粘贴" : "添加"} ${nextImages.length} 张参考图${limitMessage}，本次将走 images.edits。`);
     } catch (error) {
       props.setStatus(errorMessage(error));
     }
+  }
+
+  async function handleReferenceUpload(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    if (files.length === 0) return;
+    await addReferenceFiles(files, "upload");
+  }
+
+  function handleReferencePaste(event: ReactClipboardEvent<HTMLElement>) {
+    const files = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter(Boolean) as File[];
+    if (files.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void addReferenceFiles(files, "paste");
   }
 
   function removeReferenceImage(id: string) {
@@ -1205,11 +1464,11 @@ export function GeneratePage(props: {
   function reuseHistory(item: GenerateHistoryItem) {
     setPrompt(item.prompt);
     applyHistoryParameters(item);
-    setReferenceImages(item.referenceImages
-      .filter((reference) => reference.url || reference.source)
+    const restoredReferences = item.referenceImages
+      .map((reference) => ({ reference, src: recoverHistoryReferenceUrl(reference.url || reference.source || "") }))
+      .filter((entry): entry is { reference: GenerateHistoryItem["referenceImages"][number]; src: string } => Boolean(entry.src))
       .slice(0, MAX_REFERENCE_IMAGES)
-      .map((reference, index) => {
-        const src = reference.url || reference.source || "";
+      .map(({ reference, src }, index) => {
         return {
           id: createClientId(`history-reference-${index + 1}`),
           src,
@@ -1217,9 +1476,13 @@ export function GeneratePage(props: {
           name: reference.name || `history-reference-${index + 1}`,
           size: 0,
         };
-      }));
+      });
+    setReferenceImages(restoredReferences);
     setTab("create");
-    props.setStatus("已带入历史提示词和参数。");
+    const skippedCount = Math.max(0, item.referenceImages.length - restoredReferences.length);
+    props.setStatus(skippedCount > 0
+      ? `已带入历史提示词和 ${restoredReferences.length} 张参考图，另有 ${skippedCount} 张旧参考图地址无法恢复并已跳过。`
+      : `已带入历史提示词、参数${restoredReferences.length > 0 ? `和 ${restoredReferences.length} 张参考图` : ""}。`);
   }
 
   function editFromHistory(item: GenerateHistoryItem) {
@@ -1229,8 +1492,12 @@ export function GeneratePage(props: {
       return;
     }
 
-    const imageUrl = new URL(image.url, window.location.origin).toString();
-    const previewUrl = image.previewUrl ? new URL(image.previewUrl, window.location.origin).toString() : imageUrl;
+    const imageUrl = recoverHistoryReferenceUrl(image.url);
+    if (!imageUrl) {
+      props.setStatus("这条历史的原图地址无法恢复，请重新上传参考图。");
+      return;
+    }
+    const previewUrl = image.previewUrl ? recoverHistoryReferenceUrl(image.previewUrl) ?? imageUrl : imageUrl;
     setPrompt(item.prompt);
     applyHistoryParameters(item);
     setReferenceImages([{
@@ -1342,13 +1609,14 @@ export function GeneratePage(props: {
                 />
               </label>
               <label className="field">
-                <span>质量</span>
+                <span>质量倾向</span>
                 <select className="control" value={quality} onChange={(event) => setQuality(event.target.value as ImageQuality)}>
                   <option value="low">低</option>
                   <option value="medium">中</option>
                   <option value="high">高</option>
                   <option value="auto">自动</option>
                 </select>
+                <small className="field-hint">Codex 通道可能由上游自动决定，质量档位不保证严格生效。</small>
               </label>
               <label className="field">
                 <span>格式</span>
@@ -1373,23 +1641,30 @@ export function GeneratePage(props: {
               </label>
             </div>
 
-            <details className="reference-panel">
+            <details className="reference-panel" onPaste={handleReferencePaste}>
               <summary>
                 <strong>参考图</strong>
                 <span>{referenceSummary}</span>
               </summary>
-              <div className="reference-actions">
-                <label className="btn-secondary upload-btn">
-                  <Upload size={16} />
-                  添加图片
-                  <input type="file" accept="image/*" multiple onChange={handleReferenceUpload} />
-                </label>
-                {referenceImages.length > 0 ? (
-                  <button className="btn-secondary" type="button" onClick={clearReferences}>
-                    <RotateCcw size={16} />
-                    清空
-                  </button>
-                ) : null}
+              <div className="reference-paste-zone" tabIndex={0} onPaste={handleReferencePaste} aria-label="粘贴参考图片">
+                <ClipboardPaste size={20} aria-hidden="true" />
+                <div>
+                  <strong>直接粘贴图片</strong>
+                  <span>点击这里后按 Ctrl/Cmd+V，也可以选择本地图片</span>
+                </div>
+                <div className="reference-actions">
+                  <label className="btn-secondary upload-btn">
+                    <Upload size={16} />
+                    添加图片
+                    <input type="file" accept="image/*" multiple onChange={handleReferenceUpload} />
+                  </label>
+                  {referenceImages.length > 0 ? (
+                    <button className="btn-secondary" type="button" onClick={clearReferences}>
+                      <RotateCcw size={16} />
+                      清空
+                    </button>
+                  ) : null}
+                </div>
               </div>
               {referenceImages.length > 0 ? (
                 <div className="reference-grid" aria-label="参考图列表">
@@ -1527,10 +1802,53 @@ export function GeneratePage(props: {
         <div className="generate-history">
           <div className="generate-history-actions">
             <span>{historyLoading ? "正在读取服务端历史..." : `当前页显示 ${filteredHistory.length} / ${history.length} 条，服务器共 ${historyTotal} 条。`}</span>
-            <button className="btn-secondary" type="button" onClick={() => refreshHistory()} disabled={historyLoading}>
-              <RotateCcw size={16} />
-              刷新
-            </button>
+            <div className="generate-history-bulk-actions">
+              <div className="generate-history-view-toggle" role="group" aria-label="历史记录显示方式">
+                <button
+                  className={historyViewMode === "grid" ? "is-active" : ""}
+                  type="button"
+                  onClick={() => setHistoryViewMode("grid")}
+                  aria-pressed={historyViewMode === "grid"}
+                  title="宫格视图"
+                >
+                  <LayoutGrid size={16} />
+                  <span>宫格</span>
+                </button>
+                <button
+                  className={historyViewMode === "list" ? "is-active" : ""}
+                  type="button"
+                  onClick={() => setHistoryViewMode("list")}
+                  aria-pressed={historyViewMode === "list"}
+                  title="列表视图"
+                >
+                  <List size={16} />
+                  <span>列表</span>
+                </button>
+              </div>
+              <label className="generate-history-select-all">
+                <input
+                  type="checkbox"
+                  checked={allSelectableHistorySelected}
+                  ref={(element) => {
+                    if (element) element.indeterminate = someSelectableHistorySelected;
+                  }}
+                  onChange={toggleSelectAllHistory}
+                  disabled={selectableHistory.length === 0 || bulkDownloading}
+                />
+                <span>本页全选</span>
+              </label>
+              <span className="generate-history-selection-summary">
+                已选 {selectedHistory.length} 条 / {selectedHistoryImageCount} 张{selectedHistory.length > selectedCurrentPageCount ? `（含其他页 ${selectedHistory.length - selectedCurrentPageCount} 条）` : ""}
+              </span>
+              <button className="btn-primary" type="button" onClick={downloadSelectedHistoryImages} disabled={selectedHistory.length === 0 || bulkDownloading}>
+                {bulkDownloading ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                {bulkDownloading ? "正在打包" : "批量下载"}
+              </button>
+              <button className="btn-secondary" type="button" onClick={() => refreshHistory()} disabled={historyLoading || bulkDownloading}>
+                <RotateCcw size={16} />
+                刷新
+              </button>
+            </div>
           </div>
           {renderHistoryFilters()}
           {renderHistoryPager()}
@@ -1539,14 +1857,51 @@ export function GeneratePage(props: {
           ) : filteredHistory.length === 0 ? (
             <div className="empty-state">没有匹配的生图历史。</div>
           ) : (
-            <div className="generate-history-grid">
+            <div className={`generate-history-grid ${historyViewMode === "list" ? `is-table ${props.role === "admin" ? "" : "is-user-view"}` : ""}`} role={historyViewMode === "list" ? "table" : undefined}>
+              {historyViewMode === "list" ? (
+                <div className="generate-history-table-head" role="row">
+                  <label className="generate-history-table-select-all" title="本页全选">
+                    <input
+                      type="checkbox"
+                      checked={allSelectableHistorySelected}
+                      ref={(element) => {
+                        if (element) element.indeterminate = someSelectableHistorySelected;
+                      }}
+                      onChange={toggleSelectAllHistory}
+                      disabled={selectableHistory.length === 0 || bulkDownloading}
+                      aria-label="本页全选"
+                    />
+                  </label>
+                  <span>预览</span>
+                  <span>状态</span>
+                  <span>提示词</span>
+                  <span>生成时间</span>
+                  <span>规格</span>
+                  <span>耗时</span>
+                  {props.role === "admin" ? <span>用户</span> : null}
+                  <span>操作</span>
+                </div>
+              ) : null}
               {filteredHistory.map((item) => {
                 const statusMeta = generateStatusMeta(item.status);
                 const firstImage = item.images[0];
+                const selectable = item.status === "success" && item.images.length > 0;
+                const selected = selectedHistoryItems.has(item.id);
                 return (
-                <article className="generate-history-card" key={item.id}>
-                  <div className={`generate-history-thumbs ${item.images.length > 1 ? "is-multiple" : ""}`}>
-                    {item.images.length > 0 ? item.images.slice(0, 4).map((image, index) => (
+                <article className={`generate-history-card ${selected ? "is-selected" : ""}`} key={item.id} role={historyViewMode === "list" ? "row" : undefined}>
+                  {selectable ? (
+                    <label className="generate-history-card-select" title={selected ? "取消选择" : "选择此记录"}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleHistorySelection(item)}
+                        disabled={bulkDownloading}
+                        aria-label={`${selected ? "取消选择" : "选择"}：${item.prompt}`}
+                      />
+                    </label>
+                  ) : null}
+                  <div className={`generate-history-thumbs ${item.images.length > 1 ? "is-multiple" : ""}`} role={historyViewMode === "list" ? "cell" : undefined}>
+                    {item.images.length > 0 ? item.images.slice(0, historyViewMode === "list" ? 1 : 4).map((image, index) => (
                       <button
                         className={`generate-history-thumb ${item.images.length === 1 ? ratioClassName(item.ratio || item.size) : ""}`}
                         type="button"
@@ -1565,9 +1920,9 @@ export function GeneratePage(props: {
                         <ImagePlus size={28} />
                       </div>
                     )}
-                    {item.images.length > 4 ? <span className="generate-history-more">+{item.images.length - 4}</span> : null}
+                    {item.images.length > (historyViewMode === "list" ? 1 : 4) ? <span className="generate-history-more">+{item.images.length - (historyViewMode === "list" ? 1 : 4)}</span> : null}
                   </div>
-                  <div>
+                  <div className="generate-history-card-info">
                     <div className="generate-history-title-row">
                       <span className={`generate-status ${statusMeta.className}`}>
                         {statusMeta.label}
@@ -1584,6 +1939,19 @@ export function GeneratePage(props: {
                     </span>
                     {item.error ? <span className="generate-history-error">{item.error}</span> : null}
                   </div>
+                  {historyViewMode === "list" ? (
+                    <>
+                      <span className={`generate-status generate-history-table-status ${statusMeta.className}`} role="cell">{statusMeta.label}</span>
+                      <strong className="generate-history-table-prompt" title={item.prompt} role="cell">{item.prompt}</strong>
+                      <span className="generate-history-table-time" role="cell">{formatFullTime(item.createdAt)}</span>
+                      <span className="generate-history-table-spec" role="cell">
+                        {firstImage?.width && firstImage?.height ? `${firstImage.width}×${firstImage.height}` : item.ratio || item.size || "-"}
+                        {item.images.length > 1 ? ` · ${item.images.length} 张` : ""}
+                      </span>
+                      <span className="generate-history-table-duration" role="cell">{formatDuration(item.durationMs)}</span>
+                      {props.role === "admin" ? <span className="generate-history-table-user" role="cell">{userDisplayName(props.config, item.owner)}</span> : null}
+                    </>
+                  ) : null}
                   <div className="generate-history-card-actions">
                     {firstImage ? (
                       <button className="btn-secondary" type="button" onClick={() => editFromHistory(item)} disabled={props.busy === "test"}>
@@ -1592,14 +1960,16 @@ export function GeneratePage(props: {
                       </button>
                     ) : null}
                     <button className="btn-secondary" type="button" onClick={() => reuseHistory(item)}>
+                      <RotateCcw size={15} />
                       再次使用
                     </button>
                     <button className="btn-secondary" type="button" onClick={() => copyHistoryPrompt(item)}>
                       <Copy size={15} />
                       {copiedPromptId === item.id ? "已复制" : "复制提示词"}
                     </button>
-                    {item.images.map((image, index) => (
+                    {item.images.slice(0, historyViewMode === "list" ? 1 : item.images.length).map((image, index) => (
                       <a className="btn-secondary" href={image.url} download={image.filename} key={image.filename}>
+                        <Download size={15} />
                         {item.images.length > 1 ? `下载 ${index + 1}` : "下载"}
                       </a>
                     ))}
@@ -1613,49 +1983,93 @@ export function GeneratePage(props: {
         </div>
       ) : (
         <div className="generate-report">
-          <div className="generate-history-actions">
-            <span>{historyLoading ? "正在读取服务端历史..." : `统计当前页 ${filteredHistory.length} / ${history.length} 条，服务器共 ${historyTotal} 条。`}</span>
-            <button className="btn-secondary" type="button" onClick={() => refreshHistory()} disabled={historyLoading}>
+          <div className="generate-report-heading">
+            <div>
+              <strong>生图使用趋势</strong>
+              <span>
+                {reportLoading
+                  ? "正在聚合完整历史数据..."
+                  : report.startTime && report.endTime
+                    ? `${formatFullTime(report.startTime)} 至 ${formatFullTime(report.endTime)}`
+                    : "当前筛选范围暂无生图记录"}
+              </span>
+            </div>
+            <button className="btn-secondary" type="button" onClick={() => refreshReport()} disabled={reportLoading}>
               <RotateCcw size={16} />
               刷新
             </button>
           </div>
-          {renderHistoryFilters()}
-          {renderHistoryPager()}
+          {renderReportFilters()}
           <div className="generate-report-summary">
             <div className="generate-report-stat">
-              <span>总次数</span>
-              <strong>{reportStats.total}</strong>
-              <small>{reportStats.imageCount} 张图片</small>
+              <div className="generate-report-stat-head"><Activity size={17} /><span>生图次数</span></div>
+              <strong>{report.summary.requestCount}</strong>
+              <small>{report.summary.successCount} 成功 / {report.summary.failedCount} 失败</small>
             </div>
             <div className="generate-report-stat">
-              <span>成功率</span>
-              <strong>{percentLabel(reportStats.successRate)}</strong>
-              <small>{reportStats.success} 成功 / {reportStats.failed} 失败</small>
+              <div className="generate-report-stat-head"><Images size={17} /><span>生成图片</span></div>
+              <strong>{report.summary.imageCount}</strong>
+              <small>平均每次 {(report.summary.imageCount / Math.max(1, report.summary.requestCount)).toFixed(1)} 张</small>
             </div>
             <div className="generate-report-stat">
-              <span>平均时间</span>
-              <strong>{formatDuration(reportStats.averageDurationMs)}</strong>
-              <small>{reportStats.queued + reportStats.running > 0 ? `${reportStats.queued} 条排队 / ${reportStats.running} 条处理中` : "已完成样本"}</small>
+              <div className="generate-report-stat-head"><Users size={17} /><span>活跃人员</span></div>
+              <strong>{report.summary.activeUserCount}</strong>
+              <small>人均 {report.summary.averageRequestsPerUser.toFixed(1)} 次</small>
             </div>
             <div className="generate-report-stat">
-              <span>平均等待</span>
-              <strong>{formatDuration(reportStats.averageWaitDurationMs)}</strong>
-              <small>{reportStats.buckets.length} 个时间段</small>
+              <div className="generate-report-stat-head"><CheckCircle2 size={17} /><span>成功率</span></div>
+              <strong>{percentLabel(report.summary.successRate)}</strong>
+              <small>平均耗时 {formatDuration(report.summary.averageDurationMs)}</small>
             </div>
           </div>
-          <div className="generate-report-panel">
-            <div className="generate-report-panel-head">
-              <div>
-                <strong>数量 / 时间分布</strong>
-                <span>柱状图表示生图次数，曲线表示每个时间段的平均耗时。</span>
+          <div className="generate-report-content">
+            <section className="generate-report-panel generate-report-trend-panel">
+              <div className="generate-report-panel-head">
+                <div>
+                  <strong>生图与人员趋势</strong>
+                  <span>对比生图次数、生成图片数量和各时间段活跃人员。</span>
+                </div>
+                <div className="generate-report-legend">
+                  <span><i className="legend-bar legend-requests" />生图次数</span>
+                  <span><i className="legend-bar legend-images" />图片数量</span>
+                  <span><i className="legend-line" />活跃人员</span>
+                </div>
               </div>
-              <div className="generate-report-legend">
-                <span><i className="legend-bar" />次数</span>
-                <span><i className="legend-line" />平均时间</span>
+              {renderReportChart()}
+            </section>
+            <section className="generate-report-panel generate-report-users-panel">
+              <div className="generate-report-panel-head">
+                <div>
+                  <strong>人员使用排行</strong>
+                  <span>按筛选范围内的生图次数排序。</span>
+                </div>
               </div>
-            </div>
-            {renderReportChart()}
+              {report.users.length > 0 ? (
+                <div className="generate-report-user-list">
+                  {report.users.slice(0, 12).map((item, index) => {
+                    const maxRequestCount = report.users[0]?.requestCount ?? 1;
+                    return (
+                      <div className="generate-report-user-row" key={item.owner}>
+                        <span className="generate-report-user-rank">{index + 1}</span>
+                        <div className="generate-report-user-main">
+                          <div>
+                            <strong>{userDisplayName(props.config, item.owner)}</strong>
+                            <em>{item.requestCount} 次</em>
+                          </div>
+                          <small>{item.owner} · {item.imageCount} 张 · 成功率 {percentLabel(item.successRate)}</small>
+                          <i><span style={{ width: `${Math.max(3, (item.requestCount / maxRequestCount) * 100)}%` }} /></i>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="generate-report-empty generate-report-user-empty">
+                  <Users size={28} />
+                  <span>暂无人员使用数据。</span>
+                </div>
+              )}
+            </section>
           </div>
         </div>
       )}

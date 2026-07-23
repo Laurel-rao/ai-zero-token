@@ -51,6 +51,7 @@ const WECOM_LOGIN_STATE_COOKIE = "azt_wecom_login_state";
 const WECOM_LOGIN_STATE_TTL_MS = 10 * 60 * 1000;
 const WECOM_EMBED_LOGIN_STATE_TTL_MS = 10 * 60 * 1000;
 const WECOM_EMBED_COMPLETE_TTL_MS = 60 * 1000;
+const GENERATION_IMAGE_ACCEL_PREFIX = process.env.AI_ZERO_TOKEN_GENERATION_IMAGE_ACCEL_PREFIX?.trim() || "";
 const gunzipAsync = promisify(gunzip);
 const gzipAsync = promisify(gzip);
 const inflateAsync = promisify(inflate);
@@ -409,6 +410,9 @@ function isUserGatewayPath(method: string, url: string): boolean {
   if ((method === "GET" || method === "DELETE") && pathOnly === "/_gateway/generations/history") {
     return true;
   }
+  if (method === "GET" && pathOnly === "/_gateway/generations/report") {
+    return true;
+  }
   if (method === "GET" && pathOnly.startsWith("/_gateway/generations/history/")) {
     return true;
   }
@@ -477,6 +481,19 @@ function resolveGenerationImageFile(imagePath: string): { filePath: string; gene
     filePath,
     generationId: normalized.split(path.sep)[0] || normalized.split("/")[0] || "",
   };
+}
+
+function generationImageAccelRedirect(filePath: string): string | null {
+  if (!GENERATION_IMAGE_ACCEL_PREFIX) {
+    return null;
+  }
+  const rootPath = path.resolve(getGenerationAssetsDir());
+  const resolvedFilePath = path.resolve(filePath);
+  if (!resolvedFilePath.startsWith(`${rootPath}${path.sep}`)) {
+    return null;
+  }
+  const relativePath = path.relative(rootPath, resolvedFilePath).split(path.sep).map(encodeURIComponent).join("/");
+  return `${GENERATION_IMAGE_ACCEL_PREFIX.replace(/\/+$/, "")}/${relativePath}`;
 }
 
 function resolveChatAttachmentFile(imagePath: string): { filePath: string; conversationId: string } | null {
@@ -565,6 +582,20 @@ async function readAdminUiAsset(assetPath: string): Promise<{ body: Buffer; file
   } catch {
     return null;
   }
+}
+
+function normalizeEncodedAdminHashRoute(value: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+
+  if (!/^#\/?[a-z0-9][a-z0-9-]*$/i.test(decoded)) {
+    return null;
+  }
+  return `/#${decoded.replace(/^#\/?/, "")}`;
 }
 
 function sanitizeAssetFilename(filename: string): string {
@@ -948,6 +979,12 @@ const generationHistoryQuerySchema = z.object({
   page: z.coerce.number().int().min(1).optional(),
   owner: z.string().min(1).max(120).optional(),
   light: z.coerce.boolean().optional(),
+});
+
+const generationReportQuerySchema = z.object({
+  owner: z.string().min(1).max(120).optional(),
+  startTime: z.coerce.number().int().nonnegative().optional(),
+  endTime: z.coerce.number().int().nonnegative().optional(),
 });
 
 const chatListQuerySchema = z.object({
@@ -2500,8 +2537,8 @@ function validateImageEditRequest(data: z.infer<typeof imageEditsBodySchema>): s
   if (normalized.some((reference) => !reference.imageUrl)) {
     return "images.edits 的每个图片引用都需要提供 image_url。";
   }
-  if (normalized.some((reference) => reference.imageUrl && !/^https?:\/\//i.test(reference.imageUrl) && !/^data:image\//i.test(reference.imageUrl))) {
-    return "images.edits 的 image_url 需要是 http(s) URL、data:image/...;base64,...，或裸 base64 字符串。";
+  if (normalized.some((reference) => reference.imageUrl && !/^https?:\/\//i.test(reference.imageUrl) && !/^data:image\//i.test(reference.imageUrl) && !reference.imageUrl.startsWith("/_gateway/generations/images/"))) {
+    return "images.edits 的 image_url 需要是 http(s) URL、本站历史图片地址、data:image/...;base64,...，或裸 base64 字符串。";
   }
 
   return null;
@@ -3538,6 +3575,10 @@ export function createApp(params?: {
   });
 
   app.addHook("onReady", async () => {
+    const interruptedCount = await ctx.gatewayDatabaseService.interruptRunningGenerations();
+    if (interruptedCount > 0) {
+      console.warn(`[generation] marked ${interruptedCount} running task(s) as interrupted after restart.`);
+    }
     ctx.modelService.startAutoRefresh();
   });
 
@@ -4041,6 +4082,29 @@ export function createApp(params?: {
     };
   });
 
+  app.get("/_gateway/generations/history/owners", async (request) => {
+    const session = await getSessionFromRequest(request);
+    const owner = isAdminSession(session) ? undefined : requestOwnerFromSession(session);
+    const [items, total] = await Promise.all([
+      ctx.gatewayDatabaseService.listGenerationOwnerUsage(owner),
+      ctx.gatewayDatabaseService.countGenerationHistory(owner),
+    ]);
+    return {
+      items,
+      total,
+    };
+  });
+
+  app.get("/_gateway/generations/report", async (request) => {
+    const parsed = generationReportQuerySchema.safeParse(request.query);
+    const session = await getSessionFromRequest(request);
+    const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
+    return ctx.gatewayDatabaseService.getGenerationReport(owner, parsed.success ? {
+      startTime: parsed.data.startTime,
+      endTime: parsed.data.endTime,
+    } : undefined);
+  });
+
   app.get("/_gateway/generations/history/:id", async (request, reply) => {
     const parsed = generationHistoryQuerySchema.safeParse(request.query);
     const params = request.params as { id?: string };
@@ -4080,8 +4144,22 @@ export function createApp(params?: {
       }
     }
     try {
+      const stats = await fs.stat(file.filePath);
+      if (!stats.isFile()) {
+        reply.code(404);
+        return { error: { type: "not_found", message: "图片不存在。" } };
+      }
+      const accelRedirect = generationImageAccelRedirect(file.filePath);
+      if (accelRedirect) {
+        reply.header("Content-Type", getContentType(file.filePath));
+        reply.header("Content-Length", String(stats.size));
+        reply.header("Cache-Control", "private, max-age=3600");
+        reply.header("X-Accel-Redirect", accelRedirect);
+        return reply.send();
+      }
       const data = await fs.readFile(file.filePath);
       reply.header("Content-Type", getContentType(file.filePath));
+      reply.header("Content-Length", String(data.byteLength));
       reply.header("Cache-Control", "private, max-age=3600");
       return reply.send(data);
     } catch {
@@ -4287,6 +4365,10 @@ export function createApp(params?: {
 
   app.get("/:rootAsset", async (request, reply) => {
     const rootAsset = (request.params as { rootAsset: string }).rootAsset;
+    const hashRedirect = normalizeEncodedAdminHashRoute(rootAsset);
+    if (hashRedirect) {
+      return reply.redirect(hashRedirect);
+    }
     if (!rootAsset.includes(".") || rootAsset.includes("/") || rootAsset.includes("\\")) {
       reply.code(404);
       return {
