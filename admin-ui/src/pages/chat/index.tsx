@@ -12,6 +12,7 @@ const MAX_ATTACHMENTS = 8;
 const MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_SPREADSHEET_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_OFFICE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const COLLAPSED_MESSAGE_HEIGHT = 420;
 const COPY_FEEDBACK_MS = 1400;
 const CHAT_BOTTOM_THRESHOLD = 96;
@@ -63,6 +64,11 @@ const SPREADSHEET_ATTACHMENT_EXTENSIONS = new Set([
   "xlsm",
   "xlsb",
 ]);
+const NATIVE_OFFICE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
 const IMAGE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -72,11 +78,11 @@ const IMAGE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
   bmp: "image/bmp",
   svg: "image/svg+xml",
 };
-const SUPPORTED_ATTACHMENT_HINT = "支持常见图片、文本、代码、Markdown、JSON、CSV 和 Excel 等小文件";
+const SUPPORTED_ATTACHMENT_HINT = "支持图片、文本、代码、DOCX、PPTX、XLSX 等小文件，可选择、粘贴或拖入";
 
 type ChatAttachment = {
   id: string;
-  kind: "image" | "text";
+  kind: "image" | "text" | "file";
   name: string;
   mimeType: string;
   size: number;
@@ -98,6 +104,7 @@ type ChatMessage = {
   error?: string;
   createdAt: number;
   updatedAt: number;
+  metadata?: Record<string, unknown>;
 };
 
 type ChatConversation = {
@@ -126,6 +133,7 @@ type PendingChatStart = {
 
 type ChatImageActionState = {
   status: "checking" | "ready" | "generating" | "success" | "failed";
+  historyId?: string;
   prompt?: string;
   reason?: string;
   images?: PreviewImage[];
@@ -136,6 +144,11 @@ type ChatImageDecision = {
   shouldGenerate: boolean;
   prompt: string;
   reason?: string;
+};
+
+type ChatImageGenerationMetadata = {
+  historyId: string;
+  prompt: string;
 };
 
 type ChatImagePromptCandidate = ChatImageDecision & {
@@ -275,9 +288,30 @@ function isSpreadsheetAttachmentName(name: string): boolean {
   return SPREADSHEET_ATTACHMENT_EXTENSIONS.has(fileExtension(name));
 }
 
+function nativeOfficeMimeTypeForFile(file: File): string | null {
+  return NATIVE_OFFICE_ATTACHMENT_MIME_BY_EXTENSION[fileExtension(file.name)] ?? null;
+}
+
+function officeAttachmentLabel(name: string): string {
+  const extension = fileExtension(name);
+  if (extension === "docx") {
+    return "Word";
+  }
+  if (extension === "pptx") {
+    return "PowerPoint";
+  }
+  if (extension === "xlsx") {
+    return "Excel";
+  }
+  return "Office 文件";
+}
+
 function attachmentKindLabel(name: string, kind?: ChatAttachment["kind"]): string {
   if (kind === "image") {
     return "图片";
+  }
+  if (kind === "file") {
+    return officeAttachmentLabel(name);
   }
   if (isSpreadsheetAttachmentName(name)) {
     return "Excel";
@@ -289,6 +323,9 @@ function pendingAttachmentLabel(file: File): string {
   const imageMimeType = imageMimeTypeForFile(file);
   if (imageMimeType) {
     return "正在读取图片";
+  }
+  if (nativeOfficeMimeTypeForFile(file)) {
+    return `正在读取 ${officeAttachmentLabel(file.name)}`;
   }
   if (isSpreadsheetAttachment(file)) {
     return "正在解析 Excel";
@@ -587,6 +624,17 @@ function previewImagesFromChatHistory(item: ChatGenerationHistoryItem): PreviewI
   });
 }
 
+function chatImageGenerationFromMetadata(metadata: Record<string, unknown> | undefined): ChatImageGenerationMetadata | null {
+  const raw = metadata?.imageGeneration;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const value = raw as Record<string, unknown>;
+  const historyId = typeof value.historyId === "string" ? value.historyId.trim() : "";
+  const prompt = typeof value.prompt === "string" ? value.prompt.trim() : "";
+  return historyId && prompt ? { historyId, prompt } : null;
+}
+
 function filesFromClipboardData(clipboardData: ClipboardLike): File[] {
   const itemFiles = Array.from(clipboardData.items ?? [])
     .filter((item) => item.kind === "file")
@@ -819,6 +867,7 @@ export function ChatPage(props: {
   const activeIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<ChatConversation[]>([]);
   const imageActionDetectionRef = useRef<Set<string>>(new Set());
+  const imageGenerationPollingRef = useRef<Map<string, string>>(new Map());
   const lastScrollTopRef = useRef(0);
   const dragDepthRef = useRef(0);
   const previewDragRef = useRef<HtmlPreviewDragState | null>(null);
@@ -884,10 +933,12 @@ export function ChatPage(props: {
   }, [messages]);
 
   useEffect(() => {
+    const persisted = messages.filter((message) => chatImageGenerationFromMetadata(message.metadata));
     const candidates = messages
       .filter((message) => message.role === "assistant" && message.status === "success" && message.content.trim().length >= 12)
       .slice(-3);
-    for (const message of candidates) {
+    const pending = new Map([...persisted, ...candidates].map((message) => [message.id, message]));
+    for (const message of pending.values()) {
       if (!imageActions[message.id] && !imageActionDetectionRef.current.has(message.id)) {
         void detectImageAction(message);
       }
@@ -1413,6 +1464,23 @@ export function ChatPage(props: {
         continue;
       }
 
+      const officeMimeType = nativeOfficeMimeTypeForFile(file);
+      if (officeMimeType) {
+        if (file.size > MAX_OFFICE_ATTACHMENT_BYTES) {
+          skipped.push(`${file.name} 超过 ${formatFileSize(MAX_OFFICE_ATTACHMENT_BYTES)}`);
+          continue;
+        }
+        next.push({
+          id,
+          kind: "file",
+          name: file.name,
+          mimeType: officeMimeType,
+          size: file.size,
+          dataUrl: normalizeDataUrlMimeType(await readFileAsDataUrl(file), officeMimeType),
+        });
+        continue;
+      }
+
       if (isSpreadsheetAttachment(file)) {
         if (file.size > MAX_SPREADSHEET_ATTACHMENT_BYTES) {
           skipped.push(`${file.name} 超过 ${formatFileSize(MAX_SPREADSHEET_ATTACHMENT_BYTES)}`);
@@ -1620,6 +1688,21 @@ export function ChatPage(props: {
     if (imageActions[message.id] || imageActionDetectionRef.current.has(message.id)) {
       return;
     }
+    const persisted = chatImageGenerationFromMetadata(message.metadata);
+    if (persisted) {
+      imageActionDetectionRef.current.add(message.id);
+      setImageActions((current) => ({
+        ...current,
+        [message.id]: {
+          status: "generating",
+          historyId: persisted.historyId,
+          prompt: persisted.prompt,
+        },
+      }));
+      await pollChatImageGeneration(message, persisted.historyId, persisted.prompt);
+      return;
+    }
+
     const content = message.content.trim();
     if (!content || content.length < 12) {
       return;
@@ -1725,35 +1808,18 @@ export function ChatPage(props: {
           _gateway_background: true,
         }),
       });
-      const startedAt = Date.now();
-      let lastItem: ChatGenerationHistoryItem | null = null;
-      while (Date.now() - startedAt < CHAT_IMAGE_POLL_TIMEOUT_MS) {
-        await new Promise((resolve) => window.setTimeout(resolve, CHAT_IMAGE_POLL_INTERVAL_MS));
-        const history = await fetchJson<ChatGenerationHistoryResponse>(`/_gateway/generations/history/${encodeURIComponent(job.id)}`);
-        lastItem = history.item;
-        if (lastItem.status === "success") {
-          const images = previewImagesFromChatHistory(lastItem);
-          if (images.length === 0) {
-            throw new Error("生图完成，但历史记录里没有可预览图片。");
-          }
-          setImageActions((items) => ({
-            ...items,
-            [message.id]: {
-              ...items[message.id],
-              status: "success",
-              prompt,
-              images,
-            },
-          }));
-          props.setStatus("聊天生图完成。");
-          window.setTimeout(() => scrollMessagesToBottom("smooth"), 60);
-          return;
-        }
-        if (lastItem.status === "failed" || lastItem.status === "interrupted") {
-          throw new Error(lastItem.error || (lastItem.status === "interrupted" ? "生图任务已中断。" : "生图任务失败。"));
-        }
-      }
-      throw new Error(lastItem?.status ? `生图任务仍在 ${lastItem.status}，请稍后到生图历史查看。` : "生图任务等待超时。");
+      const result = await fetchJson<{ item: ChatMessage }>(
+        `/_gateway/chats/${encodeURIComponent(message.conversationId)}/messages/${encodeURIComponent(message.id)}/image-generation`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ historyId: job.id, prompt }),
+        },
+      );
+      const replaceUpdated = (items: ChatMessage[]) => replaceOrAppendMessage(items, result.item);
+      updateCachedConversationMessages(message.conversationId, replaceUpdated);
+      updateVisibleConversationMessages(message.conversationId, replaceUpdated);
+      await pollChatImageGeneration(result.item, job.id, prompt);
     } catch (error) {
       setImageActions((items) => ({
         ...items,
@@ -1765,6 +1831,73 @@ export function ChatPage(props: {
         },
       }));
       props.setStatus(`聊天生图失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function pollChatImageGeneration(message: ChatMessage, historyId: string, prompt: string) {
+    const polling = imageGenerationPollingRef.current;
+    if (polling.has(message.id)) {
+      return;
+    }
+    polling.set(message.id, historyId);
+    setImageActions((items) => ({
+      ...items,
+      [message.id]: {
+        ...items[message.id],
+        status: "generating",
+        historyId,
+        prompt,
+        error: undefined,
+      },
+    }));
+
+    const startedAt = Date.now();
+    let lastItem: ChatGenerationHistoryItem | null = null;
+    try {
+      while (Date.now() - startedAt < CHAT_IMAGE_POLL_TIMEOUT_MS) {
+        const history = await fetchJson<ChatGenerationHistoryResponse>(`/_gateway/generations/history/${encodeURIComponent(historyId)}`);
+        lastItem = history.item;
+        if (lastItem.status === "success") {
+          const images = previewImagesFromChatHistory(lastItem);
+          if (images.length === 0) {
+            throw new Error("生图完成，但历史记录里没有可预览图片。");
+          }
+          setImageActions((items) => ({
+            ...items,
+            [message.id]: {
+              ...items[message.id],
+              status: "success",
+              historyId,
+              prompt,
+              images,
+            },
+          }));
+          props.setStatus("聊天生图完成。");
+          window.setTimeout(() => scrollMessagesToBottom("smooth"), 60);
+          return;
+        }
+        if (lastItem.status === "failed" || lastItem.status === "interrupted") {
+          throw new Error(lastItem.error || (lastItem.status === "interrupted" ? "生图任务已中断。" : "生图任务失败。"));
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, CHAT_IMAGE_POLL_INTERVAL_MS));
+      }
+      throw new Error(lastItem?.status ? `生图任务仍在 ${lastItem.status}，请稍后到生图历史查看。` : "生图任务等待超时。");
+    } catch (error) {
+      setImageActions((items) => ({
+        ...items,
+        [message.id]: {
+          ...items[message.id],
+          status: "failed",
+          historyId,
+          prompt,
+          error: errorMessage(error),
+        },
+      }));
+      props.setStatus(`聊天生图失败：${errorMessage(error)}`);
+    } finally {
+      if (polling.get(message.id) === historyId) {
+        polling.delete(message.id);
+      }
     }
   }
 
@@ -2346,7 +2479,12 @@ export function ChatPage(props: {
                             <FileText size={16} />
                           )}
                           <span>{attachment.name}</span>
-                          <em>{isSpreadsheetAttachmentName(attachment.name) ? "Excel · " : ""}{formatFileSize(attachment.size)}</em>
+                          <em>{attachmentKindLabel(attachment.name, attachment.kind)} · {formatFileSize(attachment.size)}</em>
+                          {attachment.kind === "file" && attachment.url ? (
+                            <a className="chat-message-attachment-download" href={attachment.url} download={attachment.name} title={`下载 ${attachment.name}`} aria-label={`下载 ${attachment.name}`}>
+                              <Download size={14} />
+                            </a>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -2412,7 +2550,7 @@ export function ChatPage(props: {
               </div>
             ) : null}
             <div className="chat-composer-row">
-              <label className="chat-attach-button" title="添加附件" aria-label="添加附件">
+              <label className="chat-attach-button" title="添加附件，支持 DOCX、PPTX、XLSX" aria-label="添加附件，支持 DOCX、PPTX、XLSX">
                 <Paperclip size={18} />
                 <input
                   ref={fileInputRef}
@@ -2446,7 +2584,7 @@ export function ChatPage(props: {
                 onDragLeave={handleFileDragLeave}
                 onDrop={handleFileDrop}
                 onKeyDown={handleInputKeyDown}
-                placeholder="发送消息，Enter 发送，Shift+Enter 换行，可粘贴或拖入附件"
+                placeholder="发送消息，Enter 发送，Shift+Enter 换行，可粘贴或拖入 DOCX/PPTX/XLSX 等附件"
               />
             </div>
           </div>

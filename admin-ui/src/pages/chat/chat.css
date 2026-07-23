@@ -514,6 +514,29 @@
   white-space: nowrap;
 }
 
+.chat-message-attachment-download {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--brand);
+  background: rgba(99, 91, 255, 0.08);
+  text-decoration: none;
+  transition: color 0.18s ease, background 0.18s ease;
+}
+
+.chat-message-attachment-download:hover {
+  color: #fff;
+  background: var(--brand);
+}
+
+.chat-message-attachment-download:focus-visible {
+  outline: 3px solid rgba(99, 91, 255, 0.22);
+  outline-offset: 2px;
+}
+
 .chat-markdown-shell {
   position: relative;
   border: 1px solid var(--line);

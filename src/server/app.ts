@@ -41,6 +41,7 @@ const DEFAULT_ROUTE_BODY_LIMIT_BYTES = 128 * BYTES_PER_MIB;
 const CODEX_COMPACT_BODY_LIMIT_BYTES = 256 * BYTES_PER_MIB;
 const MAX_CHAT_ATTACHMENTS = 8;
 const MAX_CHAT_IMAGE_ATTACHMENT_BYTES = 10 * BYTES_PER_MIB;
+const MAX_CHAT_FILE_ATTACHMENT_BYTES = 10 * BYTES_PER_MIB;
 const MAX_CHAT_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_CHAT_TEXT_ATTACHMENT_CHARS = 512 * 1024;
 const MAX_CHAT_MESSAGE_CHARS = 100_000;
@@ -69,6 +70,9 @@ const assetContentTypes: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".png": "image/png",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ".svg": "image/svg+xml",
   ".webp": "image/webp",
 };
@@ -1012,10 +1016,16 @@ function estimateBase64Bytes(value: string): number {
   return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
+const chatFileMimeTypesByExtension: Record<string, string> = {
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
+
 const chatAttachmentSchema = z
   .object({
     id: z.string().trim().min(1).max(120),
-    kind: z.enum(["image", "text"]),
+    kind: z.enum(["image", "text", "file"]),
     name: z.string().trim().min(1).max(220),
     mimeType: z.string().trim().min(1).max(160),
     size: z.number().int().min(0).max(MAX_CHAT_IMAGE_ATTACHMENT_BYTES),
@@ -1032,6 +1042,24 @@ const chatAttachmentSchema = z
       }
       if (value.size > MAX_CHAT_IMAGE_ATTACHMENT_BYTES || (value.dataUrl && estimateBase64Bytes(value.dataUrl) > MAX_CHAT_IMAGE_ATTACHMENT_BYTES)) {
         ctx.addIssue({ code: "custom", message: "单个图片附件不能超过 10 MiB。" });
+      }
+      return;
+    }
+
+    if (value.kind === "file") {
+      const expectedMimeType = chatFileMimeTypesByExtension[path.extname(value.name).toLowerCase()];
+      if (!expectedMimeType) {
+        ctx.addIssue({ code: "custom", message: "原生文件附件只支持 DOCX、PPTX 和 XLSX。" });
+        return;
+      }
+      if (value.mimeType !== expectedMimeType) {
+        ctx.addIssue({ code: "custom", message: "文件附件的 MIME 类型与扩展名不匹配。" });
+      }
+      if (!value.dataUrl || !value.dataUrl.startsWith(`data:${expectedMimeType};base64,`)) {
+        ctx.addIssue({ code: "custom", message: "文件附件必须提供匹配格式的 base64 data URL。" });
+      }
+      if (value.size > MAX_CHAT_FILE_ATTACHMENT_BYTES || (value.dataUrl && estimateBase64Bytes(value.dataUrl) > MAX_CHAT_FILE_ATTACHMENT_BYTES)) {
+        ctx.addIssue({ code: "custom", message: "单个文件附件不能超过 10 MiB。" });
       }
       return;
     }
@@ -1061,6 +1089,11 @@ const chatMessageRetryStreamBodySchema = z.object({
 const chatMessageRewriteStreamBodySchema = z.object({
   content: z.string().trim().min(1).max(MAX_CHAT_MESSAGE_CHARS),
   model: z.string().min(1).optional(),
+});
+
+const chatMessageImageGenerationBodySchema = z.object({
+  historyId: z.string().trim().min(1).max(160),
+  prompt: z.string().trim().min(1).max(MAX_CHAT_MESSAGE_CHARS),
 });
 
 const requestLogsQuerySchema = z.object({
@@ -1997,19 +2030,27 @@ async function createGatewayChatContentParts(message: ChatMessage): Promise<Arra
     parts.push({ type: "input_text", text });
   }
 
-  const imageAttachments = message.attachments.filter((item) => item.kind === "image" && (item.dataUrl || item.path));
-  if (!text && imageAttachments.length > 0) {
+  const binaryAttachments = message.attachments.filter((item) => (item.kind === "image" || item.kind === "file") && (item.dataUrl || item.path));
+  if (!text && binaryAttachments.length > 0) {
     parts.push({ type: "input_text", text: "请根据附件内容回复。" });
   }
-  for (const attachment of imageAttachments) {
-    const imageUrl = await chatAttachmentDataUrl(attachment);
-    if (!imageUrl) {
+  for (const attachment of binaryAttachments) {
+    const dataUrl = await chatAttachmentDataUrl(attachment);
+    if (!dataUrl) {
       continue;
     }
-    parts.push({
-      type: "input_image",
-      image_url: imageUrl,
-    });
+    if (attachment.kind === "image") {
+      parts.push({
+        type: "input_image",
+        image_url: dataUrl,
+      });
+    } else {
+      parts.push({
+        type: "input_file",
+        filename: attachment.name,
+        file_data: dataUrl,
+      });
+    }
   }
 
   if (parts.length === 0) {
@@ -3921,6 +3962,51 @@ export function createApp(params?: {
       promptLength: parsed.data.content.length,
       startPayload: { userMessage, assistantMessage },
     });
+  });
+
+  app.patch("/_gateway/chats/:id/messages/:messageId/image-generation", async (request, reply) => {
+    const parsed = chatMessageImageGenerationBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+
+    const params = request.params as { id?: string; messageId?: string };
+    const id = String(params.id ?? "");
+    const messageId = String(params.messageId ?? "");
+    const owner = await getRequestOwner(request);
+    const [conversation, existing, generation] = await Promise.all([
+      ctx.gatewayDatabaseService.getChatConversation(id, owner, { messageLimit: 1, includeAttachmentData: false }),
+      ctx.gatewayDatabaseService.getChatMessageById(messageId, owner),
+      ctx.gatewayDatabaseService.getGenerationHistoryItem(parsed.data.historyId, owner),
+    ]);
+    if (!conversation) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+    if (!existing || existing.conversationId !== id || existing.role !== "assistant") {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天回复不存在。" } };
+    }
+    if (!generation) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "生图任务不存在。" } };
+    }
+
+    const item = await ctx.gatewayDatabaseService.updateChatMessage(existing.id, owner, {
+      metadata: {
+        ...(existing.metadata ?? {}),
+        imageGeneration: {
+          historyId: parsed.data.historyId,
+          prompt: parsed.data.prompt,
+        },
+      },
+    });
+    if (!item) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天回复不存在。" } };
+    }
+    return { item };
   });
 
   app.post("/_gateway/chats/:id/messages/:messageId/retry/stream", async (request, reply) => {
@@ -6495,7 +6581,7 @@ export function createApp(params?: {
         state: "queued",
       },
     });
-    ctx.gatewayDatabaseService.saveGeneration({
+    await ctx.gatewayDatabaseService.saveGeneration({
       id: generationId,
       owner: requestOwner,
       createdAt: generationCreatedAt,

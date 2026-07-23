@@ -116,7 +116,7 @@ export type GenerationReport = {
 export type ChatMessageRole = "user" | "assistant";
 export type ChatMessageStatus = "success" | "running" | "failed";
 
-export type ChatAttachmentKind = "image" | "text";
+export type ChatAttachmentKind = "image" | "text" | "file";
 
 export type ChatAttachment = {
   id: string;
@@ -365,7 +365,7 @@ function parseDataUrl(value: string): DataUrlPayload | null {
 }
 
 function stripChatAttachmentDataUrl(attachment: ChatAttachment): ChatAttachment {
-  if (attachment.kind !== "image") {
+  if (attachment.kind === "text") {
     return attachment;
   }
   const { dataUrl: _dataUrl, ...lightAttachment } = attachment;
@@ -386,6 +386,15 @@ function stripChatMessageAttachmentDataUrls(message: ChatMessage): ChatMessage {
 }
 
 function extensionForMimeType(mimeType: string, fallback = "png"): string {
+  if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    return "docx";
+  }
+  if (mimeType === "application/vnd.openxmlformats-officedocument.presentationml.presentation") {
+    return "pptx";
+  }
+  if (mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+    return "xlsx";
+  }
   if (mimeType.includes("jpeg") || mimeType.includes("jpg")) {
     return "jpg";
   }
@@ -408,8 +417,8 @@ function outputMimeType(format?: string): string {
   return "image/png";
 }
 
-function sanitizeFileName(value: string): string {
-  return value.normalize("NFKD").replace(/[^\w.\-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "") || "image";
+function sanitizeFileName(value: string, fallback = "image"): string {
+  return value.normalize("NFKD").replace(/[^\w.\-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "") || fallback;
 }
 
 function sanitizeGatewayUsername(value: string, prefix = ""): string {
@@ -441,7 +450,7 @@ function parseChatAttachments(metadata: Record<string, unknown> | undefined): Ch
         return null;
       }
       const record = item as Record<string, unknown>;
-      const kind = record.kind === "image" || record.kind === "text" ? record.kind : null;
+      const kind = record.kind === "image" || record.kind === "text" || record.kind === "file" ? record.kind : null;
       const id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : "";
       const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : "";
       const mimeType = typeof record.mimeType === "string" && record.mimeType.trim() ? record.mimeType.trim() : "application/octet-stream";
@@ -1751,7 +1760,7 @@ export class GatewayDatabaseService {
   private async normalizeChatMessage(row: Record<string, unknown>): Promise<ChatMessage> {
     const message = this.mapChatMessage(row);
     const needsMigration = message.attachments.some((attachment) => (
-      attachment.kind === "image" &&
+      (attachment.kind === "image" || attachment.kind === "file") &&
       Boolean(attachment.dataUrl) &&
       !attachment.path &&
       !attachment.url
@@ -1898,6 +1907,38 @@ export class GatewayDatabaseService {
     };
   }
 
+  private async persistChatFileAttachment(
+    conversationId: string,
+    messageId: string,
+    attachment: ChatAttachment,
+    index: number,
+  ): Promise<ChatAttachment> {
+    if (attachment.kind !== "file" || !attachment.dataUrl) {
+      return attachment;
+    }
+
+    const parsed = parseDataUrl(attachment.dataUrl);
+    if (!parsed) {
+      return stripChatAttachmentDataUrl(attachment);
+    }
+
+    const dir = path.join(getChatAttachmentAssetsDir(), conversationId, messageId);
+    await fs.mkdir(dir, { recursive: true });
+    const extension = extensionForMimeType(parsed.mimeType, "bin");
+    const originalExtension = path.extname(attachment.name).toLowerCase();
+    const safeBaseName = sanitizeFileName(path.basename(attachment.name, originalExtension), "attachment").replace(/^\.+/, "") || "attachment";
+    const filename = `${safeBaseName}-${index + 1}${originalExtension || `.${extension}`}`;
+    const relativePath = `${conversationId}/${messageId}/${filename}`;
+    await fs.writeFile(path.join(dir, filename), parsed.bytes);
+    return {
+      ...stripChatAttachmentDataUrl(attachment),
+      mimeType: parsed.mimeType || attachment.mimeType,
+      size: parsed.bytes.byteLength,
+      path: relativePath,
+      url: this.chatAttachmentUrl(relativePath),
+    };
+  }
+
   private async persistChatAttachments(
     conversationId: string,
     messageId: string,
@@ -1908,6 +1949,8 @@ export class GatewayDatabaseService {
       const attachment = attachments[index];
       if (attachment.kind === "image") {
         next.push(await this.persistChatImageAttachment(conversationId, messageId, attachment, index));
+      } else if (attachment.kind === "file") {
+        next.push(await this.persistChatFileAttachment(conversationId, messageId, attachment, index));
       } else {
         next.push(attachment);
       }
