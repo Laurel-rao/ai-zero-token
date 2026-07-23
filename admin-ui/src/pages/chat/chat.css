@@ -911,6 +911,21 @@
   background: rgba(255, 255, 255, 0.15);
 }
 
+.chat-code-copy:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.chat-code-copy:focus-visible {
+  outline: 3px solid rgba(129, 140, 248, 0.48);
+  outline-offset: 1px;
+}
+
+.chat-mermaid-actions {
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
 .chat-code-block pre {
   margin: 0;
   overflow-x: auto;
@@ -1466,6 +1481,22 @@
 }
 
 @media (max-width: 560px) {
+  .chat-mermaid-block .chat-code-head {
+    min-height: 42px;
+    align-items: flex-start;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+
+  .chat-mermaid-actions {
+    gap: 3px;
+  }
+
+  .chat-mermaid-actions .chat-code-copy {
+    padding: 0 6px;
+    font-size: 11px;
+  }
+
   .chat-topbar {
     grid-template-columns: auto minmax(0, 1fr);
     flex-wrap: wrap;

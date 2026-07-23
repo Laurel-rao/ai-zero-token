@@ -209,6 +209,7 @@ type MarkdownCodeProps = {
 type MarkdownPreProps = {
   children?: ReactNode;
   onPreviewHtml?: (html: string, title?: string) => void;
+  onPreviewImage?: (image: ModalImage) => void;
 };
 
 type HtmlPreview = {
@@ -791,8 +792,93 @@ function MarkdownLatexBlock(props: { code: string }) {
   );
 }
 
-function MarkdownMermaidBlock(props: { code: string }) {
+function normalizeMermaidSvg(svg: string): string {
+  return /<svg\b[^>]*\bxmlns=/.test(svg)
+    ? svg
+    : svg.replace(/<svg\b/, '<svg xmlns="http://www.w3.org/2000/svg"');
+}
+
+function mermaidSvgSize(svg: string): { width: number; height: number } {
+  try {
+    const root = new DOMParser().parseFromString(svg, "image/svg+xml").documentElement;
+    const viewBox = root.getAttribute("viewBox")?.trim().split(/[\s,]+/).map(Number);
+    if (viewBox?.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0) {
+      return { width: viewBox[2], height: viewBox[3] };
+    }
+    const width = Number.parseFloat(root.getAttribute("width") || "");
+    const height = Number.parseFloat(root.getAttribute("height") || "");
+    if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+      return { width, height };
+    }
+  } catch {
+    // The rendered Mermaid SVG is still previewable even if dimensions cannot be read.
+  }
+  return { width: 1600, height: 900 };
+}
+
+function mermaidSvgDataUrl(svg: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(normalizeMermaidSvg(svg))}`;
+}
+
+function canvasPngDataUrl(canvas: HTMLCanvasElement): Promise<string> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("图片编码失败"));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("图片读取失败"));
+      reader.readAsDataURL(blob);
+    }, "image/png");
+  });
+}
+
+async function mermaidSvgToPng(svg: string): Promise<{ src: string; width: number; height: number }> {
+  const source = mermaidSvgDataUrl(svg);
+  const sourceSize = mermaidSvgSize(svg);
+  const image = new Image();
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("Mermaid 图表无法转换为图片"));
+    image.src = source;
+  });
+
+  const baseWidth = Math.max(1, sourceSize.width || image.naturalWidth);
+  const baseHeight = Math.max(1, sourceSize.height || image.naturalHeight);
+  const maxDimension = 8192;
+  const maxPixels = 32_000_000;
+  const scale = Math.min(
+    2,
+    maxDimension / baseWidth,
+    maxDimension / baseHeight,
+    Math.sqrt(maxPixels / (baseWidth * baseHeight)),
+  );
+  const width = Math.max(1, Math.round(baseWidth * scale));
+  const height = Math.max(1, Math.round(baseHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("当前浏览器无法创建图片画布");
+  }
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  return { src: await canvasPngDataUrl(canvas), width, height };
+}
+
+function mermaidFilename(extension: "svg" | "png"): string {
+  const timestamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+  return `mermaid-diagram-${timestamp}.${extension}`;
+}
+
+function MarkdownMermaidBlock(props: { code: string; onPreviewImage?: (image: ModalImage) => void }) {
   const [copied, setCopied] = useState(false);
+  const [converting, setConverting] = useState(false);
+  const [conversionError, setConversionError] = useState("");
   const [state, setState] = useState<{ loading: boolean; svg: string; error: string }>({ loading: true, svg: "", error: "" });
 
   useEffect(() => {
@@ -833,19 +919,66 @@ function MarkdownMermaidBlock(props: { code: string }) {
     }
   }
 
+  function handleEnlarge() {
+    if (!state.svg || !props.onPreviewImage) {
+      return;
+    }
+    const size = mermaidSvgSize(state.svg);
+    props.onPreviewImage({
+      src: mermaidSvgDataUrl(state.svg),
+      meta: `Mermaid 矢量图 · ${Math.round(size.width)}×${Math.round(size.height)} · 可继续缩放`,
+      filename: mermaidFilename("svg"),
+      ratio: `${size.width}:${size.height}`,
+    });
+  }
+
+  async function handleConvertToImage() {
+    if (!state.svg || !props.onPreviewImage || converting) {
+      return;
+    }
+    setConverting(true);
+    setConversionError("");
+    try {
+      const image = await mermaidSvgToPng(state.svg);
+      props.onPreviewImage({
+        src: image.src,
+        meta: `Mermaid 高清 PNG · ${image.width}×${image.height} · 可复制或下载`,
+        filename: mermaidFilename("png"),
+        ratio: `${image.width}:${image.height}`,
+      });
+    } catch (error) {
+      setConversionError(errorMessage(error));
+    } finally {
+      setConverting(false);
+    }
+  }
+
   return (
-    <div className="chat-code-block chat-render-block">
+    <div className="chat-code-block chat-render-block chat-mermaid-block">
       <div className="chat-code-head">
         <span>Mermaid</span>
-        <button className="chat-code-copy" type="button" onClick={() => void handleCopy()} aria-label="复制 Mermaid 源码">
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-          {copied ? "已复制" : "复制源码"}
-        </button>
+        <div className="chat-code-actions chat-mermaid-actions">
+          <button className="chat-code-copy" type="button" onClick={handleEnlarge} disabled={!state.svg} aria-label="放大查看 Mermaid 图表">
+            <Maximize2 size={14} />
+            放大查看
+          </button>
+          <button className="chat-code-copy" type="button" onClick={() => void handleConvertToImage()} disabled={!state.svg || converting} aria-label={converting ? "正在将 Mermaid 转为图片" : "将 Mermaid 转为图片"}>
+            {converting ? <Loader2 className="spin" size={14} /> : <ImageIcon size={14} />}
+            {converting ? "转换中" : "转为图片"}
+          </button>
+          <button className="chat-code-copy" type="button" onClick={() => void handleCopy()} aria-label="复制 Mermaid 源码">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "已复制" : "复制源码"}
+          </button>
+        </div>
       </div>
       {state.loading ? (
         <div className="chat-render-loading"><Loader2 className="spin" size={16} />正在渲染图表...</div>
       ) : state.svg ? (
-        <div className="chat-render-surface chat-mermaid-surface" role="img" aria-label="Mermaid 图表" dangerouslySetInnerHTML={{ __html: state.svg }} />
+        <>
+          <div className="chat-render-surface chat-mermaid-surface" role="img" aria-label="Mermaid 图表" dangerouslySetInnerHTML={{ __html: state.svg }} />
+          {conversionError ? <div className="chat-render-error" role="alert">图片转换失败：{conversionError}</div> : null}
+        </>
       ) : (
         <>
           <div className="chat-render-error">图表渲染失败：{state.error}</div>
@@ -889,7 +1022,7 @@ function htmlPreviewBlobUrl(html: string): string {
   return URL.createObjectURL(new Blob([withHtmlPreviewCsp(html)], { type: "text/html;charset=utf-8" }));
 }
 
-function MarkdownPre({ children, onPreviewHtml }: MarkdownPreProps) {
+function MarkdownPre({ children, onPreviewHtml, onPreviewImage }: MarkdownPreProps) {
   const [copied, setCopied] = useState(false);
   const codeElement = codeElementFromPre(children);
   const className = codeElement?.props.className;
@@ -901,7 +1034,7 @@ function MarkdownPre({ children, onPreviewHtml }: MarkdownPreProps) {
     return <MarkdownLatexBlock code={code} />;
   }
   if (language.trim().toLowerCase() === "mermaid") {
-    return <MarkdownMermaidBlock code={code} />;
+    return <MarkdownMermaidBlock code={code} onPreviewImage={onPreviewImage} />;
   }
 
   async function handleCopy() {
@@ -940,6 +1073,7 @@ function ChatMessageContent(props: {
   content: string;
   status: ChatMessage["status"];
   onPreviewHtml: (html: string, title?: string) => void;
+  onPreviewImage: (image: ModalImage) => void;
 }) {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -963,9 +1097,9 @@ function ChatMessageContent(props: {
       );
     },
     pre(preProps) {
-      return <MarkdownPre {...preProps} onPreviewHtml={props.onPreviewHtml} />;
+      return <MarkdownPre {...preProps} onPreviewHtml={props.onPreviewHtml} onPreviewImage={props.onPreviewImage} />;
     },
-  }), [props.onPreviewHtml]);
+  }), [props.onPreviewHtml, props.onPreviewImage]);
 
   useEffect(() => {
     setExpanded(false);
@@ -2736,7 +2870,7 @@ export function ChatPage(props: {
                       </div>
                     </div>
                   ) : (
-                    <ChatMessageContent id={message.id} content={message.content} status={message.status} onPreviewHtml={openHtmlPreview} />
+                    <ChatMessageContent id={message.id} content={message.content} status={message.status} onPreviewHtml={openHtmlPreview} onPreviewImage={props.setPreviewImage} />
                   )}
                   {renderChatImageResult(message)}
                   {(message.attachments ?? []).length > 0 ? (
