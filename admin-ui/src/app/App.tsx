@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Building2, KeyRound } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import { createWWLoginPanel, WWLoginLangType, WWLoginPanelSizeType, WWLoginRedirectType, WWLoginType, type WWLoginInstance } from "@wecom/jssdk";
 import { AppShell } from "@/layouts/AppShell";
 import { useAdminWorkspace } from "@/hooks/useAdminWorkspace";
@@ -221,8 +221,6 @@ function LoginView({ onAuthenticated, wecomLoginEnabled, branding }: { onAuthent
     <main className="auth-page">
       <form className="auth-panel" onSubmit={handleSubmit}>
         <AuthMark branding={branding} />
-        <h1>管理访问</h1>
-        <p>{message}</p>
         {wecomLoginEnabled ? (
           <div className="auth-mode-switch" role="tablist" aria-label="登录方式">
             <button
@@ -253,9 +251,6 @@ function LoginView({ onAuthenticated, wecomLoginEnabled, branding }: { onAuthent
         ) : null}
         {loginMode === "wecom" && wecomLoginEnabled ? (
           <div className="wecom-login-panel">
-            <div className="wecom-login-icon" aria-hidden="true">
-              <Building2 size={28} />
-            </div>
             <div className="wecom-qr-frame-wrap">
               <div ref={wecomPanelRef} className="wecom-login-component" />
               {wecomAuthUrl ? (

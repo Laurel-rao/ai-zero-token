@@ -1,10 +1,110 @@
 .image-preview-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin: 0;
+}
+
+.image-preview-modal .modal-head {
+  padding: 10px 14px;
+}
+
+.image-preview-modal .modal-head-content {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+}
+
+.image-preview-header-meta {
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 8px;
-  margin-bottom: 12px;
+  white-space: nowrap;
+}
+
+.image-preview-header-meta span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modal-card.image-preview-modal.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.image-preview-modal.is-fullscreen .modal-head,
+.image-preview-modal.is-fullscreen .image-preview-toolbar,
+.image-preview-modal.is-fullscreen .preview-modal-meta,
+.image-preview-modal.is-fullscreen .image-preview-nav {
+  display: none;
+}
+
+.image-preview-modal.is-fullscreen .modal-body {
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+  display: block;
+}
+
+.image-preview-modal.is-fullscreen .image-preview-stage,
+.image-preview-modal.is-fullscreen .image-preview-stage.ratio-tall,
+.image-preview-modal.is-fullscreen .image-preview-stage.ratio-square,
+.image-preview-modal.is-fullscreen .image-preview-stage.ratio-classic,
+.image-preview-modal.is-fullscreen .image-preview-stage.ratio-wide {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+.image-preview-modal.is-fullscreen .image-preview-stage img,
+.image-preview-modal.is-fullscreen .image-preview-stage.is-quarter-turn img {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.image-preview-modal.is-fullscreen .image-preview-pan {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: block;
+}
+
+.image-preview-modal.is-fullscreen .image-preview-pan img {
+  position: absolute;
+  inset: 0;
+  display: block;
 }
 
 .image-preview-tool {
@@ -203,6 +303,25 @@
 }
 
 @media (max-width: 720px) {
+  .image-preview-modal:not(.is-fullscreen) .modal-head {
+    flex-wrap: wrap;
+  }
+
+  .image-preview-modal:not(.is-fullscreen) .modal-head-content {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: space-between;
+  }
+
+  .image-preview-header-meta {
+    display: none;
+  }
+
+  .image-preview-modal .image-preview-toolbar {
+    width: 100%;
+    justify-content: center;
+  }
+
   .image-preview-nav {
     width: 44px;
     height: 48px;

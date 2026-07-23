@@ -184,18 +184,6 @@ a {
   justify-items: stretch;
 }
 
-.wecom-login-icon {
-  width: 48px;
-  height: 48px;
-  margin: 0 auto;
-  border-radius: 14px;
-  display: grid;
-  place-items: center;
-  color: #047857;
-  background: #ecfdf5;
-  border: 1px solid rgba(5, 150, 105, 0.16);
-}
-
 .wecom-qr-frame-wrap {
   height: 388px;
   border: 1px solid var(--line);

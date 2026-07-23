@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Download, Maximize2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, Maximize2, Minimize2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { Modal } from "./Modal";
 import type { ModalImage, ModalImageItem } from "@/shared/lib/app-types";
@@ -48,6 +48,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
   const activeImage = gallery[activeIndex] ?? gallery[0] ?? props.image;
   const hasGalleryNavigation = gallery.length > 1;
@@ -101,6 +102,10 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (isFullscreen) {
+          setIsFullscreen(false);
+          return;
+        }
         props.onClose();
         return;
       }
@@ -131,7 +136,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [hasGalleryNavigation, props, zoom]);
+  }, [hasGalleryNavigation, isFullscreen, props, zoom]);
 
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -173,30 +178,55 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   }
 
   return (
-    <Modal title="图片预览" onClose={props.onClose} wide>
-      <div className="image-preview-toolbar" aria-label="图片查看工具栏">
-        <button className="image-preview-tool" type="button" onClick={() => updateZoom(zoom - ZOOM_STEP)} disabled={zoom <= MIN_ZOOM} title="缩小" aria-label="缩小">
-          <ZoomOut size={16} />
-        </button>
-        <span className="image-preview-zoom">{Math.round(zoom * 100)}%</span>
-        <button className="image-preview-tool" type="button" onClick={() => updateZoom(zoom + ZOOM_STEP)} disabled={zoom >= MAX_ZOOM} title="放大" aria-label="放大">
-          <ZoomIn size={16} />
-        </button>
-        <button className="image-preview-tool" type="button" onClick={() => setRotation((value) => value - 90)} title="向左旋转" aria-label="向左旋转">
-          <RotateCcw size={16} />
-        </button>
-        <button className="image-preview-tool" type="button" onClick={() => setRotation((value) => value + 90)} title="向右旋转" aria-label="向右旋转">
-          <RotateCw size={16} />
-        </button>
-        <button className="image-preview-tool" type="button" onClick={resetView} title="重置视图" aria-label="重置视图">
-          <Maximize2 size={16} />
-        </button>
-        <a className="image-preview-tool" href={activeImage.src} download={activeImage.filename || "generated-image.png"} title="下载图片" aria-label="下载图片">
-          <Download size={16} />
-        </a>
-      </div>
+    <Modal
+      title="图片预览"
+      onClose={props.onClose}
+      wide
+      className={`image-preview-modal${isFullscreen ? " is-fullscreen" : ""}`}
+      headerContent={(
+        <>
+          <div className="image-preview-header-meta">
+            <span>{activeImage.meta}</span>
+            <span>{hasGalleryNavigation ? `${activeIndex + 1}/${gallery.length} · ` : ""}{normalizedRotation === 0 ? "0deg" : `${normalizedRotation}deg`}</span>
+          </div>
+          <div className="image-preview-toolbar" aria-label="图片查看工具栏">
+            <button className="image-preview-tool" type="button" onClick={() => updateZoom(zoom - ZOOM_STEP)} disabled={zoom <= MIN_ZOOM} title="缩小" aria-label="缩小">
+              <ZoomOut size={16} />
+            </button>
+            <span className="image-preview-zoom">{Math.round(zoom * 100)}%</span>
+            <button className="image-preview-tool" type="button" onClick={() => updateZoom(zoom + ZOOM_STEP)} disabled={zoom >= MAX_ZOOM} title="放大" aria-label="放大">
+              <ZoomIn size={16} />
+            </button>
+            <button className="image-preview-tool" type="button" onClick={() => setRotation((value) => value - 90)} title="向左旋转" aria-label="向左旋转">
+              <RotateCcw size={16} />
+            </button>
+            <button className="image-preview-tool" type="button" onClick={() => setRotation((value) => value + 90)} title="向右旋转" aria-label="向右旋转">
+              <RotateCw size={16} />
+            </button>
+            <button
+              className="image-preview-tool"
+              type="button"
+              onClick={() => setIsFullscreen((value) => !value)}
+              title={isFullscreen ? "退出全屏" : "全屏查看"}
+              aria-label={isFullscreen ? "退出全屏" : "全屏查看"}
+              aria-pressed={isFullscreen}
+            >
+              {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </button>
+            <a className="image-preview-tool" href={activeImage.src} download={activeImage.filename || "generated-image.png"} title="下载图片" aria-label="下载图片">
+              <Download size={16} />
+            </a>
+          </div>
+        </>
+      )}
+    >
       <div
         className={`image-preview-stage ${ratioClassName(activeImage.ratio)} ${zoom > 1 ? "is-zoomed" : ""} ${isQuarterTurn ? "is-quarter-turn" : ""}`}
+        onDoubleClick={() => {
+          if (isFullscreen) {
+            setIsFullscreen(false);
+          }
+        }}
         onWheel={handleWheel}
         onPointerDown={startDrag}
         onPointerMove={moveDrag}
@@ -235,10 +265,6 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
           <span className="image-preview-loading">正在加载原图...</span>
         ) : null}
         {imageLoadFailed ? <span className="image-preview-loading is-error">原图加载失败，正在显示预览图</span> : null}
-      </div>
-      <div className="preview-modal-meta">
-        <span>{activeImage.meta}</span>
-        <span>{hasGalleryNavigation ? `${activeIndex + 1}/${gallery.length} · ` : ""}{normalizedRotation === 0 ? "0deg" : `${normalizedRotation}deg`}</span>
       </div>
     </Modal>
   );
