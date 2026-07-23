@@ -22,7 +22,7 @@ const CHAT_DETAIL_CACHE_LIMIT = 8;
 const CHAT_IMAGE_CLASSIFIER_MODEL = "gpt-5.4";
 const CHAT_IMAGE_GENERATION_MODEL = "gpt-image-2";
 const CHAT_IMAGE_GENERATION_SIZE = "1024x576";
-const CHAT_IMAGE_GENERATION_QUALITY = "medium";
+const CHAT_IMAGE_GENERATION_QUALITY = "high";
 const CHAT_IMAGE_POLL_INTERVAL_MS = 2000;
 const CHAT_IMAGE_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const CHAT_IMAGE_PROMPT_MAX_LENGTH = 8000;
@@ -158,7 +158,7 @@ type ChatImageJobResponse = {
 
 type ChatGenerationHistoryItem = {
   id: string;
-  status: "queued" | "running" | "success" | "failed";
+  status: "queued" | "running" | "success" | "failed" | "interrupted";
   error?: string;
   images: Array<{
     filename: string;
@@ -811,8 +811,11 @@ export function ChatPage(props: {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  const messagesContentRef = useRef<HTMLDivElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const bottomScrollInProgressRef = useRef(false);
+  const bottomScrollTimerRef = useRef<number | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<ChatConversation[]>([]);
   const imageActionDetectionRef = useRef<Set<string>>(new Set());
@@ -854,6 +857,9 @@ export function ChatPage(props: {
       if (copyHtmlTimerRef.current) {
         window.clearTimeout(copyHtmlTimerRef.current);
       }
+      if (bottomScrollTimerRef.current) {
+        window.clearTimeout(bottomScrollTimerRef.current);
+      }
     };
   }, []);
 
@@ -893,17 +899,18 @@ export function ChatPage(props: {
   }, [input, attachments.length]);
 
   useEffect(() => {
-    const node = messagesScrollRef.current;
-    if (!node || typeof ResizeObserver === "undefined") {
+    const contentNode = messagesContentRef.current;
+    if (!contentNode || typeof ResizeObserver === "undefined") {
       return;
     }
     const observer = new ResizeObserver(() => {
       if (shouldStickToBottomRef.current) {
         scrollMessagesToBottom();
+      } else {
+        updateStickToBottom();
       }
-      updateStickToBottom();
     });
-    observer.observe(node);
+    observer.observe(contentNode);
     return () => observer.disconnect();
   }, []);
 
@@ -1022,11 +1029,31 @@ export function ChatPage(props: {
       return;
     }
     shouldStickToBottomRef.current = true;
+    bottomScrollInProgressRef.current = true;
     setIsNearBottom(true);
+    if (bottomScrollTimerRef.current) {
+      window.clearTimeout(bottomScrollTimerRef.current);
+    }
     requestAnimationFrame(() => {
       node.scrollTo({ top: node.scrollHeight, behavior });
       lastScrollTopRef.current = node.scrollTop;
+      bottomScrollTimerRef.current = window.setTimeout(() => {
+        node.scrollTop = node.scrollHeight;
+        lastScrollTopRef.current = node.scrollTop;
+        bottomScrollInProgressRef.current = false;
+        shouldStickToBottomRef.current = true;
+        setIsNearBottom(true);
+        bottomScrollTimerRef.current = null;
+      }, behavior === "smooth" ? 500 : 0);
     });
+  }
+
+  function cancelBottomScroll() {
+    bottomScrollInProgressRef.current = false;
+    if (bottomScrollTimerRef.current) {
+      window.clearTimeout(bottomScrollTimerRef.current);
+      bottomScrollTimerRef.current = null;
+    }
   }
 
   function cacheConversation(item: ChatConversation & { messages: ChatMessage[] }) {
@@ -1722,8 +1749,8 @@ export function ChatPage(props: {
           window.setTimeout(() => scrollMessagesToBottom("smooth"), 60);
           return;
         }
-        if (lastItem.status === "failed") {
-          throw new Error(lastItem.error || "生图任务失败。");
+        if (lastItem.status === "failed" || lastItem.status === "interrupted") {
+          throw new Error(lastItem.error || (lastItem.status === "interrupted" ? "生图任务已中断。" : "生图任务失败。"));
         }
       }
       throw new Error(lastItem?.status ? `生图任务仍在 ${lastItem.status}，请稍后到生图历史查看。` : "生图任务等待超时。");
@@ -1956,6 +1983,12 @@ export function ChatPage(props: {
     }
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
     const nearBottom = distance < CHAT_BOTTOM_THRESHOLD;
+    if (bottomScrollInProgressRef.current) {
+      shouldStickToBottomRef.current = true;
+      setIsNearBottom(nearBottom);
+      lastScrollTopRef.current = node.scrollTop;
+      return;
+    }
     const scrollingUp = node.scrollTop < lastScrollTopRef.current - 2;
     shouldStickToBottomRef.current = nearBottom && !scrollingUp;
     setIsNearBottom(nearBottom);
@@ -2203,7 +2236,15 @@ export function ChatPage(props: {
         </div>
 
         <div className="chat-messages-wrap">
-          <div className="chat-messages" ref={messagesScrollRef} onScroll={updateStickToBottom}>
+          <div
+            className="chat-messages"
+            ref={messagesScrollRef}
+            onScroll={updateStickToBottom}
+            onWheel={cancelBottomScroll}
+            onTouchStart={cancelBottomScroll}
+            onPointerDown={cancelBottomScroll}
+          >
+            <div className="chat-messages-content" ref={messagesContentRef}>
             {messages.length === 0 ? (
               <div className="chat-empty">
                 <MessageSquarePlus size={34} />
@@ -2315,6 +2356,7 @@ export function ChatPage(props: {
               </div>
             ))}
             <div ref={messageEndRef} />
+            </div>
           </div>
           {!isNearBottom && messages.length > 0 ? (
             <button className="chat-scroll-bottom" type="button" onClick={() => scrollMessagesToBottom("smooth")} aria-label="回到底部">

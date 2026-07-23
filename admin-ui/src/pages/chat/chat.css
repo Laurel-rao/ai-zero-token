@@ -242,12 +242,16 @@
   height: 100%;
   padding: 18px 18px 22px;
   overflow: auto;
-  display: grid;
-  align-content: start;
-  gap: 16px;
   background: linear-gradient(180deg, rgba(248, 250, 252, 0.72), #fff);
   scrollbar-width: thin;
   overscroll-behavior: contain;
+}
+
+.chat-messages-content {
+  min-height: 100%;
+  display: grid;
+  align-content: start;
+  gap: 16px;
 }
 
 .chat-messages::-webkit-scrollbar,
