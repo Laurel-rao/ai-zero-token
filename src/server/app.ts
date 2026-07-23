@@ -40,8 +40,9 @@ const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_ROUTE_BODY_LIMIT_BYTES = 128 * BYTES_PER_MIB;
 const CODEX_COMPACT_BODY_LIMIT_BYTES = 256 * BYTES_PER_MIB;
 const MAX_CHAT_ATTACHMENTS = 8;
-const MAX_CHAT_IMAGE_ATTACHMENT_BYTES = 10 * BYTES_PER_MIB;
-const MAX_CHAT_FILE_ATTACHMENT_BYTES = 10 * BYTES_PER_MIB;
+const MAX_CHAT_IMAGE_ATTACHMENT_BYTES = 30 * BYTES_PER_MIB;
+const MAX_CHAT_FILE_ATTACHMENT_BYTES = 30 * BYTES_PER_MIB;
+const MAX_CHAT_BINARY_ATTACHMENTS_BYTES = 80 * BYTES_PER_MIB;
 const MAX_CHAT_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_CHAT_TEXT_ATTACHMENT_CHARS = 512 * 1024;
 const MAX_CHAT_MESSAGE_CHARS = 100_000;
@@ -1041,7 +1042,7 @@ const chatAttachmentSchema = z
         ctx.addIssue({ code: "custom", message: "图片附件必须提供 base64 data URL。" });
       }
       if (value.size > MAX_CHAT_IMAGE_ATTACHMENT_BYTES || (value.dataUrl && estimateBase64Bytes(value.dataUrl) > MAX_CHAT_IMAGE_ATTACHMENT_BYTES)) {
-        ctx.addIssue({ code: "custom", message: "单个图片附件不能超过 10 MiB。" });
+        ctx.addIssue({ code: "custom", message: "单个图片附件不能超过 30 MiB。" });
       }
       return;
     }
@@ -1059,7 +1060,7 @@ const chatAttachmentSchema = z
         ctx.addIssue({ code: "custom", message: "文件附件必须提供匹配格式的 base64 data URL。" });
       }
       if (value.size > MAX_CHAT_FILE_ATTACHMENT_BYTES || (value.dataUrl && estimateBase64Bytes(value.dataUrl) > MAX_CHAT_FILE_ATTACHMENT_BYTES)) {
-        ctx.addIssue({ code: "custom", message: "单个文件附件不能超过 10 MiB。" });
+        ctx.addIssue({ code: "custom", message: "单个文件附件不能超过 30 MiB。" });
       }
       return;
     }
@@ -1074,10 +1075,26 @@ const chatAttachmentSchema = z
     }
   });
 
+const chatAttachmentsSchema = z
+  .array(chatAttachmentSchema)
+  .max(MAX_CHAT_ATTACHMENTS)
+  .superRefine((attachments, ctx) => {
+    const totalBytes = attachments.reduce((total, attachment) => {
+      if (attachment.kind !== "image" && attachment.kind !== "file") {
+        return total;
+      }
+      const encodedBytes = attachment.dataUrl ? estimateBase64Bytes(attachment.dataUrl) : 0;
+      return total + Math.max(attachment.size, encodedBytes);
+    }, 0);
+    if (totalBytes > MAX_CHAT_BINARY_ATTACHMENTS_BYTES) {
+      ctx.addIssue({ code: "custom", message: "每条消息的图片和原生文件附件合计不能超过 80 MiB。" });
+    }
+  });
+
 const chatMessageStreamBodySchema = z.object({
   content: z.string().trim().max(MAX_CHAT_MESSAGE_CHARS),
   model: z.string().min(1).optional(),
-  attachments: z.array(chatAttachmentSchema).max(MAX_CHAT_ATTACHMENTS).optional(),
+  attachments: chatAttachmentsSchema.optional(),
 }).refine((value) => value.content.length > 0 || (value.attachments?.length ?? 0) > 0, {
   message: "消息内容或附件至少需要提供一个。",
 });

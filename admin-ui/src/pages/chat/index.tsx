@@ -1,18 +1,24 @@
-import { Check, ChevronDown, ChevronUp, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Loader2, Maximize2, Menu, MessageSquarePlus, Minimize2, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, TriangleAlert, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Clock3, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Info, Loader2, Maximize2, Menu, MessageSquarePlus, Minimize2, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, TriangleAlert, X } from "lucide-react";
 import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
+import katex from "katex";
+import rehypeKatex from "rehype-katex";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
 import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, errorMessage } from "@/shared/lib/app-utils";
 import { formatFileSize, formatFullTime } from "@/shared/lib/format";
+import { Modal } from "@/shared/components/Modal";
 
 const MAX_ATTACHMENTS = 8;
-const MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
-const MAX_SPREADSHEET_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-const MAX_OFFICE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_SPREADSHEET_ATTACHMENT_BYTES = 30 * 1024 * 1024;
+const MAX_OFFICE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
+const MAX_TOTAL_BINARY_ATTACHMENT_BYTES = 80 * 1024 * 1024;
 const COLLAPSED_MESSAGE_HEIGHT = 420;
 const COPY_FEEDBACK_MS = 1400;
 const CHAT_BOTTOM_THRESHOLD = 96;
@@ -263,6 +269,53 @@ function eventRecord(value: unknown): Record<string, unknown> {
 
 function conversationTimestamp(item?: ChatConversation | null): string {
   return item?.updatedAt ? formatFullTime(item.updatedAt) : "-";
+}
+
+function formatRelativeConversationTime(timestamp: number, now: number): string {
+  const elapsedSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  if (elapsedSeconds < 5) {
+    return "刚刚";
+  }
+  if (elapsedSeconds < 60) {
+    return `${elapsedSeconds} 秒前`;
+  }
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes} 分钟前`;
+  }
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) {
+    return `${elapsedHours} 小时前`;
+  }
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 7) {
+    return `${elapsedDays} 天前`;
+  }
+  return formatFullTime(timestamp);
+}
+
+function RelativeConversationTime(props: { timestamp: number }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    let timer: number | undefined;
+    const update = () => {
+      const current = Date.now();
+      setNow(current);
+      const elapsed = Math.max(0, current - props.timestamp);
+      const delay = elapsed < 60_000 ? 1_000 : elapsed < 3_600_000 ? 30_000 : 60_000;
+      timer = window.setTimeout(update, delay);
+    };
+    const elapsed = Math.max(0, Date.now() - props.timestamp);
+    timer = window.setTimeout(update, elapsed < 60_000 ? 1_000 : elapsed < 3_600_000 ? 30_000 : 60_000);
+    return () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [props.timestamp]);
+
+  return <>{formatRelativeConversationTime(props.timestamp, now)}</>;
 }
 
 function fileExtension(name: string): string {
@@ -659,6 +712,150 @@ function codeElementFromPre(children: ReactNode): ReactElement<MarkdownCodeProps
   return child && isValidElement<MarkdownCodeProps>(child) && child.type === "code" ? child : null;
 }
 
+function normalizeMarkdownMathDelimiters(value: string): string {
+  return value
+    .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g)
+    .map((part) => {
+      if (part.startsWith("```") || part.startsWith("~~~")) {
+        return part;
+      }
+      return part
+        .replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) => `$$\n${formula.trim()}\n$$`)
+        .replace(/\\\(([\s\S]*?)\\\)/g, (_match, formula: string) => `$${formula.trim()}$`);
+    })
+    .join("");
+}
+
+function normalizeLatexFence(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("\\[") && trimmed.endsWith("\\]")) {
+    return trimmed.slice(2, -2).trim();
+  }
+  if (trimmed.startsWith("$$") && trimmed.endsWith("$$")) {
+    return trimmed.slice(2, -2).trim();
+  }
+  return trimmed;
+}
+
+function isLatexLanguage(language: string): boolean {
+  return ["latex", "tex", "math", "katex"].includes(language.trim().toLowerCase());
+}
+
+function MarkdownLatexBlock(props: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const formula = normalizeLatexFence(props.code);
+  const rendered = useMemo(() => {
+    try {
+      return {
+        html: katex.renderToString(formula, {
+          displayMode: true,
+          throwOnError: true,
+          strict: "ignore",
+          trust: false,
+        }),
+        error: "",
+      };
+    } catch (error) {
+      return {
+        html: "",
+        error: errorMessage(error),
+      };
+    }
+  }, [formula]);
+
+  async function handleCopy() {
+    if (await copyText(props.code)) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+    }
+  }
+
+  return (
+    <div className="chat-code-block chat-render-block">
+      <div className="chat-code-head">
+        <span>LaTeX</span>
+        <button className="chat-code-copy" type="button" onClick={() => void handleCopy()} aria-label="复制 LaTeX 源码">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? "已复制" : "复制源码"}
+        </button>
+      </div>
+      {rendered.html ? (
+        <div className="chat-render-surface chat-latex-surface" aria-label="LaTeX 公式" dangerouslySetInnerHTML={{ __html: rendered.html }} />
+      ) : (
+        <>
+          <div className="chat-render-error">公式渲染失败：{rendered.error}</div>
+          <pre className="chat-render-fallback"><code>{props.code}</code></pre>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MarkdownMermaidBlock(props: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<{ loading: boolean; svg: string; error: string }>({ loading: true, svg: "", error: "" });
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setState({ loading: true, svg: "", error: "" });
+        try {
+          const mermaid = (await import("mermaid")).default;
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",
+            theme: "neutral",
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+          });
+          const renderId = `chat-mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+          const result = await mermaid.render(renderId, props.code.trim());
+          if (!cancelled) {
+            setState({ loading: false, svg: result.svg, error: "" });
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setState({ loading: false, svg: "", error: errorMessage(error) });
+          }
+        }
+      })();
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [props.code]);
+
+  async function handleCopy() {
+    if (await copyText(props.code)) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+    }
+  }
+
+  return (
+    <div className="chat-code-block chat-render-block">
+      <div className="chat-code-head">
+        <span>Mermaid</span>
+        <button className="chat-code-copy" type="button" onClick={() => void handleCopy()} aria-label="复制 Mermaid 源码">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? "已复制" : "复制源码"}
+        </button>
+      </div>
+      {state.loading ? (
+        <div className="chat-render-loading"><Loader2 className="spin" size={16} />正在渲染图表...</div>
+      ) : state.svg ? (
+        <div className="chat-render-surface chat-mermaid-surface" role="img" aria-label="Mermaid 图表" dangerouslySetInnerHTML={{ __html: state.svg }} />
+      ) : (
+        <>
+          <div className="chat-render-error">图表渲染失败：{state.error}</div>
+          <pre className="chat-render-fallback"><code>{props.code}</code></pre>
+        </>
+      )}
+    </div>
+  );
+}
+
 function isHtmlCode(code: string, language: string): boolean {
   const normalizedLanguage = language.trim().toLowerCase();
   if (normalizedLanguage === "html" || normalizedLanguage === "htm") {
@@ -699,6 +896,13 @@ function MarkdownPre({ children, onPreviewHtml }: MarkdownPreProps) {
   const code = markdownText(codeElement?.props.children ?? children).replace(/\n$/, "");
   const language = /language-([\w-]+)/.exec(className || "")?.[1] ?? "";
   const canPreviewHtml = Boolean(onPreviewHtml && code && isHtmlCode(code, language));
+
+  if (isLatexLanguage(language)) {
+    return <MarkdownLatexBlock code={code} />;
+  }
+  if (language.trim().toLowerCase() === "mermaid") {
+    return <MarkdownMermaidBlock code={code} />;
+  }
 
   async function handleCopy() {
     const ok = await copyText(code);
@@ -741,6 +945,7 @@ function ChatMessageContent(props: {
   const [expanded, setExpanded] = useState(false);
   const [canCollapse, setCanCollapse] = useState(false);
   const displayContent = props.content || (props.status === "running" ? "正在思考..." : "");
+  const normalizedDisplayContent = useMemo(() => normalizeMarkdownMathDelimiters(displayContent), [displayContent]);
   const collapsed = canCollapse && !expanded && props.status !== "running";
   const markdownComponents = useMemo<Components>(() => ({
     a({ children, href }) {
@@ -798,8 +1003,8 @@ function ChatMessageContent(props: {
         className="chat-markdown"
         style={collapsed ? { maxHeight: COLLAPSED_MESSAGE_HEIGHT } : undefined}
       >
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} skipHtml>
-          {displayContent}
+        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={markdownComponents} skipHtml>
+          {normalizedDisplayContent}
         </ReactMarkdown>
       </div>
       {canCollapse && props.status !== "running" ? (
@@ -831,7 +1036,8 @@ export function ChatPage(props: {
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [model, setModel] = useState(props.config?.settings.defaultModel || "");
   const [loading, setLoading] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [sendingConversationIds, setSendingConversationIds] = useState<Set<string>>(() => new Set());
+  const [creatingConversationStream, setCreatingConversationStream] = useState(false);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [pendingAttachmentFiles, setPendingAttachmentFiles] = useState<PendingAttachmentFile[]>([]);
@@ -839,6 +1045,8 @@ export function ChatPage(props: {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
+  const [detailConversationId, setDetailConversationId] = useState<string | null>(null);
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null);
   const [editingMessage, setEditingMessage] = useState<EditingMessage | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [imageActions, setImageActions] = useState<Record<string, ChatImageActionState>>({});
@@ -849,7 +1057,7 @@ export function ChatPage(props: {
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const streamControllersRef = useRef<Map<string, AbortController>>(new Map());
   const conversationLoadAbortRef = useRef<AbortController | null>(null);
   const copyMessageTimerRef = useRef<number | null>(null);
   const copyHtmlTimerRef = useRef<number | null>(null);
@@ -873,10 +1081,12 @@ export function ChatPage(props: {
   const previewDragRef = useRef<HtmlPreviewDragState | null>(null);
 
   const activeConversation = useMemo(() => conversations.find((item) => item.id === activeId) ?? null, [activeId, conversations]);
+  const detailConversation = useMemo(() => conversations.find((item) => item.id === detailConversationId) ?? null, [conversations, detailConversationId]);
   const activeCachedConversation = activeId ? conversationCacheRef.current.get(activeId) ?? null : null;
   const canLoadOlderMessages = Boolean((activeCachedConversation ?? activeConversation)?.hasMoreMessages && messages.length > 0);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
-  const canSend = (input.trim().length > 0 || attachments.length > 0) && !uploadingAttachments && !sending && props.busy !== "chat";
+  const activeConversationSending = activeId ? sendingConversationIds.has(activeId) : creatingConversationStream;
+  const canSend = (input.trim().length > 0 || attachments.length > 0) && !uploadingAttachments && !activeConversationSending;
   const isLoadingActiveConversation = Boolean(activeId && loadingConversationId === activeId);
   const attachmentNoticeStatus = attachmentNoticeTone(attachmentNotice, uploadingAttachments);
 
@@ -1177,6 +1387,25 @@ export function ChatPage(props: {
     setActiveId(id);
   }
 
+  function registerConversationStream(conversationId: string, controller: AbortController) {
+    streamControllersRef.current.set(conversationId, controller);
+    setSendingConversationIds(new Set(streamControllersRef.current.keys()));
+  }
+
+  function unregisterConversationStream(conversationId: string, controller: AbortController) {
+    if (streamControllersRef.current.get(conversationId) !== controller) {
+      return;
+    }
+    streamControllersRef.current.delete(conversationId);
+    setSendingConversationIds(new Set(streamControllersRef.current.keys()));
+  }
+
+  function setConversationStatus(conversationId: string, status: string) {
+    if (activeIdRef.current === conversationId) {
+      props.setStatus(status);
+    }
+  }
+
   function applyMessageStart(
     items: ChatMessage[],
     userMessage: ChatMessage | undefined,
@@ -1406,13 +1635,20 @@ export function ChatPage(props: {
   }
 
   async function deleteConversation(id: string) {
-    if (!window.confirm("确认删除这条聊天记录？")) {
+    const target = conversations.find((item) => item.id === id);
+    if (streamControllersRef.current.has(id)) {
+      props.setStatus("请先停止该会话正在生成的回复，再删除会话。");
       return;
     }
+    if (!window.confirm(`确认删除会话“${target?.title || "未命名会话"}”？删除后无法恢复。`)) {
+      return;
+    }
+    setDeletingConversationId(id);
     try {
       await fetchJson<{ ok: boolean }>(`/_gateway/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
       const next = conversations.filter((item) => item.id !== id);
       setConversations(next);
+      setDetailConversationId(null);
       if (activeId === id) {
         const nextId = next[0]?.id ?? null;
         setActiveConversationId(nextId);
@@ -1425,6 +1661,8 @@ export function ChatPage(props: {
       props.setStatus("聊天记录已删除。");
     } catch (error) {
       props.setStatus(`删除失败：${errorMessage(error)}`);
+    } finally {
+      setDeletingConversationId(null);
     }
   }
 
@@ -1445,6 +1683,9 @@ export function ChatPage(props: {
 
     const next: ChatAttachment[] = [];
     const skipped: string[] = [];
+    let binaryAttachmentBytes = attachments.reduce((total, attachment) => (
+      attachment.kind === "image" || attachment.kind === "file" ? total + attachment.size : total
+    ), 0);
     for (const file of selected) {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const imageMimeType = imageMimeTypeForFile(file);
@@ -1453,6 +1694,11 @@ export function ChatPage(props: {
           skipped.push(`${file.name} 超过 ${formatFileSize(MAX_IMAGE_ATTACHMENT_BYTES)}`);
           continue;
         }
+        if (binaryAttachmentBytes + file.size > MAX_TOTAL_BINARY_ATTACHMENT_BYTES) {
+          skipped.push(`${file.name} 加入后二进制附件合计超过 ${formatFileSize(MAX_TOTAL_BINARY_ATTACHMENT_BYTES)}`);
+          continue;
+        }
+        binaryAttachmentBytes += file.size;
         next.push({
           id,
           kind: "image",
@@ -1470,6 +1716,11 @@ export function ChatPage(props: {
           skipped.push(`${file.name} 超过 ${formatFileSize(MAX_OFFICE_ATTACHMENT_BYTES)}`);
           continue;
         }
+        if (binaryAttachmentBytes + file.size > MAX_TOTAL_BINARY_ATTACHMENT_BYTES) {
+          skipped.push(`${file.name} 加入后二进制附件合计超过 ${formatFileSize(MAX_TOTAL_BINARY_ATTACHMENT_BYTES)}`);
+          continue;
+        }
+        binaryAttachmentBytes += file.size;
         next.push({
           id,
           kind: "file",
@@ -1680,7 +1931,9 @@ export function ChatPage(props: {
         updateCachedConversationMessages(conversationId, replaceFailed);
         updateVisibleConversationMessages(conversationId, replaceFailed);
       }
-      props.setStatus(`聊天失败：${message}`);
+      if (conversationId) {
+        setConversationStatus(conversationId, `聊天失败：${message}`);
+      }
     }
   }
 
@@ -1928,16 +2181,21 @@ export function ChatPage(props: {
     if (!canSend || (!content && sendingAttachments.length === 0)) {
       return;
     }
+    const initialConversationId = activeId;
+    if (initialConversationId && streamControllersRef.current.has(initialConversationId)) {
+      return;
+    }
     shouldStickToBottomRef.current = true;
     setInput((value) => value.trim() === content ? "" : value);
     setAttachments([]);
     setPendingAttachmentFiles([]);
     setUploadingAttachments(false);
     setAttachmentNotice("");
-    setSending(true);
-    props.setBusy("chat");
+    if (!initialConversationId) {
+      setCreatingConversationStream(true);
+    }
     props.setStatus(activeId ? "正在等待回复..." : "正在创建聊天...");
-    let targetId = activeId;
+    let targetId = initialConversationId;
     if (!targetId) {
       const created = await createConversation({ clearInput: false, silent: true });
       targetId = created?.id ?? null;
@@ -1946,8 +2204,7 @@ export function ChatPage(props: {
       const message = "发送失败：未能创建聊天，请稍后重试。";
       setAttachmentNotice(message);
       props.setStatus(message);
-      setSending(false);
-      props.setBusy(null);
+      setCreatingConversationStream(false);
       setInput((value) => value || content);
       setAttachments((items) => items.length > 0 ? items : sendingAttachments);
       return;
@@ -1986,7 +2243,8 @@ export function ChatPage(props: {
     updateVisibleConversationMessages(targetId, (items) => [...items, ...optimisticMessages]);
     setIsNearBottom(true);
     const controller = new AbortController();
-    abortRef.current = controller;
+    registerConversationStream(targetId, controller);
+    setCreatingConversationStream(false);
     props.setStatus("正在等待回复...");
     try {
       const response = await fetch(`/_gateway/chats/${encodeURIComponent(targetId)}/messages/stream`, {
@@ -1997,22 +2255,23 @@ export function ChatPage(props: {
         signal: controller.signal,
       });
       await readChatStream(response, targetId);
-      props.setStatus("聊天完成。");
+      setConversationStatus(targetId, "聊天完成。");
     } catch (error) {
       if ((error as { name?: string }).name === "AbortError") {
         markRunningAssistantFailed(targetId, "已停止当前回复。");
+        setConversationStatus(targetId, "已停止当前回复。");
       } else {
         const message = `发送失败：${errorMessage(error)}`;
         markRunningAssistantFailed(targetId, message);
-        setAttachmentNotice(message);
-        props.setStatus(message);
-        setInput((value) => value || content);
-        setAttachments((items) => items.length > 0 ? items : sendingAttachments);
+        if (activeIdRef.current === targetId) {
+          setAttachmentNotice(message);
+          props.setStatus(message);
+          setInput((value) => value || content);
+          setAttachments((items) => items.length > 0 ? items : sendingAttachments);
+        }
       }
     } finally {
-      abortRef.current = null;
-      setSending(false);
-      props.setBusy(null);
+      unregisterConversationStream(targetId, controller);
       if (activeIdRef.current === targetId) {
         focusComposer();
       }
@@ -2020,75 +2279,82 @@ export function ChatPage(props: {
   }
 
   async function retryMessage(message: ChatMessage) {
-    if (!activeId || message.status !== "failed" || message.role !== "assistant" || sending || props.busy === "chat") {
+    const targetId = activeId;
+    if (!targetId || message.status !== "failed" || message.role !== "assistant" || streamControllersRef.current.has(targetId)) {
       return;
     }
     shouldStickToBottomRef.current = true;
     const controller = new AbortController();
-    abortRef.current = controller;
-    setSending(true);
-    props.setBusy("chat");
+    registerConversationStream(targetId, controller);
     props.setStatus("正在重新生成回复...");
     try {
-      const response = await fetch(`/_gateway/chats/${encodeURIComponent(activeId)}/messages/${encodeURIComponent(message.id)}/retry/stream`, {
+      const response = await fetch(`/_gateway/chats/${encodeURIComponent(targetId)}/messages/${encodeURIComponent(message.id)}/retry/stream`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: model || props.config?.settings.defaultModel }),
         signal: controller.signal,
       });
-      await readChatStream(response, activeId);
-      props.setStatus("重试完成。");
+      await readChatStream(response, targetId);
+      setConversationStatus(targetId, "重试完成。");
     } catch (error) {
-      if ((error as { name?: string }).name !== "AbortError") {
-        props.setStatus(`重试失败：${errorMessage(error)}`);
+      if ((error as { name?: string }).name === "AbortError") {
+        markRunningAssistantFailed(targetId, "已停止当前回复。");
+        setConversationStatus(targetId, "已停止当前回复。");
+      } else {
+        setConversationStatus(targetId, `重试失败：${errorMessage(error)}`);
       }
     } finally {
-      abortRef.current = null;
-      setSending(false);
-      props.setBusy(null);
-      focusComposer();
+      unregisterConversationStream(targetId, controller);
+      if (activeIdRef.current === targetId) {
+        focusComposer();
+      }
     }
   }
 
   async function rewriteFromMessage(message: ChatMessage) {
     const content = editingMessage?.id === message.id ? editingMessage.content.trim() : "";
-    if (!activeId || !content || message.role !== "user" || sending || props.busy === "chat") {
+    const targetId = activeId;
+    if (!targetId || !content || message.role !== "user" || streamControllersRef.current.has(targetId)) {
       return;
     }
     shouldStickToBottomRef.current = true;
     setIsNearBottom(true);
-    setSending(true);
     setEditingMessage(null);
-    props.setBusy("chat");
     props.setStatus("正在根据编辑后的消息重新生成...");
     const controller = new AbortController();
-    abortRef.current = controller;
+    registerConversationStream(targetId, controller);
     try {
-      const response = await fetch(`/_gateway/chats/${encodeURIComponent(activeId)}/messages/${encodeURIComponent(message.id)}/rewrite/stream`, {
+      const response = await fetch(`/_gateway/chats/${encodeURIComponent(targetId)}/messages/${encodeURIComponent(message.id)}/rewrite/stream`, {
         method: "PATCH",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content, model: model || props.config?.settings.defaultModel }),
         signal: controller.signal,
       });
-      await readChatStream(response, activeId);
-      props.setStatus("已从编辑位置重新生成。");
+      await readChatStream(response, targetId);
+      setConversationStatus(targetId, "已从编辑位置重新生成。");
     } catch (error) {
-      if ((error as { name?: string }).name !== "AbortError") {
+      if ((error as { name?: string }).name === "AbortError") {
+        markRunningAssistantFailed(targetId, "已停止当前回复。");
+        setConversationStatus(targetId, "已停止当前回复。");
+      } else if (activeIdRef.current === targetId) {
         setEditingMessage({ id: message.id, content });
         props.setStatus(`重新生成失败：${errorMessage(error)}`);
       }
     } finally {
-      abortRef.current = null;
-      setSending(false);
-      props.setBusy(null);
-      focusComposer();
+      unregisterConversationStream(targetId, controller);
+      if (activeIdRef.current === targetId) {
+        focusComposer();
+      }
     }
   }
 
   function stopMessage() {
-    abortRef.current?.abort();
+    if (!activeId) {
+      return;
+    }
+    streamControllersRef.current.get(activeId)?.abort();
     props.setStatus("已停止当前回复。");
     focusComposer();
   }
@@ -2099,7 +2365,7 @@ export function ChatPage(props: {
       if (composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229) {
         return;
       }
-      if (sending || props.busy === "chat") {
+      if (activeConversationSending) {
         return;
       }
       event.preventDefault();
@@ -2323,13 +2589,17 @@ export function ChatPage(props: {
                   <button className="chat-history-main" type="button" onClick={() => loadConversation(item.id)}>
                     <strong>{item.title}</strong>
                     <span>{item.lastMessagePreview || conversationTimestamp(item)}</span>
+                    <time className="chat-history-activity" dateTime={new Date(item.updatedAt).toISOString()} title={`最后活跃：${conversationTimestamp(item)}`}>
+                      <Clock3 size={12} />
+                      <RelativeConversationTime timestamp={item.updatedAt} />
+                    </time>
                   </button>
                   <div className="chat-history-actions">
-                    <button className="chat-icon-btn" type="button" onClick={() => { setEditingId(item.id); setEditingTitle(item.title); }} title="重命名">
+                    <button className="chat-icon-btn" type="button" onClick={() => { setEditingId(item.id); setEditingTitle(item.title); }} title="重命名" aria-label={`重命名会话：${item.title}`}>
                       <Pencil size={14} />
                     </button>
-                    <button className="chat-icon-btn" type="button" onClick={() => deleteConversation(item.id)} title="删除">
-                      <Trash2 size={14} />
+                    <button className="chat-icon-btn" type="button" onClick={() => setDetailConversationId(item.id)} title="会话详细信息" aria-label={`查看会话详细信息：${item.title}`}>
+                      <Info size={15} />
                     </button>
                   </div>
                 </>
@@ -2412,7 +2682,7 @@ export function ChatPage(props: {
                       {copiedMessageId === message.id ? "已复制" : "复制"}
                     </button>
                     {message.role === "assistant" && message.status === "failed" ? (
-                      <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={sending || props.busy === "chat"} title="重新生成">
+                      <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={activeConversationSending} title="重新生成">
                         <RefreshCw size={14} />
                         重发
                       </button>
@@ -2421,7 +2691,7 @@ export function ChatPage(props: {
                       <em>识别生图</em>
                     ) : null}
                     {message.role === "assistant" && message.status === "success" && imageActions[message.id]?.status === "ready" ? (
-                      <button className="chat-retry-btn chat-image-generate-btn" type="button" onClick={() => void generateFromChatMessage(message)} disabled={sending || props.busy === "chat"} title="根据这条回复生图">
+                      <button className="chat-retry-btn chat-image-generate-btn" type="button" onClick={() => void generateFromChatMessage(message)} disabled={activeConversationSending} title="根据这条回复生图">
                         <ImageIcon size={14} />
                         生图
                       </button>
@@ -2431,7 +2701,7 @@ export function ChatPage(props: {
                         className="chat-retry-btn"
                         type="button"
                         onClick={() => setEditingMessage({ id: message.id, content: message.content })}
-                        disabled={sending || props.busy === "chat"}
+                        disabled={activeConversationSending}
                         title="编辑并从此处重新生成"
                       >
                         <Pencil size={14} />
@@ -2459,7 +2729,7 @@ export function ChatPage(props: {
                         <button className="btn-secondary" type="button" onClick={() => setEditingMessage(null)}>
                           取消
                         </button>
-                        <button className="btn-primary" type="button" onClick={() => void rewriteFromMessage(message)} disabled={!editingMessage.content.trim() || sending || props.busy === "chat"}>
+                        <button className="btn-primary" type="button" onClick={() => void rewriteFromMessage(message)} disabled={!editingMessage.content.trim() || activeConversationSending}>
                           <RefreshCw size={15} />
                           重新生成
                         </button>
@@ -2588,19 +2858,64 @@ export function ChatPage(props: {
               />
             </div>
           </div>
-          {sending ? (
+          {activeConversationSending ? (
             <button className="btn-secondary" type="button" onClick={stopMessage}>
               <X size={16} />
               停止
             </button>
           ) : (
             <button className="btn-primary" type="button" onClick={sendMessage} disabled={!canSend}>
-              {sending ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+              <Send size={16} />
               发送
             </button>
           )}
         </div>
       </div>
+      {detailConversation ? (
+        <Modal title="会话详细信息" onClose={() => setDetailConversationId(null)} className="chat-conversation-detail-modal">
+          <div className="chat-conversation-detail">
+            <div className="chat-conversation-detail-summary">
+              <span className="chat-conversation-detail-icon"><Info size={18} /></span>
+              <div>
+                <strong>{detailConversation.title}</strong>
+                <span>{detailConversation.lastMessagePreview || "暂无消息摘要"}</span>
+              </div>
+            </div>
+            <dl className="chat-conversation-detail-grid">
+              <div>
+                <dt>消息数量</dt>
+                <dd>{detailConversation.messageCount} 条</dd>
+              </div>
+              <div>
+                <dt>使用模型</dt>
+                <dd>{detailConversation.model || props.config?.settings.defaultModel || "-"}</dd>
+              </div>
+              <div>
+                <dt>创建时间</dt>
+                <dd>{formatFullTime(detailConversation.createdAt)}</dd>
+              </div>
+              <div>
+                <dt>最后活跃</dt>
+                <dd><RelativeConversationTime timestamp={detailConversation.updatedAt} /> · {formatFullTime(detailConversation.updatedAt)}</dd>
+              </div>
+              <div className="is-wide">
+                <dt>会话 ID</dt>
+                <dd className="chat-conversation-id">{detailConversation.id}</dd>
+              </div>
+            </dl>
+            <div className="chat-conversation-danger-zone">
+              <div>
+                <strong>删除会话</strong>
+                <span>会话及其中的全部消息将永久删除，此操作无法撤销。</span>
+              </div>
+              <button className="btn-danger" type="button" onClick={() => void deleteConversation(detailConversation.id)} disabled={deletingConversationId === detailConversation.id || sendingConversationIds.has(detailConversation.id)}>
+                {deletingConversationId === detailConversation.id ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
+                {deletingConversationId === detailConversation.id ? "正在删除" : sendingConversationIds.has(detailConversation.id) ? "回复生成中" : "删除会话"}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
       {htmlPreview ? (
         <div
           className={`chat-html-preview-window ${htmlPreviewMaximized ? "is-maximized" : ""}`}
