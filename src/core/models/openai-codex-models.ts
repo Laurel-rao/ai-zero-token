@@ -7,7 +7,13 @@ import { requestText } from "../providers/http-client.js";
 export const DEFAULT_CODEX_MODEL = "gpt-5.4";
 const CODEX_MODELS_URL = process.env.CODEX_MODELS_URL || "https://chatgpt.com/backend-api/codex/models";
 const CODEX_MODELS_REFRESH_TIMEOUT_MS = 60_000;
-const DEFAULT_CODEX_MODELS_CLIENT_VERSION = "0.130.0";
+const CODEX_NPM_LATEST_URL = "https://registry.npmjs.org/@openai%2Fcodex/latest";
+const CODEX_VERSION_REFRESH_TIMEOUT_MS = 5_000;
+const CODEX_VERSION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_CODEX_MODELS_CLIENT_VERSION = "0.144.3";
+
+let latestCodexVersionCache: { version: string; checkedAt: number } | null = null;
+let latestCodexVersionInFlight: Promise<string> | null = null;
 
 export const CODEX_MODEL_INFOS: ModelInfo[] = [
   { provider: "openai-codex", id: "gpt-5.4", name: "GPT-5.4", input: ["text", "image"], source: "static" },
@@ -132,6 +138,55 @@ function normalizeNetworkModelsBody(
   return cache;
 }
 
+function normalizeStableCodexVersion(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().replace(/^v/, "");
+  return /^\d+\.\d+\.\d+$/.test(normalized) ? normalized : null;
+}
+
+async function fetchLatestStableCodexVersion(): Promise<string> {
+  const now = Date.now();
+  if (latestCodexVersionCache && now - latestCodexVersionCache.checkedAt < CODEX_VERSION_CACHE_TTL_MS) {
+    return latestCodexVersionCache.version;
+  }
+  if (latestCodexVersionInFlight) {
+    return latestCodexVersionInFlight;
+  }
+
+  latestCodexVersionInFlight = (async () => {
+    const response = await requestText({
+      method: "GET",
+      url: CODEX_NPM_LATEST_URL,
+      timeoutMs: CODEX_VERSION_REFRESH_TIMEOUT_MS,
+      ignoreProxy: true,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Codex npm latest returned ${response.status}`);
+    }
+    const parsed = JSON.parse(response.body) as { version?: unknown };
+    const version = normalizeStableCodexVersion(parsed.version);
+    if (!version) {
+      throw new Error("Codex npm latest did not return a stable version");
+    }
+    latestCodexVersionCache = { version, checkedAt: Date.now() };
+    return version;
+  })().finally(() => {
+    latestCodexVersionInFlight = null;
+  });
+  return latestCodexVersionInFlight;
+}
+
+async function getCachedCodexModelsClientVersion(cachePath: string): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(cachePath, "utf8")) as CodexModelsCacheFile;
+    return normalizeStableCodexVersion(parsed.client_version);
+  } catch {
+    return null;
+  }
+}
+
 async function getCodexModelsClientVersion(cachePath: string): Promise<string> {
   const override = process.env.CODEX_MODELS_CLIENT_VERSION?.trim();
   if (override) {
@@ -139,15 +194,10 @@ async function getCodexModelsClientVersion(cachePath: string): Promise<string> {
   }
 
   try {
-    const parsed = JSON.parse(await fs.readFile(cachePath, "utf8")) as CodexModelsCacheFile;
-    if (typeof parsed.client_version === "string" && parsed.client_version.trim()) {
-      return parsed.client_version.trim();
-    }
+    return await fetchLatestStableCodexVersion();
   } catch {
-    // A missing or unreadable cache should not prevent network refresh.
+    return await getCachedCodexModelsClientVersion(cachePath) ?? DEFAULT_CODEX_MODELS_CLIENT_VERSION;
   }
-
-  return DEFAULT_CODEX_MODELS_CLIENT_VERSION;
 }
 
 function buildCodexModelsUrl(clientVersion: string): string {
