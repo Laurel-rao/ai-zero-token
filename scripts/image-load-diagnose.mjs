@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import sharp from "sharp";
 
-const DEFAULT_BASE_URL = "http://43.128.120.182";
+const DEFAULT_BASE_URL = "http://ai.reeko.net.cn";
 const DEFAULT_USERNAME = "admin";
 const DEFAULT_PASSWORD = "Admin@123";
 const DEFAULT_ROUNDS = 3;
@@ -79,7 +79,7 @@ Options:
   --preview-url <url>    Direct preview image URL or path.
   --rounds <n>           Download samples per image. Default: ${DEFAULT_ROUNDS}
   --timeout-ms <n>       Per-request timeout. Default: ${DEFAULT_TIMEOUT_MS}
-  --ssh <host>           Optional remote host, for example root@43.128.120.182.
+  --ssh <host>           Optional remote host, for example root@64.83.17.240.
   --remote-root <path>   Remote generation image root. Default: ${DEFAULT_REMOTE_ASSET_ROOT}
 
 Environment:

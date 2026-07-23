@@ -10,6 +10,7 @@ release
 artifacts
 design
 tmp
+exports
 .state
 state
 *.log

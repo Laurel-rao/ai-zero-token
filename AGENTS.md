@@ -4,8 +4,11 @@
 
 This project was customized and deployed as a Docker service for:
 
-- Public URL: `http://43.128.120.182/`
-- Public port: `80`
+- Public URL: `http://ai.reeko.net.cn/`
+- Deployment host: `root@64.83.17.240`
+- Expected DNS A record: `ai.reeko.net.cn -> 64.83.17.240`
+- Public ports: `80` and `443` through Nginx
+- Container binding: `127.0.0.1:8787 -> 8787`
 - Container name: `ai-zero-token`
 - Docker image tag: `ai-zero-token:local`
 - Local workspace: `/Users/raojiajun/mypro/server/nodejs/ai-zero-token`
@@ -34,8 +37,15 @@ Deploy by syncing the built workspace to the server, rebuilding the Docker image
 ```bash
 cd /Users/raojiajun/mypro/server/nodejs/ai-zero-token
 npm run build && \
-rsync -az --delete --exclude node_modules ./ root@43.128.120.182:/opt/ai-zero-token/src/ && \
-ssh root@43.128.120.182 '
+rsync -az --delete \
+  --exclude .git \
+  --exclude node_modules \
+  --exclude release \
+  --exclude state \
+  --exclude tmp \
+  --exclude exports \
+  ./ root@64.83.17.240:/opt/ai-zero-token/src/ && \
+ssh root@64.83.17.240 '
   cd /opt/ai-zero-token/src &&
   docker build -t ai-zero-token:local . >/tmp/azt-build.log &&
   docker rm -f ai-zero-token >/dev/null 2>&1 || true &&
@@ -44,26 +54,32 @@ ssh root@43.128.120.182 '
     --restart unless-stopped \
     --env-file /opt/ai-zero-token/.env \
     -e AI_ZERO_TOKEN_HOME=/data \
-    -p 80:8787 \
+    -p 127.0.0.1:8787:8787 \
     -v /opt/ai-zero-token/state:/data \
     ai-zero-token:local &&
   sleep 2 &&
   docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" &&
-  curl -s --max-time 10 http://127.0.0.1:80/_gateway/auth/status
+    curl -s --max-time 10 http://127.0.0.1:8787/_gateway/auth/status
 '
 ```
 
-The service listens on `8787` inside the container and is published as host port `80`.
+The service listens on `8787` inside the container. Nginx owns public ports
+`80` and `443` and proxies the domain to `127.0.0.1:8787`.
 
 ### Post-Deploy Checks
 
 Run these checks after deployment:
 
 ```bash
-curl -s http://43.128.120.182/ | sed -n '1,40p'
-ssh root@43.128.120.182 'docker logs --tail 80 ai-zero-token'
-ssh root@43.128.120.182 'docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+dig +short ai.reeko.net.cn A
+curl -s http://ai.reeko.net.cn/ | sed -n '1,40p'
+curl -s -H 'Host: ai.reeko.net.cn' http://64.83.17.240/ | sed -n '1,40p'
+ssh root@64.83.17.240 'docker logs --tail 80 ai-zero-token'
+ssh root@64.83.17.240 'docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 ```
+
+The DNS lookup must return `64.83.17.240`. Before DNS propagation completes,
+use the direct-IP check with the `Host` header to verify the new server.
 
 Expected auth status without browser cookie:
 
@@ -78,12 +94,12 @@ This means the admin auth system is configured and the unauthenticated curl is c
 - Do not use `git reset --hard` or revert local changes unless the user explicitly asks.
 - The worktree is intentionally dirty because this service has many local customizations.
 - `rsync --delete` is used against `/opt/ai-zero-token/src`; be careful to run it only from the project root.
-- Exclude `node_modules` from rsync. The Docker image installs production dependencies with `npm ci --omit=dev --ignore-scripts`.
+- Exclude `.git`, `node_modules`, `release`, `state`, `tmp`, and `exports` from rsync. The Docker image installs production dependencies with `npm ci --omit=dev --ignore-scripts`.
 - Persisted runtime state, SQLite database, generated images, and uploaded/reference files live under `/opt/ai-zero-token/state`; do not delete it during deploy.
 - If a UI change appears stale, check the asset hash in the served HTML:
 
   ```bash
-  curl -s http://43.128.120.182/ | sed -n '1,40p'
+  curl -s http://ai.reeko.net.cn/ | sed -n '1,40p'
   ```
 
 ### Useful Server Debug Commands
@@ -91,13 +107,13 @@ This means the admin auth system is configured and the unauthenticated curl is c
 Inspect recent generated image files:
 
 ```bash
-ssh root@43.128.120.182 'find /opt/ai-zero-token/state -path "*generations*" -type f -printf "%T@ %s %p\n" | sort -nr | head -40'
+ssh root@64.83.17.240 'find /opt/ai-zero-token/state -path "*generations*" -type f -printf "%T@ %s %p\n" | sort -nr | head -40'
 ```
 
 Inspect recent generation history rows:
 
 ```bash
-ssh root@43.128.120.182 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
+ssh root@64.83.17.240 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
 const { DatabaseSync } = require("node:sqlite");
 const db = new DatabaseSync("/data/.state/gateway.sqlite");
 for (const row of db.prepare("SELECT id, owner, created_at, status, endpoint, substr(prompt,1,60) AS prompt, duration_ms FROM generation_history ORDER BY created_at DESC LIMIT 12").all()) {
@@ -109,7 +125,7 @@ NODE'"'"''
 Inspect request logs:
 
 ```bash
-ssh root@43.128.120.182 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
+ssh root@64.83.17.240 'docker exec ai-zero-token sh -lc '"'"'node <<"NODE"
 const { DatabaseSync } = require("node:sqlite");
 const db = new DatabaseSync("/data/.state/gateway.sqlite");
 for (const row of db.prepare("SELECT id, owner, time, method, endpoint, model, status_code, duration_ms, source FROM request_logs ORDER BY time DESC LIMIT 20").all()) {

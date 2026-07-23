@@ -2,9 +2,10 @@
 
 ## 1. 问题概述
 
-- 服务公网地址：`http://43.128.120.182/`
+- 服务公网域名：`http://ai.reeko.net.cn/`
+- 当前部署目标 IP：`64.83.17.240`
 - 服务器容器：`ai-zero-token`
-- 服务监听：容器内 `8787`，宿主机 `80 -> 8787`
+- 服务监听：容器内 `8787`，宿主机 `127.0.0.1:8787 -> 8787`，由 Nginx 对外监听 `80/443`
 - 问题表现：从客户端访问公网地址时，小页面响应正常，但下载稍大的静态资源或生成图片资源非常慢。
 - 典型现象：约 `1.82MB` 的 PNG 图片，在客户端公网访问时 `8s` 超时；但服务器本机访问同一接口仅 `0.004s` 左右。
 
@@ -13,7 +14,7 @@
 ## 2. 测试环境
 
 - 测试日期：2026-07-01
-- 服务器公网 IP：`43.128.120.182`
+- 服务器公网 IP：`64.83.17.240`（`ai.reeko.net.cn` A 记录）
 - 服务端路径示例：
   - 原图：`/_gateway/generations/images/req-8c/generated-1.png`
   - 预览图：`/_gateway/generations/images/req-8c/generated-1.preview.webp`
@@ -28,14 +29,14 @@
 测试命令使用登录 cookie 后访问图片接口，结果如下：
 
 ```text
-客户端 -> http://43.128.120.182/_gateway/generations/images/req-8c/generated-1.preview.webp
+客户端 -> http://64.83.17.240/_gateway/generations/images/req-8c/generated-1.preview.webp
 status=200
 total=5726.7ms
 ttfb=1007.8ms
 download=4718.9ms
 bytes=16.1KB
 
-客户端 -> http://43.128.120.182/_gateway/generations/images/req-8c/generated-1.png
+客户端 -> http://64.83.17.240/_gateway/generations/images/req-8c/generated-1.png
 结果：8s 超时
 文件大小：1.82MB
 ```
@@ -80,16 +81,16 @@ read_avg=1.122ms
 
 ### 3.4 服务器本机访问自己的公网 IP
 
-在服务器本机访问 `43.128.120.182` 公网地址：
+在服务器本机访问 `64.83.17.240` 公网地址：
 
 ```text
-服务器 -> http://43.128.120.182/assets/index-CF9sA3QM.js
+服务器 -> http://64.83.17.240/assets/index-CF9sA3QM.js
 status=200
 total=0.008997s
 size=259499
 speed=32437375 bytes/s
 
-服务器 -> http://43.128.120.182/_gateway/generations/images/req-8c/generated-1.png
+服务器 -> http://64.83.17.240/_gateway/generations/images/req-8c/generated-1.png
 status=200
 total=0.028239s
 size=1820695
@@ -137,7 +138,7 @@ curl -o /dev/null -s -w \
 ```bash
 curl -o /dev/null -s -w \
   "status=%{http_code} dns=%{time_namelookup}s connect=%{time_connect}s start=%{time_starttransfer}s total=%{time_total}s size=%{size_download} speed=%{speed_download}\n" \
-  http://43.128.120.182/assets/index-CF9sA3QM.js
+  http://64.83.17.240/assets/index-CF9sA3QM.js
 ```
 
 静态 JS 不需要业务登录，适合服务商直接复测。
@@ -147,7 +148,7 @@ curl -o /dev/null -s -w \
 请协助检查：
 
 1. 云服务器公网带宽上限、实际限速、突发带宽策略是否异常。
-2. 公网 IP `43.128.120.182` 的入站/出站链路是否存在丢包、拥塞或清洗限速。
+2. 公网 IP `64.83.17.240` 的入站/出站链路是否存在丢包、拥塞或清洗限速。
 3. 该 IP 到中国大陆常见运营商网络的 HTTP 下载质量。
 4. 是否有安全防护、DDoS 清洗、WAF、边界 NAT、QoS 策略影响大文件响应。
 5. 同机房同线路其他公网 IP 是否也存在类似大文件下载慢的问题。

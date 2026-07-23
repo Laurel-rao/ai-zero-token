@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE_HOST="${REMOTE_HOST:-root@43.128.120.182}"
+REMOTE_HOST="${REMOTE_HOST:-root@64.83.17.240}"
+PUBLIC_URL="${PUBLIC_URL:-http://ai.reeko.net.cn}"
 REMOTE_SRC="${REMOTE_SRC:-/opt/ai-zero-token/src}"
 REMOTE_ENV="${REMOTE_ENV:-/opt/ai-zero-token/.env}"
 REMOTE_STATE="${REMOTE_STATE:-/opt/ai-zero-token/state}"
 IMAGE_NAME="${IMAGE_NAME:-ai-zero-token:local}"
 CONTAINER_NAME="${CONTAINER_NAME:-ai-zero-token}"
-HOST_PORT="${HOST_PORT:-80}"
+HOST_BIND="${HOST_BIND:-127.0.0.1}"
+HOST_PORT="${HOST_PORT:-8787}"
 CONTAINER_PORT="${CONTAINER_PORT:-8787}"
 DEPLOY_MODE="${DEPLOY_MODE:-docker}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-ai-zero-token}"
@@ -21,7 +23,12 @@ npm run build
 
 echo "==> Sync source to ${REMOTE_HOST}:${REMOTE_SRC}"
 rsync -az --delete \
+  --exclude .git \
   --exclude node_modules \
+  --exclude release \
+  --exclude state \
+  --exclude tmp \
+  --exclude exports \
   ./ "${REMOTE_HOST}:${REMOTE_SRC}/"
 
 if [[ "$DEPLOY_MODE" != "docker" && "$DEPLOY_MODE" != "compose" ]]; then
@@ -36,6 +43,7 @@ ssh "$REMOTE_HOST" bash -s -- \
   "$REMOTE_STATE" \
   "$IMAGE_NAME" \
   "$CONTAINER_NAME" \
+  "$HOST_BIND" \
   "$HOST_PORT" \
   "$CONTAINER_PORT" \
   "$DEPLOY_MODE" \
@@ -47,10 +55,11 @@ REMOTE_ENV="$2"
 REMOTE_STATE="$3"
 IMAGE_NAME="$4"
 CONTAINER_NAME="$5"
-HOST_PORT="$6"
-CONTAINER_PORT="$7"
-DEPLOY_MODE="$8"
-COMPOSE_PROJECT_NAME="$9"
+HOST_BIND="$6"
+HOST_PORT="$7"
+CONTAINER_PORT="$8"
+DEPLOY_MODE="$9"
+COMPOSE_PROJECT_NAME="${10}"
 
 cd "$REMOTE_SRC"
 
@@ -85,7 +94,7 @@ else
     --restart unless-stopped \
     --env-file "$REMOTE_ENV" \
     -e AI_ZERO_TOKEN_HOME=/data \
-    -p "${HOST_PORT}:${CONTAINER_PORT}" \
+    -p "${HOST_BIND}:${HOST_PORT}:${CONTAINER_PORT}" \
     -v "${REMOTE_STATE}:/data" \
     "$IMAGE_NAME"
 fi
@@ -96,4 +105,4 @@ curl -s --max-time 10 "http://127.0.0.1:${HOST_PORT}/_gateway/auth/status"
 echo
 REMOTE_SCRIPT
 
-echo "==> Remote deploy done: http://43.128.120.182/"
+echo "==> Remote deploy done: ${PUBLIC_URL%/}/"
