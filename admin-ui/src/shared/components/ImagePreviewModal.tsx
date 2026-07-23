@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Download, Maximize2, Minimize2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Copy, Download, LoaderCircle, Maximize2, Minimize2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { Modal } from "./Modal";
 import type { ModalImage, ModalImageItem } from "@/shared/lib/app-types";
@@ -32,6 +32,62 @@ function clampZoom(value: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(value.toFixed(2))));
 }
 
+function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+      reject(new Error("图片格式转换失败"));
+    }, "image/png");
+  });
+}
+
+async function convertImageToPng(blob: Blob): Promise<Blob> {
+  if (blob.type.toLowerCase() === "image/png") {
+    return blob;
+  }
+
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("当前浏览器无法处理图片格式");
+  }
+
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(blob);
+      try {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        context.drawImage(bitmap, 0, 0);
+      } finally {
+        bitmap.close();
+      }
+      return canvasToPng(canvas);
+    } catch {
+      // Safari and some embedded browsers cannot decode every format with createImageBitmap.
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("图片解码失败"));
+      image.src = objectUrl;
+    });
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    context.drawImage(image, 0, 0);
+    return canvasToPng(canvas);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 export function ImagePreviewModal(props: { image: ModalImage; onClose: () => void }) {
   const gallery = useMemo<ModalImageItem[]>(() => {
     const items = props.image.gallery?.length ? props.image.gallery : [props.image];
@@ -49,7 +105,10 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   const [rotation, setRotation] = useState(0);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isCopying, setIsCopying] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
   const activeImage = gallery[activeIndex] ?? gallery[0] ?? props.image;
   const hasGalleryNavigation = gallery.length > 1;
   const normalizedRotation = ((rotation % 360) + 360) % 360;
@@ -65,6 +124,57 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
     setZoom(1);
     setRotation(0);
     setOffset({ x: 0, y: 0 });
+  };
+
+  const showCopyFeedback = (tone: "success" | "error", message: string) => {
+    if (copyFeedbackTimerRef.current !== null) {
+      window.clearTimeout(copyFeedbackTimerRef.current);
+    }
+    setCopyFeedback({ tone, message });
+    copyFeedbackTimerRef.current = window.setTimeout(() => {
+      setCopyFeedback(null);
+      copyFeedbackTimerRef.current = null;
+    }, tone === "success" ? 2200 : 4200);
+  };
+
+  const copyActiveImage = async () => {
+    if (isCopying) {
+      return;
+    }
+    if (!window.isSecureContext) {
+      showCopyFeedback("error", "当前页面不是安全环境，请使用 HTTPS 后复制");
+      return;
+    }
+    if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+      showCopyFeedback("error", "当前浏览器不支持复制图片");
+      return;
+    }
+
+    setIsCopying(true);
+    setCopyFeedback(null);
+    try {
+      const pngBlob = fetch(activeImage.src, { credentials: "include" }).then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`图片读取失败（${response.status}）`);
+        }
+        const sourceBlob = await response.blob();
+        if (!sourceBlob.type.startsWith("image/")) {
+          throw new Error("读取到的内容不是图片");
+        }
+        return convertImageToPng(sourceBlob);
+      });
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": pngBlob }),
+      ]);
+      showCopyFeedback("success", "图片已复制，可直接粘贴");
+    } catch (error) {
+      const message = error instanceof Error && error.message
+        ? error.message
+        : "复制失败，请检查浏览器剪贴板权限";
+      showCopyFeedback("error", message);
+    } finally {
+      setIsCopying(false);
+    }
   };
 
   const updateZoom = (nextZoom: number) => {
@@ -97,7 +207,14 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
     resetView();
     setImageLoaded(!hasPlaceholder);
     setImageLoadFailed(false);
+    setCopyFeedback(null);
   }, [activeImage.src, hasPlaceholder]);
+
+  useEffect(() => () => {
+    if (copyFeedbackTimerRef.current !== null) {
+      window.clearTimeout(copyFeedbackTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -213,6 +330,16 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
             >
               {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
             </button>
+            <button
+              className={`image-preview-tool${copyFeedback?.tone === "success" ? " is-success" : ""}`}
+              type="button"
+              onClick={() => void copyActiveImage()}
+              disabled={isCopying}
+              title={isCopying ? "正在复制图片" : copyFeedback?.tone === "success" ? "图片已复制" : "复制图片"}
+              aria-label={isCopying ? "正在复制图片" : copyFeedback?.tone === "success" ? "图片已复制" : "复制图片"}
+            >
+              {isCopying ? <LoaderCircle className="spin" size={16} /> : copyFeedback?.tone === "success" ? <Check size={16} /> : <Copy size={16} />}
+            </button>
             <a className="image-preview-tool" href={activeImage.src} download={activeImage.filename || "generated-image.png"} title="下载图片" aria-label="下载图片">
               <Download size={16} />
             </a>
@@ -265,6 +392,11 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
           <span className="image-preview-loading">正在加载原图...</span>
         ) : null}
         {imageLoadFailed ? <span className="image-preview-loading is-error">原图加载失败，正在显示预览图</span> : null}
+        {copyFeedback ? (
+          <span className={`image-preview-copy-feedback is-${copyFeedback.tone}`} role="status" aria-live="polite">
+            {copyFeedback.message}
+          </span>
+        ) : null}
       </div>
     </Modal>
   );

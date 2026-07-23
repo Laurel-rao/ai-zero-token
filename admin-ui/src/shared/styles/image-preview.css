@@ -133,6 +133,12 @@
   opacity: 0.45;
 }
 
+.image-preview-tool.is-success {
+  color: #15803d;
+  border-color: rgba(21, 128, 61, 0.3);
+  background: #f0fdf4;
+}
+
 .image-preview-tool:focus-visible {
   outline: 3px solid rgba(99, 91, 255, 0.22);
   outline-offset: 2px;
@@ -252,6 +258,32 @@
 
 .image-preview-loading.is-error {
   background: rgba(153, 27, 27, 0.82);
+}
+
+.image-preview-copy-feedback {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 4;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  padding: 8px 13px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+}
+
+.image-preview-copy-feedback.is-success {
+  background: rgba(21, 128, 61, 0.9);
+}
+
+.image-preview-copy-feedback.is-error {
+  background: rgba(153, 27, 27, 0.9);
 }
 
 .image-preview-stage.is-quarter-turn img {
