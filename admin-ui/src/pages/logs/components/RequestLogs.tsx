@@ -190,6 +190,34 @@ export function RequestLogs(props: {
           </tbody>
         </table>
       </div>
+      <div className="mobile-log-list" aria-label="请求日志列表">
+        {filteredLogs.length === 0 ? (
+          <div className="mobile-log-empty">最近 API 请求会在这里显示。</div>
+        ) : (
+          filteredLogs.map((item) => (
+            <button
+              className={`mobile-log-card ${item.id === selectedLog?.id ? "is-selected" : ""}`}
+              type="button"
+              key={item.id}
+              onClick={() => setSelectedId(item.id)}
+              aria-pressed={item.id === selectedLog?.id}
+            >
+              <span className="mobile-log-card-head">
+                <span className={`method-pill method-${item.method.toLowerCase()}`}>{item.method}</span>
+                <span className={`status-pill ${item.statusCode >= 400 ? "is-error" : "is-ok"}`}>{item.statusCode}</span>
+                <time dateTime={new Date(item.time).toISOString()}>{formatTime(item.time)}</time>
+              </span>
+              <code>{item.endpoint}</code>
+              <span className="mobile-log-card-meta">
+                {props.role === "admin" ? <span>{userDisplayName(props.config, item.owner)}</span> : null}
+                <span>{item.model || "未记录模型"}</span>
+                <span>{formatDuration(item.durationMs)}</span>
+                <span>{item.source || "管理页"}</span>
+              </span>
+            </button>
+          ))
+        )}
+      </div>
       <div className="table-footer">当前展示 {filteredLogs.length} 条请求记录，最近总计 {props.logs.length} 条。</div>
       {selectedLog && (
         <div className="log-detail-panel">

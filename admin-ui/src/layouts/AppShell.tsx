@@ -2,6 +2,7 @@ import { AppSidebar } from "./AppSidebar";
 import { AppTopbar } from "./AppTopbar";
 import { AppOverlays } from "./AppOverlays";
 import { RouteRenderer } from "./RouteRenderer";
+import { AppMobileNavigation } from "./AppMobileNavigation";
 import type { UseAdminWorkspaceResult } from "@/hooks/useAdminWorkspace";
 import { useEffect, useState } from "react";
 
@@ -25,8 +26,9 @@ export function AppShell({ workspace }: { workspace: UseAdminWorkspaceResult }) 
   }, [sidebarCollapsed]);
 
   return (
-    <div className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
+    <div className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""} ${workspace.activeRoute === "chat" ? "is-chat-route" : ""}`}>
       <AppSidebar workspace={workspace} collapsed={sidebarCollapsed} onCollapsedChange={setSidebarCollapsed} />
+      <AppMobileNavigation workspace={workspace} />
 
       <main className={`main route-${workspace.activeRoute}`}>
         <AppTopbar workspace={workspace} />

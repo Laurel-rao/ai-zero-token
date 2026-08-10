@@ -79,6 +79,10 @@ td code {
   color: var(--text-muted);
   font-size: 12px;
 }
+
+.mobile-log-list {
+  display: none;
+}
 .log-toolbar {
   display: flex;
   flex-wrap: wrap;
