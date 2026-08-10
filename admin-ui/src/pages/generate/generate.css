@@ -1286,12 +1286,47 @@
 }
 
 .generate-report-user-row {
+  width: 100%;
   min-width: 0;
   padding: 9px 0;
+  border: 0;
   border-top: 1px solid var(--line);
+  border-radius: 7px;
+  color: inherit;
+  background: transparent;
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
   gap: 8px;
+  font: inherit;
+  text-align: left;
+  transition: background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.generate-report-user-row:not(:disabled) {
+  cursor: pointer;
+}
+
+.generate-report-user-row:not(:disabled):hover {
+  background: #f8fafc;
+}
+
+.generate-report-user-row:not(:disabled):focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.28);
+  outline-offset: 1px;
+}
+
+.generate-report-user-row.is-selected {
+  background: #eff6ff;
+  box-shadow: inset 3px 0 #2563eb;
+}
+
+.generate-report-user-row.is-selected .generate-report-user-rank {
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.generate-report-user-row:disabled {
+  opacity: 1;
 }
 
 .generate-report-user-rank {

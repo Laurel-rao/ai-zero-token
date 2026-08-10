@@ -1052,6 +1052,14 @@ export function GeneratePage(props: {
     }
   }
 
+  function toggleReportOwnerFilter(owner: string) {
+    if (props.role !== "admin" || reportLoading) {
+      return;
+    }
+    setHistoryOwnerFilter((current) => current === owner ? "all" : owner);
+    setHistoryPage(1);
+  }
+
   useEffect(() => {
     refreshHistory({ silent: true }).catch(() => undefined);
   }, [historyOwnerFilter, historyPage]);
@@ -2041,25 +2049,36 @@ export function GeneratePage(props: {
               <div className="generate-report-panel-head">
                 <div>
                   <strong>人员使用排行</strong>
-                  <span>按筛选范围内的生图次数排序。</span>
+                  <span>{props.role === "admin" ? "按生图次数排序，点击人员可筛选，再次点击取消。" : "按筛选范围内的生图次数排序。"}</span>
                 </div>
               </div>
               {report.users.length > 0 ? (
                 <div className="generate-report-user-list">
                   {report.users.slice(0, 12).map((item, index) => {
                     const maxRequestCount = report.users[0]?.requestCount ?? 1;
+                    const displayName = userDisplayName(props.config, item.owner);
+                    const selected = historyOwnerFilter === item.owner;
                     return (
-                      <div className="generate-report-user-row" key={item.owner}>
+                      <button
+                        className={`generate-report-user-row ${selected ? "is-selected" : ""}`}
+                        type="button"
+                        key={item.owner}
+                        onClick={() => toggleReportOwnerFilter(item.owner)}
+                        disabled={props.role !== "admin" || reportLoading}
+                        aria-pressed={props.role === "admin" ? selected : undefined}
+                        aria-label={props.role === "admin" ? `${selected ? "取消筛选" : "筛选"}人员：${displayName}` : undefined}
+                        title={props.role === "admin" ? `${selected ? "取消筛选" : "筛选"} ${displayName}` : undefined}
+                      >
                         <span className="generate-report-user-rank">{index + 1}</span>
                         <div className="generate-report-user-main">
                           <div>
-                            <strong>{userDisplayName(props.config, item.owner)}</strong>
+                            <strong>{displayName}</strong>
                             <em>{item.requestCount} 次</em>
                           </div>
                           <small>{item.owner} · {item.imageCount} 张 · 成功率 {percentLabel(item.successRate)}</small>
                           <i><span style={{ width: `${Math.max(3, (item.requestCount / maxRequestCount) * 100)}%` }} /></i>
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
