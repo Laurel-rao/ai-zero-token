@@ -68,7 +68,15 @@ export function RouteRenderer({ workspace }: { workspace: UseAdminWorkspaceResul
         logout={workspace.logout}
       />
     ) : activeRoute === "chat" ? (
-      <ChatPage config={config} busy={busy} setBusy={workspace.setBusy} setStatus={workspace.setStatus} setPreviewImage={workspace.setPreviewImage} />
+      <ChatPage
+        config={config}
+        busy={busy}
+        setBusy={workspace.setBusy}
+        setStatus={workspace.setStatus}
+        setPreviewImage={workspace.setPreviewImage}
+        onExitChat={() => workspace.goRoute(workspace.role === "user" ? "generate" : "overview")}
+        onLogout={workspace.signOut}
+      />
     ) : activeRoute === "generate" ? (
       <GeneratePage
         config={config}

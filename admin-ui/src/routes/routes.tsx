@@ -42,8 +42,8 @@ export function canAccessRoute(route: AppRoute, role?: string | null): boolean {
   return normalizeUserRole(role) === "admin" || userRoutes.has(route);
 }
 
-export function defaultRouteForRole(role?: string | null): AppRoute {
-  return normalizeUserRole(role) === "user" ? "generate" : "accounts";
+export function defaultRouteForRole(_role?: string | null): AppRoute {
+  return "chat";
 }
 
 export function routeFromHashValue(value: string, role?: string | null): AppRoute {

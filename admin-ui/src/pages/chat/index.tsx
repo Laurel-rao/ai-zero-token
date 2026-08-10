@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronUp, Clock3, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Info, Loader2, Maximize2, Menu, MessageSquarePlus, Minimize2, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, TriangleAlert, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Clock3, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Info, LayoutDashboard, Loader2, LogOut, Maximize2, Menu, MessageSquarePlus, Minimize2, MoreHorizontal, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, TriangleAlert, X } from "lucide-react";
 import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 import katex from "katex";
 import rehypeKatex from "rehype-katex";
@@ -20,8 +20,10 @@ const MAX_SPREADSHEET_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 const MAX_OFFICE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 const MAX_TOTAL_BINARY_ATTACHMENT_BYTES = 80 * 1024 * 1024;
 const COLLAPSED_MESSAGE_HEIGHT = 420;
+const MOBILE_COLLAPSED_MESSAGE_SCREENS = 2;
+const MOBILE_CHAT_BREAKPOINT = 900;
 const COPY_FEEDBACK_MS = 1400;
-const CHAT_BOTTOM_THRESHOLD = 96;
+const CHAT_BOTTOM_THRESHOLD = 160;
 const COMPOSER_MAX_HEIGHT = 150;
 const CHAT_HISTORY_LIMIT = 100;
 const CHAT_MESSAGE_PAGE_SIZE = 80;
@@ -34,6 +36,20 @@ const CHAT_IMAGE_POLL_INTERVAL_MS = 2000;
 const CHAT_IMAGE_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const CHAT_IMAGE_PROMPT_MAX_LENGTH = 8000;
 const HTML_PREVIEW_CSP = "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src data: blob:; child-src data: blob:; form-action 'none'; base-uri 'none'";
+
+function collapsedMessageHeight(): number {
+  if (typeof window === "undefined" || !window.matchMedia(`(max-width: ${MOBILE_CHAT_BREAKPOINT}px)`).matches) {
+    return COLLAPSED_MESSAGE_HEIGHT;
+  }
+
+  const viewportHeight = Math.max(
+    window.innerHeight,
+    document.documentElement.clientHeight,
+    window.visualViewport?.height ?? 0,
+  );
+  return Math.max(COLLAPSED_MESSAGE_HEIGHT, Math.round(viewportHeight * MOBILE_COLLAPSED_MESSAGE_SCREENS));
+}
+
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -135,6 +151,15 @@ type ChatSseEvent = {
 type PendingChatStart = {
   userMessageId: string;
   assistantMessageId: string;
+};
+
+type QueuedChatSubmission = {
+  id: string;
+  conversationId: string;
+  content: string;
+  attachments: ChatAttachment[];
+  model: string;
+  queuedAt: number;
 };
 
 type ChatImageActionState = {
@@ -270,6 +295,17 @@ function eventRecord(value: unknown): Record<string, unknown> {
 
 function conversationTimestamp(item?: ChatConversation | null): string {
   return item?.updatedAt ? formatFullTime(item.updatedAt) : "-";
+}
+
+function formatHourMinute(timestamp?: number): string {
+  if (!timestamp) {
+    return "-";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp));
 }
 
 function formatRelativeConversationTime(timestamp: number, now: number): string {
@@ -1076,8 +1112,10 @@ function ChatMessageContent(props: {
   onPreviewImage: (image: ModalImage) => void;
 }) {
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const wasRunningRef = useRef(props.status === "running");
   const [expanded, setExpanded] = useState(false);
   const [canCollapse, setCanCollapse] = useState(false);
+  const [collapseHeight] = useState(collapsedMessageHeight);
   const displayContent = props.content || (props.status === "running" ? "正在思考..." : "");
   const normalizedDisplayContent = useMemo(() => normalizeMarkdownMathDelimiters(displayContent), [displayContent]);
   const collapsed = canCollapse && !expanded && props.status !== "running";
@@ -1103,12 +1141,21 @@ function ChatMessageContent(props: {
 
   useEffect(() => {
     setExpanded(false);
+    wasRunningRef.current = props.status === "running";
   }, [props.id]);
 
   useEffect(() => {
     if (props.status === "running") {
+      wasRunningRef.current = true;
       setCanCollapse(false);
       return;
+    }
+
+    if (wasRunningRef.current) {
+      // Keep the response expanded when streaming finishes so the content height
+      // does not suddenly shrink while the user is following the latest output.
+      wasRunningRef.current = false;
+      setExpanded(true);
     }
 
     const node = contentRef.current;
@@ -1117,14 +1164,14 @@ function ChatMessageContent(props: {
     }
 
     const measure = () => {
-      setCanCollapse(node.scrollHeight > COLLAPSED_MESSAGE_HEIGHT + 24);
+      setCanCollapse(node.scrollHeight > collapseHeight + 24);
     };
 
     measure();
     const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     resizeObserver?.observe(node);
     return () => resizeObserver?.disconnect();
-  }, [displayContent, props.status]);
+  }, [collapseHeight, displayContent, props.status]);
 
   if (!displayContent) {
     return null;
@@ -1135,7 +1182,7 @@ function ChatMessageContent(props: {
       <div
         ref={contentRef}
         className="chat-markdown"
-        style={collapsed ? { maxHeight: COLLAPSED_MESSAGE_HEIGHT } : undefined}
+        style={collapsed ? { maxHeight: collapseHeight } : undefined}
       >
         <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={markdownComponents} skipHtml>
           {normalizedDisplayContent}
@@ -1162,6 +1209,8 @@ export function ChatPage(props: {
   setBusy: (value: BusyAction) => void;
   setStatus: (value: string) => void;
   setPreviewImage: (value: ModalImage | null) => void;
+  onExitChat: () => void;
+  onLogout: () => void | Promise<void>;
 }) {
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -1177,6 +1226,7 @@ export function ChatPage(props: {
   const [pendingAttachmentFiles, setPendingAttachmentFiles] = useState<PendingAttachmentFile[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [detailConversationId, setDetailConversationId] = useState<string | null>(null);
@@ -1191,7 +1241,11 @@ export function ChatPage(props: {
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  const [queuedSubmissions, setQueuedSubmissions] = useState<Record<string, QueuedChatSubmission[]>>({});
   const streamControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const queuedSubmissionsRef = useRef<Map<string, QueuedChatSubmission[]>>(new Map());
+  const chatPageRef = useRef<HTMLElement | null>(null);
+  const mobileMenuRef = useRef<HTMLDivElement | null>(null);
   const conversationLoadAbortRef = useRef<AbortController | null>(null);
   const copyMessageTimerRef = useRef<number | null>(null);
   const copyHtmlTimerRef = useRef<number | null>(null);
@@ -1205,6 +1259,7 @@ export function ChatPage(props: {
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const bottomScrollInProgressRef = useRef(false);
+  const bottomScrollFrameRef = useRef<number | null>(null);
   const bottomScrollTimerRef = useRef<number | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<ChatConversation[]>([]);
@@ -1219,8 +1274,12 @@ export function ChatPage(props: {
   const activeCachedConversation = activeId ? conversationCacheRef.current.get(activeId) ?? null : null;
   const canLoadOlderMessages = Boolean((activeCachedConversation ?? activeConversation)?.hasMoreMessages && messages.length > 0);
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
+  const selectableTextModels = textModels.length > 0
+    ? textModels
+    : [{ id: props.config?.settings.defaultModel || "gpt-5.4", name: props.config?.settings.defaultModel || "gpt-5.4", input: ["text" as const], provider: "openai-codex", source: "default" }];
   const activeConversationSending = activeId ? sendingConversationIds.has(activeId) : creatingConversationStream;
-  const canSend = (input.trim().length > 0 || attachments.length > 0) && !uploadingAttachments && !activeConversationSending;
+  const activeQueuedSubmissions = activeId ? queuedSubmissions[activeId] ?? [] : [];
+  const canSend = (input.trim().length > 0 || attachments.length > 0) && !uploadingAttachments && (!creatingConversationStream || Boolean(activeId));
   const isLoadingActiveConversation = Boolean(activeId && loadingConversationId === activeId);
   const attachmentNoticeStatus = attachmentNoticeTone(attachmentNotice, uploadingAttachments);
 
@@ -1253,8 +1312,81 @@ export function ChatPage(props: {
       if (bottomScrollTimerRef.current) {
         window.clearTimeout(bottomScrollTimerRef.current);
       }
+      if (bottomScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomScrollFrameRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    const root = chatPageRef.current;
+    if (!root) {
+      return;
+    }
+    const viewport = window.visualViewport;
+    let frame = 0;
+    let restingViewportHeight = Math.round(viewport?.height ?? window.innerHeight);
+    const updateViewport = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const viewportHeight = Math.round(viewport?.height ?? window.innerHeight);
+        const viewportOffsetTop = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
+        const layoutHeight = Math.round(document.documentElement.clientHeight || window.innerHeight);
+        const composerFocused = document.activeElement === composerRef.current;
+        const keyboardOpen = Boolean(viewport && (
+          layoutHeight - viewportHeight - viewportOffsetTop > 120
+          || composerFocused && restingViewportHeight - viewportHeight > 120
+        ));
+        if (!composerFocused) {
+          restingViewportHeight = viewportHeight;
+        }
+        root.style.setProperty("--chat-viewport-height", `${viewportHeight}px`);
+        root.style.setProperty("--chat-viewport-offset-top", `${viewportOffsetTop}px`);
+        root.dataset.keyboardOpen = keyboardOpen ? "true" : "false";
+        if (shouldStickToBottomRef.current) {
+          scrollMessagesToBottom();
+        } else {
+          updateStickToBottom();
+        }
+      });
+    };
+
+    updateViewport();
+    viewport?.addEventListener("resize", updateViewport);
+    viewport?.addEventListener("scroll", updateViewport);
+    window.addEventListener("resize", updateViewport);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      viewport?.removeEventListener("resize", updateViewport);
+      viewport?.removeEventListener("scroll", updateViewport);
+      window.removeEventListener("resize", updateViewport);
+      root.style.removeProperty("--chat-viewport-height");
+      root.style.removeProperty("--chat-viewport-offset-top");
+      delete root.dataset.keyboardOpen;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) {
+      return;
+    }
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      if (!mobileMenuRef.current?.contains(event.target as Node)) {
+        setMobileMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePress);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [mobileMenuOpen]);
 
   useEffect(() => {
     if (!shouldStickToBottomRef.current) {
@@ -1429,7 +1561,11 @@ export function ChatPage(props: {
     if (bottomScrollTimerRef.current) {
       window.clearTimeout(bottomScrollTimerRef.current);
     }
-    requestAnimationFrame(() => {
+    if (bottomScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(bottomScrollFrameRef.current);
+    }
+    bottomScrollFrameRef.current = requestAnimationFrame(() => {
+      bottomScrollFrameRef.current = null;
       node.scrollTo({ top: node.scrollHeight, behavior });
       lastScrollTopRef.current = node.scrollTop;
       bottomScrollTimerRef.current = window.setTimeout(() => {
@@ -1444,10 +1580,18 @@ export function ChatPage(props: {
   }
 
   function cancelBottomScroll() {
+    shouldStickToBottomRef.current = false;
     bottomScrollInProgressRef.current = false;
+    if (bottomScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(bottomScrollFrameRef.current);
+      bottomScrollFrameRef.current = null;
+    }
     if (bottomScrollTimerRef.current) {
       window.clearTimeout(bottomScrollTimerRef.current);
       bottomScrollTimerRef.current = null;
+    }
+    if (messagesScrollRef.current) {
+      lastScrollTopRef.current = messagesScrollRef.current.scrollTop;
     }
   }
 
@@ -1532,6 +1676,44 @@ export function ChatPage(props: {
     }
     streamControllersRef.current.delete(conversationId);
     setSendingConversationIds(new Set(streamControllersRef.current.keys()));
+  }
+
+  function replaceConversationQueue(conversationId: string, submissions: QueuedChatSubmission[]) {
+    if (submissions.length > 0) {
+      queuedSubmissionsRef.current.set(conversationId, submissions);
+    } else {
+      queuedSubmissionsRef.current.delete(conversationId);
+    }
+    setQueuedSubmissions((current) => {
+      const next = { ...current };
+      if (submissions.length > 0) {
+        next[conversationId] = submissions;
+      } else {
+        delete next[conversationId];
+      }
+      return next;
+    });
+  }
+
+  function enqueueSubmission(submission: QueuedChatSubmission) {
+    const current = queuedSubmissionsRef.current.get(submission.conversationId) ?? [];
+    replaceConversationQueue(submission.conversationId, [...current, submission]);
+  }
+
+  function takeNextQueuedSubmission(conversationId: string): QueuedChatSubmission | null {
+    const current = queuedSubmissionsRef.current.get(conversationId) ?? [];
+    const [next, ...remaining] = current;
+    if (!next) {
+      return null;
+    }
+    replaceConversationQueue(conversationId, remaining);
+    return next;
+  }
+
+  function removeQueuedSubmission(conversationId: string, submissionId: string) {
+    const current = queuedSubmissionsRef.current.get(conversationId) ?? [];
+    replaceConversationQueue(conversationId, current.filter((item) => item.id !== submissionId));
+    setConversationStatus(conversationId, "已移除待发送消息。");
   }
 
   function setConversationStatus(conversationId: string, status: string) {
@@ -1749,8 +1931,8 @@ export function ChatPage(props: {
     }
   }
 
-  async function renameConversation(id: string) {
-    const title = editingTitle.trim();
+  async function renameConversation(id: string, requestedTitle = editingTitle) {
+    const title = requestedTitle.trim();
     if (!title) {
       return;
     }
@@ -1768,10 +1950,22 @@ export function ChatPage(props: {
     }
   }
 
+  function renameActiveConversation() {
+    if (!activeConversation) {
+      return;
+    }
+    const title = window.prompt("重命名会话", activeConversation.title)?.trim();
+    if (!title || title === activeConversation.title) {
+      return;
+    }
+    setMobileMenuOpen(false);
+    void renameConversation(activeConversation.id, title);
+  }
+
   async function deleteConversation(id: string) {
     const target = conversations.find((item) => item.id === id);
-    if (streamControllersRef.current.has(id)) {
-      props.setStatus("请先停止该会话正在生成的回复，再删除会话。");
+    if (streamControllersRef.current.has(id) || (queuedSubmissionsRef.current.get(id)?.length ?? 0) > 0) {
+      props.setStatus("请先停止回复并清空该会话的待发送队列，再删除会话。");
       return;
     }
     if (!window.confirm(`确认删除会话“${target?.title || "未命名会话"}”？删除后无法恢复。`)) {
@@ -2309,44 +2503,43 @@ export function ChatPage(props: {
     parsed.events.forEach((event) => applyStreamEvent(event, conversationId));
   }
 
-  async function sendMessage() {
-    const content = input.trim();
-    const sendingAttachments = attachments;
-    if (!canSend || (!content && sendingAttachments.length === 0)) {
-      return;
-    }
-    const initialConversationId = activeId;
-    if (initialConversationId && streamControllersRef.current.has(initialConversationId)) {
-      return;
-    }
-    shouldStickToBottomRef.current = true;
+  function createChatSubmission(conversationId: string, content: string, sendingAttachments: ChatAttachment[]): QueuedChatSubmission {
+    const queuedAt = Date.now();
+    return {
+      id: `${queuedAt}-${Math.random().toString(36).slice(2, 9)}`,
+      conversationId,
+      content,
+      attachments: sendingAttachments,
+      model: model || props.config?.settings.defaultModel || "",
+      queuedAt,
+    };
+  }
+
+  function clearSubmittedComposer(content: string) {
     setInput((value) => value.trim() === content ? "" : value);
     setAttachments([]);
     setPendingAttachmentFiles([]);
     setUploadingAttachments(false);
     setAttachmentNotice("");
-    if (!initialConversationId) {
-      setCreatingConversationStream(true);
+  }
+
+  function continueConversationQueue(conversationId: string) {
+    const next = takeNextQueuedSubmission(conversationId);
+    if (next) {
+      setConversationStatus(conversationId, "正在发送下一条队列消息...");
+      void runChatSubmission(next);
+    } else if (activeIdRef.current === conversationId) {
+      focusComposer();
     }
-    props.setStatus(activeId ? "正在等待回复..." : "正在创建聊天...");
-    let targetId = initialConversationId;
-    if (!targetId) {
-      const created = await createConversation({ clearInput: false, silent: true });
-      targetId = created?.id ?? null;
-    }
-    if (!targetId) {
-      const message = "发送失败：未能创建聊天，请稍后重试。";
-      setAttachmentNotice(message);
-      props.setStatus(message);
-      setCreatingConversationStream(false);
-      setInput((value) => value || content);
-      setAttachments((items) => items.length > 0 ? items : sendingAttachments);
-      return;
-    }
+  }
+
+  async function runChatSubmission(submission: QueuedChatSubmission) {
+    const { conversationId: targetId, content, attachments: sendingAttachments } = submission;
+    shouldStickToBottomRef.current = true;
     const now = Date.now();
     const pendingStart: PendingChatStart = {
-      userMessageId: `local-user-${now}`,
-      assistantMessageId: `local-assistant-${now}`,
+      userMessageId: `local-user-${submission.id}`,
+      assistantMessageId: `local-assistant-${submission.id}`,
     };
     const optimisticMessages: ChatMessage[] = [
       {
@@ -2356,7 +2549,7 @@ export function ChatPage(props: {
         content,
         attachments: sendingAttachments,
         status: "success",
-        model: model || props.config?.settings.defaultModel,
+        model: submission.model,
         createdAt: now,
         updatedAt: now,
       },
@@ -2367,7 +2560,7 @@ export function ChatPage(props: {
         content: "",
         attachments: [],
         status: "running",
-        model: model || props.config?.settings.defaultModel,
+        model: submission.model,
         createdAt: now + 1,
         updatedAt: now + 1,
       },
@@ -2379,13 +2572,13 @@ export function ChatPage(props: {
     const controller = new AbortController();
     registerConversationStream(targetId, controller);
     setCreatingConversationStream(false);
-    props.setStatus("正在等待回复...");
+    setConversationStatus(targetId, "正在等待回复...");
     try {
       const response = await fetch(`/_gateway/chats/${encodeURIComponent(targetId)}/messages/stream`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, attachments: sendingAttachments, model: model || props.config?.settings.defaultModel }),
+        body: JSON.stringify({ content, attachments: sendingAttachments, model: submission.model }),
         signal: controller.signal,
       });
       await readChatStream(response, targetId);
@@ -2400,16 +2593,54 @@ export function ChatPage(props: {
         if (activeIdRef.current === targetId) {
           setAttachmentNotice(message);
           props.setStatus(message);
-          setInput((value) => value || content);
-          setAttachments((items) => items.length > 0 ? items : sendingAttachments);
+          if ((queuedSubmissionsRef.current.get(targetId)?.length ?? 0) === 0) {
+            setInput((value) => value || content);
+            setAttachments((items) => items.length > 0 ? items : sendingAttachments);
+          }
         }
       }
     } finally {
       unregisterConversationStream(targetId, controller);
-      if (activeIdRef.current === targetId) {
-        focusComposer();
-      }
+      continueConversationQueue(targetId);
     }
+  }
+
+  async function sendMessage() {
+    const content = input.trim();
+    const sendingAttachments = attachments;
+    if ((!content && sendingAttachments.length === 0) || uploadingAttachments || creatingConversationStream && !activeIdRef.current) {
+      return;
+    }
+    const initialConversationId = activeIdRef.current;
+    if (initialConversationId && streamControllersRef.current.has(initialConversationId)) {
+      const submission = createChatSubmission(initialConversationId, content, sendingAttachments);
+      clearSubmittedComposer(content);
+      enqueueSubmission(submission);
+      const queueLength = queuedSubmissionsRef.current.get(initialConversationId)?.length ?? 0;
+      setConversationStatus(initialConversationId, `已加入发送队列（第 ${queueLength} 条）。`);
+      focusComposer();
+      return;
+    }
+    clearSubmittedComposer(content);
+    if (!initialConversationId) {
+      setCreatingConversationStream(true);
+    }
+    props.setStatus(initialConversationId ? "正在等待回复..." : "正在创建聊天...");
+    let targetId = initialConversationId;
+    if (!targetId) {
+      const created = await createConversation({ clearInput: false, silent: true });
+      targetId = created?.id ?? null;
+    }
+    if (!targetId) {
+      const message = "发送失败：未能创建聊天，请稍后重试。";
+      setAttachmentNotice(message);
+      props.setStatus(message);
+      setCreatingConversationStream(false);
+      setInput((value) => value || content);
+      setAttachments((items) => items.length > 0 ? items : sendingAttachments);
+      return;
+    }
+    await runChatSubmission(createChatSubmission(targetId, content, sendingAttachments));
   }
 
   async function retryMessage(message: ChatMessage) {
@@ -2440,9 +2671,7 @@ export function ChatPage(props: {
       }
     } finally {
       unregisterConversationStream(targetId, controller);
-      if (activeIdRef.current === targetId) {
-        focusComposer();
-      }
+      continueConversationQueue(targetId);
     }
   }
 
@@ -2478,9 +2707,7 @@ export function ChatPage(props: {
       }
     } finally {
       unregisterConversationStream(targetId, controller);
-      if (activeIdRef.current === targetId) {
-        focusComposer();
-      }
+      continueConversationQueue(targetId);
     }
   }
 
@@ -2497,9 +2724,6 @@ export function ChatPage(props: {
     if (event.key === "Enter" && !event.shiftKey) {
       const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
       if (composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229) {
-        return;
-      }
-      if (activeConversationSending) {
         return;
       }
       event.preventDefault();
@@ -2523,7 +2747,12 @@ export function ChatPage(props: {
       return;
     }
     const scrollingUp = node.scrollTop < lastScrollTopRef.current - 2;
-    shouldStickToBottomRef.current = nearBottom && !scrollingUp;
+    const scrollingDown = node.scrollTop > lastScrollTopRef.current + 2;
+    // While streaming, an explicit downward scroll means the user wants to
+    // catch up with the moving bottom even if newly appended content has
+    // already pushed it beyond the normal near-bottom threshold.
+    const followingStreamingOutput = activeConversationSending && scrollingDown;
+    shouldStickToBottomRef.current = !scrollingUp && (nearBottom || followingStreamingOutput);
     setIsNearBottom(nearBottom);
     lastScrollTopRef.current = node.scrollTop;
   }
@@ -2582,6 +2811,29 @@ export function ChatPage(props: {
 
   function openChatImagePreview(images: PreviewImage[], index: number) {
     const gallery = chatGeneratedPreviewItems(images);
+    const active = gallery[index];
+    if (!active) {
+      return;
+    }
+    props.setPreviewImage({ ...active, gallery, index });
+  }
+
+  function openChatAttachmentPreview(messageAttachments: ChatAttachment[], attachmentId: string) {
+    const gallery = messageAttachments
+      .filter((attachment) => attachment.kind === "image" && Boolean(attachmentImageSrc(attachment)))
+      .map<ModalImageItem>((attachment) => {
+        const previewSrc = attachment.previewUrl || "";
+        const fullSrc = attachment.url || attachment.dataUrl || previewSrc;
+        return {
+          src: fullSrc,
+          placeholderSrc: previewSrc && previewSrc !== fullSrc ? previewSrc : undefined,
+          filename: attachment.name,
+          meta: `${attachmentKindLabel(attachment.name, attachment.kind)} · ${formatFileSize(attachment.size)}`,
+        };
+      });
+    const index = messageAttachments
+      .filter((attachment) => attachment.kind === "image" && Boolean(attachmentImageSrc(attachment)))
+      .findIndex((attachment) => attachment.id === attachmentId);
     const active = gallery[index];
     if (!active) {
       return;
@@ -2695,13 +2947,18 @@ export function ChatPage(props: {
   }
 
   return (
-    <section className="chat-page">
-      <aside className={`chat-history ${historyOpen ? "is-open" : ""}`}>
+    <section className="chat-page" ref={chatPageRef}>
+      <aside className={`chat-history ${historyOpen ? "is-open" : ""}`} aria-label="会话列表">
         <div className="chat-history-head">
-          <strong>聊天</strong>
-          <button className="btn-secondary icon-only" type="button" onClick={() => void createConversation()} title="新建聊天">
-            <MessageSquarePlus size={17} />
-          </button>
+          <strong>会话</strong>
+          <div className="chat-history-head-actions">
+            <button className="btn-secondary icon-only" type="button" onClick={() => void createConversation()} title="新建聊天" aria-label="新建聊天">
+              <MessageSquarePlus size={17} />
+            </button>
+            <button className="btn-secondary icon-only chat-history-close" type="button" onClick={() => setHistoryOpen(false)} title="关闭会话列表" aria-label="关闭会话列表">
+              <X size={17} />
+            </button>
+          </div>
         </div>
         <div className="chat-history-list">
           {loading ? <div className="chat-history-empty">正在读取历史...</div> : null}
@@ -2742,6 +2999,7 @@ export function ChatPage(props: {
           ))}
         </div>
       </aside>
+      {historyOpen ? <button className="chat-history-backdrop" type="button" onClick={() => setHistoryOpen(false)} aria-label="关闭会话列表" /> : null}
 
       <div
         className={`chat-main ${draggingFiles ? "is-dragging-files" : ""}`}
@@ -2757,24 +3015,75 @@ export function ChatPage(props: {
             <span>{SUPPORTED_ATTACHMENT_HINT}</span>
           </div>
         ) : null}
-        <div className="chat-topbar">
-          <button className="btn-secondary icon-only chat-history-toggle" type="button" onClick={() => setHistoryOpen((value) => !value)} title="聊天历史">
+        <header className="chat-topbar chat-header">
+          <button className="btn-secondary icon-only chat-history-toggle" type="button" onClick={() => { setMobileMenuOpen(false); setHistoryOpen((value) => !value); }} title="会话列表" aria-label="打开会话列表">
             <Menu size={17} />
           </button>
-          <div>
+          <div className="chat-header-copy">
             <strong>{activeConversation?.title || "聊天"}</strong>
             <span>{activeConversation ? `${activeConversation.messageCount} 条消息 · ${conversationTimestamp(activeConversation)}` : "直接输入即可开始新聊天"}</span>
           </div>
-          <select className="control chat-model-select" value={model} onChange={(event) => setModel(event.target.value)}>
-            {(textModels.length > 0 ? textModels : [{ id: props.config?.settings.defaultModel || "gpt-5.4", name: props.config?.settings.defaultModel || "gpt-5.4", input: ["text" as const], provider: "openai-codex", source: "default" }]).map((item) => (
+          <select className="control chat-model-select" value={model} onChange={(event) => setModel(event.target.value)} aria-label="选择聊天模型">
+            {selectableTextModels.map((item) => (
               <option key={item.id} value={item.id}>{item.id}</option>
             ))}
           </select>
-        </div>
+          <div className="chat-mobile-menu" ref={mobileMenuRef}>
+            <button
+              className="btn-secondary icon-only chat-mobile-more"
+              type="button"
+              onClick={() => setMobileMenuOpen((value) => !value)}
+              aria-label="更多聊天操作"
+              aria-haspopup="dialog"
+              aria-expanded={mobileMenuOpen}
+            >
+              <MoreHorizontal size={19} />
+            </button>
+            {mobileMenuOpen ? (
+              <div className="chat-mobile-menu-popover" role="dialog" aria-label="聊天设置和操作">
+                <div className="chat-mobile-model-setting">
+                  <label htmlFor="chat-mobile-model-select">聊天模型</label>
+                  <select
+                    id="chat-mobile-model-select"
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                    aria-label="选择聊天模型"
+                  >
+                    {selectableTextModels.map((item) => (
+                      <option key={item.id} value={item.id}>{item.id}</option>
+                    ))}
+                  </select>
+                </div>
+                <span className="chat-mobile-menu-separator" />
+                <button type="button" onClick={() => { setMobileMenuOpen(false); void createConversation(); }}>
+                  <MessageSquarePlus size={17} />
+                  新建会话
+                </button>
+                <button type="button" onClick={() => { if (activeId) { setDetailConversationId(activeId); } setMobileMenuOpen(false); }} disabled={!activeId}>
+                  <Info size={17} />
+                  会话详情
+                </button>
+                <button type="button" onClick={renameActiveConversation} disabled={!activeId}>
+                  <Pencil size={17} />
+                  重命名会话
+                </button>
+                <span className="chat-mobile-menu-separator" />
+                <button type="button" onClick={() => { setMobileMenuOpen(false); props.onExitChat(); }}>
+                  <LayoutDashboard size={17} />
+                  返回管理台
+                </button>
+                <button type="button" onClick={() => { setMobileMenuOpen(false); void props.onLogout(); }} disabled={props.busy === "logout"}>
+                  <LogOut size={17} />
+                  退出登录
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </header>
 
         <div className="chat-messages-wrap">
           <div
-            className="chat-messages"
+            className="chat-messages message-list"
             ref={messagesScrollRef}
             onScroll={updateStickToBottom}
             onWheel={cancelBottomScroll}
@@ -2801,7 +3110,8 @@ export function ChatPage(props: {
                 <div className="chat-message-body">
                   <div className="chat-message-meta">
                     <strong>{message.role === "assistant" ? "AI Zero Token" : "你"}</strong>
-                    <span>{formatFullTime(message.createdAt)}</span>
+                    <time className="chat-message-time is-full" dateTime={new Date(message.createdAt).toISOString()}>{formatFullTime(message.createdAt)}</time>
+                    <time className="chat-message-time is-compact" dateTime={new Date(message.createdAt).toISOString()} title={formatFullTime(message.createdAt)}>{formatHourMinute(message.createdAt)}</time>
                     {message.status === "running" ? <em>生成中</em> : null}
                     {message.status === "failed" ? <em className="is-error">失败</em> : null}
                     <button
@@ -2813,21 +3123,21 @@ export function ChatPage(props: {
                       aria-label="复制整条消息"
                     >
                       {copiedMessageId === message.id ? <Check size={14} /> : <Copy size={14} />}
-                      {copiedMessageId === message.id ? "已复制" : "复制"}
+                      <span className="chat-action-label">{copiedMessageId === message.id ? "已复制" : "复制"}</span>
                     </button>
                     {message.role === "assistant" && message.status === "failed" ? (
-                      <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={activeConversationSending} title="重新生成">
+                      <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={activeConversationSending} title="重新生成" aria-label="重新生成">
                         <RefreshCw size={14} />
-                        重发
+                        <span className="chat-action-label">重发</span>
                       </button>
                     ) : null}
                     {message.role === "assistant" && message.status === "success" && imageActions[message.id]?.status === "checking" ? (
                       <em>识别生图</em>
                     ) : null}
                     {message.role === "assistant" && message.status === "success" && imageActions[message.id]?.status === "ready" ? (
-                      <button className="chat-retry-btn chat-image-generate-btn" type="button" onClick={() => void generateFromChatMessage(message)} disabled={activeConversationSending} title="根据这条回复生图">
+                      <button className="chat-retry-btn chat-image-generate-btn" type="button" onClick={() => void generateFromChatMessage(message)} disabled={activeConversationSending} title="根据这条回复生图" aria-label="根据这条回复生图">
                         <ImageIcon size={14} />
-                        生图
+                        <span className="chat-action-label">生图</span>
                       </button>
                     ) : null}
                     {message.role === "user" && message.status === "success" ? (
@@ -2837,9 +3147,10 @@ export function ChatPage(props: {
                         onClick={() => setEditingMessage({ id: message.id, content: message.content })}
                         disabled={activeConversationSending}
                         title="编辑并从此处重新生成"
+                        aria-label="编辑并从此处重新生成"
                       >
                         <Pencil size={14} />
-                        编辑
+                        <span className="chat-action-label">编辑</span>
                       </button>
                     ) : null}
                   </div>
@@ -2876,20 +3187,31 @@ export function ChatPage(props: {
                   {(message.attachments ?? []).length > 0 ? (
                     <div className="chat-message-attachments" aria-label="消息附件">
                       {(message.attachments ?? []).map((attachment) => (
-                        <div className={`chat-message-attachment is-${attachment.kind}`} key={attachment.id}>
-                          {attachment.kind === "image" && attachmentImageSrc(attachment) ? (
+                        attachment.kind === "image" && attachmentImageSrc(attachment) ? (
+                          <button
+                            className="chat-message-attachment is-image"
+                            type="button"
+                            key={attachment.id}
+                            onClick={() => openChatAttachmentPreview(message.attachments ?? [], attachment.id)}
+                            title={`查看图片 ${attachment.name}`}
+                            aria-label={`使用图片查看器查看 ${attachment.name}`}
+                          >
                             <img src={attachmentImageSrc(attachment)} alt={attachment.name} />
-                          ) : (
+                            <span>{attachment.name}</span>
+                            <em>{attachmentKindLabel(attachment.name, attachment.kind)} · {formatFileSize(attachment.size)}</em>
+                          </button>
+                        ) : (
+                          <div className={`chat-message-attachment is-${attachment.kind}`} key={attachment.id}>
                             <FileText size={16} />
-                          )}
-                          <span>{attachment.name}</span>
-                          <em>{attachmentKindLabel(attachment.name, attachment.kind)} · {formatFileSize(attachment.size)}</em>
-                          {attachment.kind === "file" && attachment.url ? (
-                            <a className="chat-message-attachment-download" href={attachment.url} download={attachment.name} title={`下载 ${attachment.name}`} aria-label={`下载 ${attachment.name}`}>
-                              <Download size={14} />
-                            </a>
-                          ) : null}
-                        </div>
+                            <span>{attachment.name}</span>
+                            <em>{attachmentKindLabel(attachment.name, attachment.kind)} · {formatFileSize(attachment.size)}</em>
+                            {attachment.kind === "file" && attachment.url ? (
+                              <a className="chat-message-attachment-download" href={attachment.url} download={attachment.name} title={`下载 ${attachment.name}`} aria-label={`下载 ${attachment.name}`}>
+                                <Download size={14} />
+                              </a>
+                            ) : null}
+                          </div>
+                        )
                       ))}
                     </div>
                   ) : null}
@@ -2910,6 +3232,28 @@ export function ChatPage(props: {
 
         <div className="chat-composer">
           <div className="chat-composer-input">
+            {activeQueuedSubmissions.length > 0 ? (
+              <div className="chat-send-queue" aria-label={`待发送消息 ${activeQueuedSubmissions.length} 条`} aria-live="polite">
+                <div className="chat-send-queue-head">
+                  <strong>待发送</strong>
+                  <span>{activeQueuedSubmissions.length} 条，将按顺序自动发送</span>
+                </div>
+                <div className="chat-send-queue-list">
+                  {activeQueuedSubmissions.map((submission, index) => (
+                    <div className="chat-send-queue-item" key={submission.id}>
+                      <span className="chat-send-queue-index">{index + 1}</span>
+                      <div>
+                        <strong>{submission.content || `[${submission.attachments.length} 个附件]`}</strong>
+                        <span>{submission.attachments.length > 0 ? `含 ${submission.attachments.length} 个附件 · ` : ""}{formatFullTime(submission.queuedAt)}</span>
+                      </div>
+                      <button type="button" onClick={() => removeQueuedSubmission(submission.conversationId, submission.id)} title="移除待发送消息" aria-label={`移除第 ${index + 1} 条待发送消息`}>
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {attachments.length > 0 || pendingAttachmentFiles.length > 0 ? (
               <div className="chat-attachment-tray" aria-label="待发送附件">
                 {pendingAttachmentFiles.map((file) => (
@@ -2954,6 +3298,7 @@ export function ChatPage(props: {
               </div>
             ) : null}
             <div className="chat-composer-row">
+              <label className="chat-visually-hidden" htmlFor="chat-message-input">消息内容</label>
               <label className="chat-attach-button" title="添加附件，支持 DOCX、PPTX、XLSX" aria-label="添加附件，支持 DOCX、PPTX、XLSX">
                 <Paperclip size={18} />
                 <input
@@ -2968,7 +3313,9 @@ export function ChatPage(props: {
                 />
               </label>
               <textarea
+                id="chat-message-input"
                 ref={composerRef}
+                rows={1}
                 value={input}
                 onChange={(event) => {
                   setInput(event.target.value);
@@ -2988,21 +3335,23 @@ export function ChatPage(props: {
                 onDragLeave={handleFileDragLeave}
                 onDrop={handleFileDrop}
                 onKeyDown={handleInputKeyDown}
-                placeholder="发送消息，Enter 发送，Shift+Enter 换行，可粘贴或拖入 DOCX/PPTX/XLSX 等附件"
+                placeholder="消息…"
               />
+              <div className="chat-composer-actions">
+                <button className={`btn-primary chat-send-button ${activeConversationSending ? "is-queue" : ""}`} type="button" onClick={sendMessage} disabled={!canSend} title={activeConversationSending ? "加入发送队列" : "发送消息"} aria-label={activeConversationSending ? "加入发送队列" : "发送消息"}>
+                  <Send size={17} />
+                  <span>{activeConversationSending ? "排队" : "发送"}</span>
+                </button>
+                {activeId && activeConversationSending ? (
+                  <button className="btn-secondary chat-send-button is-stop" type="button" onClick={stopMessage} title="停止生成" aria-label="停止生成">
+                    <X size={17} />
+                    <span>停止</span>
+                  </button>
+                ) : null}
+              </div>
             </div>
+            <span className="chat-composer-hint">Enter 发送{activeConversationSending ? "并加入队列" : ""} · Shift+Enter 换行 · 支持粘贴或拖入附件</span>
           </div>
-          {activeConversationSending ? (
-            <button className="btn-secondary" type="button" onClick={stopMessage}>
-              <X size={16} />
-              停止
-            </button>
-          ) : (
-            <button className="btn-primary" type="button" onClick={sendMessage} disabled={!canSend}>
-              <Send size={16} />
-              发送
-            </button>
-          )}
         </div>
       </div>
       {detailConversation ? (
@@ -3042,9 +3391,9 @@ export function ChatPage(props: {
                 <strong>删除会话</strong>
                 <span>会话及其中的全部消息将永久删除，此操作无法撤销。</span>
               </div>
-              <button className="btn-danger" type="button" onClick={() => void deleteConversation(detailConversation.id)} disabled={deletingConversationId === detailConversation.id || sendingConversationIds.has(detailConversation.id)}>
+              <button className="btn-danger" type="button" onClick={() => void deleteConversation(detailConversation.id)} disabled={deletingConversationId === detailConversation.id || sendingConversationIds.has(detailConversation.id) || (queuedSubmissions[detailConversation.id]?.length ?? 0) > 0}>
                 {deletingConversationId === detailConversation.id ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
-                {deletingConversationId === detailConversation.id ? "正在删除" : sendingConversationIds.has(detailConversation.id) ? "回复生成中" : "删除会话"}
+                {deletingConversationId === detailConversation.id ? "正在删除" : sendingConversationIds.has(detailConversation.id) ? "回复生成中" : (queuedSubmissions[detailConversation.id]?.length ?? 0) > 0 ? "存在待发送消息" : "删除会话"}
               </button>
             </div>
           </div>
