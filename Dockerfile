@@ -5,6 +5,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV AI_ZERO_TOKEN_HOME=/data
 
+RUN apk add --no-cache curl
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
