@@ -1495,30 +1495,33 @@ export function GeneratePage(props: {
 
   function editFromHistory(item: GenerateHistoryItem) {
     const image = item.images[0];
-    if (!image?.url) {
+    if (!image) {
       props.setStatus("这条历史没有可编辑的生成图。");
       return;
     }
 
-    const imageUrl = recoverHistoryReferenceUrl(image.url);
+    const originalUrl = recoverHistoryReferenceUrl(image.url || "");
+    const previewUrl = recoverHistoryReferenceUrl(image.previewUrl || "");
+    const imageUrl = originalUrl || previewUrl;
     if (!imageUrl) {
-      props.setStatus("这条历史的原图地址无法恢复，请重新上传参考图。");
+      props.setStatus("这条历史的图片地址无法恢复，请重新上传参考图。");
       return;
     }
-    const previewUrl = image.previewUrl ? recoverHistoryReferenceUrl(image.previewUrl) ?? imageUrl : imageUrl;
     setPrompt(item.prompt);
     applyHistoryParameters(item);
     setReferenceImages([{
       id: createClientId("history-image-reference"),
       src: imageUrl,
-      previewSrc: previewUrl,
+      previewSrc: previewUrl || imageUrl,
       name: image.filename || "history-image.png",
       size: image.size || image.previewSize || 0,
     }]);
     setResultImages([]);
     setResponseBody("已将历史图片作为参考图，本次会走 images.edits。");
     setTab("create");
-    props.setStatus("已将历史图片作为编辑参考图，提交时会由服务端读取原图。");
+    props.setStatus(originalUrl
+      ? "已将历史图片作为编辑参考图，提交时会由服务端读取原图。"
+      : "历史原图不可用，已使用预览图作为编辑参考图。");
   }
 
   function copyHistoryPrompt(item: GenerateHistoryItem) {
@@ -1962,7 +1965,7 @@ export function GeneratePage(props: {
                   ) : null}
                   <div className="generate-history-card-actions">
                     {firstImage ? (
-                      <button className="btn-secondary" type="button" onClick={() => editFromHistory(item)} disabled={props.busy === "test"}>
+                      <button className="btn-secondary" type="button" onClick={() => editFromHistory(item)}>
                         <Pencil size={15} />
                         编辑首张
                       </button>
