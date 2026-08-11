@@ -1560,16 +1560,25 @@ export function ChatPage(props: {
     setIsNearBottom(true);
     if (bottomScrollTimerRef.current) {
       window.clearTimeout(bottomScrollTimerRef.current);
+      bottomScrollTimerRef.current = null;
+    }
+
+    // Streaming chunks and rendered markdown can trigger several resize/message
+    // updates before the browser paints. Keep the already queued automatic
+    // bottom scroll instead of repeatedly cancelling it, otherwise a busy
+    // stream can starve the animation frame and never reach the moving bottom.
+    if (bottomScrollFrameRef.current !== null && behavior === "auto") {
+      return;
     }
     if (bottomScrollFrameRef.current !== null) {
       window.cancelAnimationFrame(bottomScrollFrameRef.current);
     }
     bottomScrollFrameRef.current = requestAnimationFrame(() => {
       bottomScrollFrameRef.current = null;
-      node.scrollTo({ top: node.scrollHeight, behavior });
+      node.scrollTo({ top: node.scrollHeight - node.clientHeight, behavior });
       lastScrollTopRef.current = node.scrollTop;
       bottomScrollTimerRef.current = window.setTimeout(() => {
-        node.scrollTop = node.scrollHeight;
+        node.scrollTop = node.scrollHeight - node.clientHeight;
         lastScrollTopRef.current = node.scrollTop;
         bottomScrollInProgressRef.current = false;
         shouldStickToBottomRef.current = true;
