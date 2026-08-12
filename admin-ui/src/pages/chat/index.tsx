@@ -17,7 +17,7 @@ const MAX_ATTACHMENTS = 8;
 const MAX_IMAGE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_SPREADSHEET_ATTACHMENT_BYTES = 30 * 1024 * 1024;
-const MAX_OFFICE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
+const MAX_FILE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 const MAX_TOTAL_BINARY_ATTACHMENT_BYTES = 80 * 1024 * 1024;
 const COLLAPSED_MESSAGE_HEIGHT = 420;
 const MOBILE_COLLAPSED_MESSAGE_SCREENS = 2;
@@ -86,7 +86,8 @@ const SPREADSHEET_ATTACHMENT_EXTENSIONS = new Set([
   "xlsm",
   "xlsb",
 ]);
-const NATIVE_OFFICE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
+const NATIVE_FILE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
+  pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -100,7 +101,7 @@ const IMAGE_ATTACHMENT_MIME_BY_EXTENSION: Record<string, string> = {
   bmp: "image/bmp",
   svg: "image/svg+xml",
 };
-const SUPPORTED_ATTACHMENT_HINT = "支持图片、文本、代码、DOCX、PPTX、XLSX 等小文件，可选择、粘贴或拖入";
+const SUPPORTED_ATTACHMENT_HINT = "支持图片、PDF、文本、代码、DOCX、PPTX、XLSX 等小文件，可选择、粘贴或拖入";
 
 type ChatAttachment = {
   id: string;
@@ -378,12 +379,15 @@ function isSpreadsheetAttachmentName(name: string): boolean {
   return SPREADSHEET_ATTACHMENT_EXTENSIONS.has(fileExtension(name));
 }
 
-function nativeOfficeMimeTypeForFile(file: File): string | null {
-  return NATIVE_OFFICE_ATTACHMENT_MIME_BY_EXTENSION[fileExtension(file.name)] ?? null;
+function nativeFileMimeTypeForFile(file: File): string | null {
+  return NATIVE_FILE_ATTACHMENT_MIME_BY_EXTENSION[fileExtension(file.name)] ?? null;
 }
 
-function officeAttachmentLabel(name: string): string {
+function fileAttachmentLabel(name: string): string {
   const extension = fileExtension(name);
+  if (extension === "pdf") {
+    return "PDF";
+  }
   if (extension === "docx") {
     return "Word";
   }
@@ -393,7 +397,7 @@ function officeAttachmentLabel(name: string): string {
   if (extension === "xlsx") {
     return "Excel";
   }
-  return "Office 文件";
+  return "文件";
 }
 
 function attachmentKindLabel(name: string, kind?: ChatAttachment["kind"]): string {
@@ -401,7 +405,7 @@ function attachmentKindLabel(name: string, kind?: ChatAttachment["kind"]): strin
     return "图片";
   }
   if (kind === "file") {
-    return officeAttachmentLabel(name);
+    return fileAttachmentLabel(name);
   }
   if (isSpreadsheetAttachmentName(name)) {
     return "Excel";
@@ -414,8 +418,8 @@ function pendingAttachmentLabel(file: File): string {
   if (imageMimeType) {
     return "正在读取图片";
   }
-  if (nativeOfficeMimeTypeForFile(file)) {
-    return `正在读取 ${officeAttachmentLabel(file.name)}`;
+  if (nativeFileMimeTypeForFile(file)) {
+    return `正在读取 ${fileAttachmentLabel(file.name)}`;
   }
   if (isSpreadsheetAttachment(file)) {
     return "正在解析 Excel";
@@ -2047,10 +2051,10 @@ export function ChatPage(props: {
         continue;
       }
 
-      const officeMimeType = nativeOfficeMimeTypeForFile(file);
-      if (officeMimeType) {
-        if (file.size > MAX_OFFICE_ATTACHMENT_BYTES) {
-          skipped.push(`${file.name} 超过 ${formatFileSize(MAX_OFFICE_ATTACHMENT_BYTES)}`);
+      const fileMimeType = nativeFileMimeTypeForFile(file);
+      if (fileMimeType) {
+        if (file.size > MAX_FILE_ATTACHMENT_BYTES) {
+          skipped.push(`${file.name} 超过 ${formatFileSize(MAX_FILE_ATTACHMENT_BYTES)}`);
           continue;
         }
         if (binaryAttachmentBytes + file.size > MAX_TOTAL_BINARY_ATTACHMENT_BYTES) {
@@ -2062,9 +2066,9 @@ export function ChatPage(props: {
           id,
           kind: "file",
           name: file.name,
-          mimeType: officeMimeType,
+          mimeType: fileMimeType,
           size: file.size,
-          dataUrl: normalizeDataUrlMimeType(await readFileAsDataUrl(file), officeMimeType),
+          dataUrl: normalizeDataUrlMimeType(await readFileAsDataUrl(file), fileMimeType),
         });
         continue;
       }
@@ -3308,7 +3312,7 @@ export function ChatPage(props: {
             ) : null}
             <div className="chat-composer-row">
               <label className="chat-visually-hidden" htmlFor="chat-message-input">消息内容</label>
-              <label className="chat-attach-button" title="添加附件，支持 DOCX、PPTX、XLSX" aria-label="添加附件，支持 DOCX、PPTX、XLSX">
+              <label className="chat-attach-button" title="添加附件，支持 PDF、DOCX、PPTX、XLSX" aria-label="添加附件，支持 PDF、DOCX、PPTX、XLSX">
                 <Paperclip size={18} />
                 <input
                   ref={fileInputRef}

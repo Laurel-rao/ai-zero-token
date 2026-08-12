@@ -386,6 +386,9 @@ function stripChatMessageAttachmentDataUrls(message: ChatMessage): ChatMessage {
 }
 
 function extensionForMimeType(mimeType: string, fallback = "png"): string {
+  if (mimeType === "application/pdf") {
+    return "pdf";
+  }
   if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
     return "docx";
   }

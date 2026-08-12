@@ -71,6 +71,7 @@ const assetContentTypes: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".png": "image/png",
+  ".pdf": "application/pdf",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1018,6 +1019,7 @@ function estimateBase64Bytes(value: string): number {
 }
 
 const chatFileMimeTypesByExtension: Record<string, string> = {
+  ".pdf": "application/pdf",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1050,7 +1052,7 @@ const chatAttachmentSchema = z
     if (value.kind === "file") {
       const expectedMimeType = chatFileMimeTypesByExtension[path.extname(value.name).toLowerCase()];
       if (!expectedMimeType) {
-        ctx.addIssue({ code: "custom", message: "原生文件附件只支持 DOCX、PPTX 和 XLSX。" });
+        ctx.addIssue({ code: "custom", message: "原生文件附件只支持 PDF、DOCX、PPTX 和 XLSX。" });
         return;
       }
       if (value.mimeType !== expectedMimeType) {
