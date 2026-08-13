@@ -1,4 +1,4 @@
-import { Check, ChevronLeft, ChevronRight, Copy, Download, LoaderCircle, Maximize2, Minimize2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Copy, Download, LoaderCircle, Maximize2, Minimize2, RotateCcw, RotateCw, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { Modal } from "./Modal";
 import type { ModalImage, ModalImageItem } from "@/shared/lib/app-types";
@@ -347,6 +347,17 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
         </>
       )}
     >
+      {isFullscreen ? (
+        <button
+          className="image-preview-fullscreen-close"
+          type="button"
+          onClick={props.onClose}
+          title="关闭图片预览"
+          aria-label="关闭图片预览"
+        >
+          <X size={22} />
+        </button>
+      ) : null}
       <div
         className={`image-preview-stage ${ratioClassName(activeImage.ratio)} ${zoom > 1 ? "is-zoomed" : ""} ${isQuarterTurn ? "is-quarter-turn" : ""}`}
         onDoubleClick={() => {
