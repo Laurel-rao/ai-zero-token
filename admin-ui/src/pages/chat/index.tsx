@@ -13,7 +13,7 @@ import { copyText, errorMessage } from "@/shared/lib/app-utils";
 import { formatFileSize, formatFullTime } from "@/shared/lib/format";
 import { Modal } from "@/shared/components/Modal";
 
-const MAX_ATTACHMENTS = 8;
+const MAX_ATTACHMENTS = 20;
 const MAX_IMAGE_ATTACHMENT_BYTES = 30 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
 const MAX_SPREADSHEET_ATTACHMENT_BYTES = 30 * 1024 * 1024;
