@@ -735,7 +735,9 @@ function filesFromClipboardData(clipboardData: ClipboardLike): File[] {
     .map((item) => item.getAsFile())
     .filter(Boolean) as File[];
   const files = Array.from(clipboardData.files ?? []);
-  return itemFiles.length > 0 ? itemFiles : files;
+  // Some browsers expose only the first copied file through `items`, while
+  // `files` still contains the complete multi-file clipboard payload.
+  return files.length >= itemFiles.length ? files : itemFiles;
 }
 
 function markdownText(children: ReactNode): string {
