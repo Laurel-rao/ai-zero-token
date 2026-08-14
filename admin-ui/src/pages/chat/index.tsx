@@ -1978,6 +1978,18 @@ export function ChatPage(props: {
     void renameConversation(activeConversation.id, title);
   }
 
+  function exportConversation(id: string) {
+    const target = conversations.find((item) => item.id === id);
+    const link = document.createElement("a");
+    link.href = `/_gateway/chats/${encodeURIComponent(id)}/export`;
+    link.rel = "nofollow";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setMobileMenuOpen(false);
+    props.setStatus(`已开始导出“${target?.title || "当前会话"}”，压缩包包含完整对话和附件。`);
+  }
+
   async function deleteConversation(id: string) {
     const target = conversations.find((item) => item.id === id);
     if (streamControllersRef.current.has(id) || (queuedSubmissionsRef.current.get(id)?.length ?? 0) > 0) {
@@ -3044,6 +3056,9 @@ export function ChatPage(props: {
               <option key={item.id} value={item.id}>{item.id}</option>
             ))}
           </select>
+          <button className="btn-secondary icon-only chat-export-button" type="button" onClick={() => activeId && exportConversation(activeId)} disabled={!activeId} title="导出对话和附件" aria-label="导出对话和附件">
+            <Download size={17} />
+          </button>
           <div className="chat-mobile-menu" ref={mobileMenuRef}>
             <button
               className="btn-secondary icon-only chat-mobile-more"
@@ -3078,6 +3093,10 @@ export function ChatPage(props: {
                 <button type="button" onClick={() => { if (activeId) { setDetailConversationId(activeId); } setMobileMenuOpen(false); }} disabled={!activeId}>
                   <Info size={17} />
                   会话详情
+                </button>
+                <button type="button" onClick={() => activeId && exportConversation(activeId)} disabled={!activeId}>
+                  <Download size={17} />
+                  导出对话和附件
                 </button>
                 <button type="button" onClick={renameActiveConversation} disabled={!activeId}>
                   <Pencil size={17} />
@@ -3402,6 +3421,16 @@ export function ChatPage(props: {
                 <dd className="chat-conversation-id">{detailConversation.id}</dd>
               </div>
             </dl>
+            <div className="chat-conversation-export-zone">
+              <div>
+                <strong>导出完整会话</strong>
+                <span>下载 ZIP 压缩包，包含 Markdown、JSON 对话记录和全部可用附件。</span>
+              </div>
+              <button className="btn-secondary" type="button" onClick={() => exportConversation(detailConversation.id)}>
+                <Download size={15} />
+                导出压缩包
+              </button>
+            </div>
             <div className="chat-conversation-danger-zone">
               <div>
                 <strong>删除会话</strong>

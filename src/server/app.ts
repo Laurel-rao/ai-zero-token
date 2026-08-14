@@ -1,8 +1,9 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,6 +15,7 @@ import {
 } from "node:zlib";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
+import { Zip, ZipPassThrough } from "fflate";
 import { z } from "zod";
 import { createGatewayContext } from "../core/context.js";
 import type { ChatResult, GatewaySettings, OAuthProfile, ProfileSummary } from "../core/types.js";
@@ -25,7 +27,7 @@ import {
   type OpenAICodexRemoteLoginSession,
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
-import type { ChatAttachment, ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
+import type { ChatAttachment, ChatConversationDetail, ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
 import { getBrandingAssetsDir, getChatAttachmentAssetsDir, getGenerationAssetsDir } from "../core/store/state-paths.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
@@ -532,6 +534,310 @@ async function chatAttachmentDataUrl(attachment: ChatAttachment): Promise<string
   } catch {
     return undefined;
   }
+}
+
+type ChatExportAttachmentSource =
+  | { type: "buffer"; data: Buffer }
+  | { type: "file"; filePath: string };
+
+type ChatExportAttachment = {
+  messageId: string;
+  attachmentId: string;
+  originalName: string;
+  archivePath: string;
+  kind: ChatAttachment["kind"];
+  mimeType: string;
+  declaredSize: number;
+  actualSize?: number;
+  status: "included" | "missing" | "partial";
+  reason?: string;
+  source?: ChatExportAttachmentSource;
+};
+
+type ChatExportPlan = {
+  exportedAt: string;
+  attachments: ChatExportAttachment[];
+};
+
+function sanitizeChatExportFileName(value: string, fallback: string): string {
+  const normalized = path.basename(value.replace(/[\\/]+/g, "_")).replace(/[\u0000-\u001f<>:"|?*]/g, "_").trim();
+  const safe = normalized.replace(/[. ]+$/g, "") || fallback;
+  if (safe.length <= 180) {
+    return safe;
+  }
+  const extension = path.extname(safe).slice(0, 20);
+  return `${safe.slice(0, Math.max(1, 180 - extension.length))}${extension}`;
+}
+
+function uniqueChatExportPath(basePath: string, usedPaths: Set<string>): string {
+  if (!usedPaths.has(basePath)) {
+    usedPaths.add(basePath);
+    return basePath;
+  }
+  const extension = path.posix.extname(basePath);
+  const stem = basePath.slice(0, basePath.length - extension.length);
+  let index = 2;
+  while (usedPaths.has(`${stem}-${index}${extension}`)) {
+    index += 1;
+  }
+  const candidate = `${stem}-${index}${extension}`;
+  usedPaths.add(candidate);
+  return candidate;
+}
+
+async function prepareChatExport(conversation: ChatConversationDetail): Promise<ChatExportPlan> {
+  const usedPaths = new Set<string>();
+  const attachments: ChatExportAttachment[] = [];
+
+  for (let messageIndex = 0; messageIndex < conversation.messages.length; messageIndex += 1) {
+    const message = conversation.messages[messageIndex];
+    const folder = `attachments/${String(messageIndex + 1).padStart(3, "0")}-${message.role}`;
+    for (let attachmentIndex = 0; attachmentIndex < message.attachments.length; attachmentIndex += 1) {
+      const attachment = message.attachments[attachmentIndex];
+      const fallbackName = `attachment-${attachmentIndex + 1}${attachment.kind === "text" ? ".txt" : ".bin"}`;
+      const archivePath = uniqueChatExportPath(
+        `${folder}/${sanitizeChatExportFileName(attachment.name, fallbackName)}`,
+        usedPaths,
+      );
+      const item: ChatExportAttachment = {
+        messageId: message.id,
+        attachmentId: attachment.id,
+        originalName: attachment.name || fallbackName,
+        archivePath,
+        kind: attachment.kind,
+        mimeType: attachment.mimeType || "application/octet-stream",
+        declaredSize: attachment.size,
+        status: "included",
+      };
+
+      if (attachment.kind === "text") {
+        if (typeof attachment.text === "string") {
+          const data = Buffer.from(attachment.text, "utf8");
+          item.source = { type: "buffer", data };
+          item.actualSize = data.byteLength;
+        } else {
+          item.status = "missing";
+          item.reason = "历史记录中未保存文本附件内容。";
+        }
+      } else if (attachment.path) {
+        const file = resolveChatAttachmentFile(attachment.path);
+        if (!file || file.conversationId !== conversation.id) {
+          item.status = "missing";
+          item.reason = "附件路径无效。";
+        } else {
+          try {
+            const stats = await fs.stat(file.filePath);
+            if (!stats.isFile()) {
+              throw new Error("附件不是普通文件。");
+            }
+            item.source = { type: "file", filePath: file.filePath };
+            item.actualSize = stats.size;
+          } catch (error) {
+            item.status = "missing";
+            item.reason = error instanceof Error ? error.message : "附件文件不存在。";
+          }
+        }
+      } else if (attachment.dataUrl) {
+        const parsed = parseDataUrl(attachment.dataUrl);
+        if (parsed) {
+          item.source = { type: "buffer", data: parsed.data };
+          item.actualSize = parsed.data.byteLength;
+        } else {
+          item.status = "missing";
+          item.reason = "附件数据格式无效。";
+        }
+      } else {
+        item.status = "missing";
+        item.reason = "历史记录中未保存附件文件。";
+      }
+      attachments.push(item);
+    }
+  }
+
+  return { exportedAt: new Date().toISOString(), attachments };
+}
+
+function chatExportMarkdown(conversation: ChatConversationDetail, plan: ChatExportPlan): string {
+  const attachmentByMessage = new Map<string, ChatExportAttachment[]>();
+  for (const attachment of plan.attachments) {
+    const items = attachmentByMessage.get(attachment.messageId) ?? [];
+    items.push(attachment);
+    attachmentByMessage.set(attachment.messageId, items);
+  }
+  const lines = [
+    `# ${conversation.title}`,
+    "",
+    `- 会话 ID: \`${conversation.id}\``,
+    `- 模型: ${conversation.model || "-"}`,
+    `- 创建时间: ${new Date(conversation.createdAt).toISOString()}`,
+    `- 导出时间: ${plan.exportedAt}`,
+    `- 消息数量: ${conversation.messages.length}`,
+    "",
+  ];
+
+  conversation.messages.forEach((message, index) => {
+    lines.push(`## ${index + 1}. ${message.role === "assistant" ? "助手" : "用户"}`);
+    lines.push("");
+    lines.push(`- 时间: ${new Date(message.createdAt).toISOString()}`);
+    lines.push(`- 状态: ${message.status}`);
+    if (message.model) {
+      lines.push(`- 模型: ${message.model}`);
+    }
+    if (message.error) {
+      lines.push(`- 错误: ${message.error}`);
+    }
+    const messageAttachments = attachmentByMessage.get(message.id) ?? [];
+    if (messageAttachments.length > 0) {
+      lines.push("- 附件:");
+      for (const attachment of messageAttachments) {
+        const label = attachment.originalName.replace(/[\[\]]/g, "\\$&");
+        const target = attachment.archivePath.split("/").map(encodeURIComponent).join("/");
+        lines.push(attachment.status === "included"
+          ? `  - [${label}](${target})`
+          : `  - ${label}（未导出: ${attachment.reason || "文件不可用"}）`);
+      }
+    }
+    lines.push("");
+    lines.push(message.content || "_（无文本内容）_");
+    lines.push("");
+    lines.push("---", "");
+  });
+  return `${lines.join("\n")}\n`;
+}
+
+function chatExportJson(conversation: ChatConversationDetail, plan: ChatExportPlan): Record<string, unknown> {
+  return {
+    exportVersion: 1,
+    exportedAt: plan.exportedAt,
+    conversation: {
+      id: conversation.id,
+      title: conversation.title,
+      model: conversation.model,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      messageCount: conversation.messages.length,
+    },
+    messages: conversation.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      status: message.status,
+      model: message.model,
+      error: message.error,
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
+      attachments: plan.attachments
+        .filter((attachment) => attachment.messageId === message.id)
+        .map(({ source: _source, ...attachment }) => attachment),
+    })),
+  };
+}
+
+function createChatExportZipStream(conversation: ChatConversationDetail, plan: ChatExportPlan): Readable {
+  const output = new PassThrough();
+  let drainPromise: Promise<void> | null = null;
+  const zip = new Zip((error, data, final) => {
+    if (error) {
+      output.destroy(error);
+      return;
+    }
+    if (final) {
+      output.end(Buffer.from(data));
+      return;
+    }
+    if (data.byteLength > 0 && !output.write(Buffer.from(data)) && !drainPromise) {
+      drainPromise = new Promise((resolve) => {
+        const done = () => {
+          output.off("drain", done);
+          output.off("close", done);
+          resolve();
+        };
+        output.once("drain", done);
+        output.once("close", done);
+      });
+    }
+  });
+
+  async function waitForDrain(): Promise<void> {
+    if (drainPromise) {
+      await drainPromise;
+      drainPromise = null;
+    }
+    if (output.destroyed) {
+      throw new Error("导出连接已关闭。");
+    }
+  }
+
+  async function addBuffer(filename: string, data: Buffer): Promise<void> {
+    const entry = new ZipPassThrough(filename);
+    zip.add(entry);
+    entry.push(data, true);
+    await waitForDrain();
+  }
+
+  async function addFile(item: ChatExportAttachment, filePath: string): Promise<void> {
+    const entry = new ZipPassThrough(item.archivePath);
+    zip.add(entry);
+    try {
+      for await (const chunk of createReadStream(filePath)) {
+        entry.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk), false);
+        await waitForDrain();
+      }
+      entry.push(new Uint8Array(), true);
+      await waitForDrain();
+    } catch (error) {
+      entry.push(new Uint8Array(), true);
+      item.status = "partial";
+      item.reason = error instanceof Error ? error.message : "读取附件失败。";
+    }
+  }
+
+  output.once("close", () => {
+    if (!output.readableEnded) {
+      zip.terminate();
+    }
+  });
+
+  void (async () => {
+    try {
+      await addBuffer("conversation.md", Buffer.from(chatExportMarkdown(conversation, plan), "utf8"));
+      for (const attachment of plan.attachments) {
+        if (!attachment.source || attachment.status !== "included") {
+          continue;
+        }
+        if (attachment.source.type === "buffer") {
+          await addBuffer(attachment.archivePath, attachment.source.data);
+        } else {
+          await addFile(attachment, attachment.source.filePath);
+        }
+      }
+      await addBuffer("conversation.json", Buffer.from(`${JSON.stringify(chatExportJson(conversation, plan), null, 2)}\n`, "utf8"));
+      await addBuffer("manifest.json", Buffer.from(`${JSON.stringify({
+        exportVersion: 1,
+        exportedAt: plan.exportedAt,
+        conversationId: conversation.id,
+        attachmentCount: plan.attachments.length,
+        includedAttachmentCount: plan.attachments.filter((item) => item.status === "included").length,
+        attachments: plan.attachments.map(({ source: _source, ...attachment }) => attachment),
+      }, null, 2)}\n`, "utf8"));
+      zip.end();
+    } catch (error) {
+      zip.terminate();
+      output.destroy(error instanceof Error ? error : new Error(String(error)));
+    }
+  })();
+
+  return output;
+}
+
+function chatExportDownloadName(conversation: ChatConversationDetail): string {
+  const title = sanitizeChatExportFileName(conversation.title, "conversation").replace(/\.zip$/i, "").slice(0, 80);
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  return `${title}-${date}.zip`;
+}
+
+function encodeContentDispositionFileName(value: string): string {
+  return encodeURIComponent(value).replace(/['()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
 async function decodeJsonRequestBody(body: Buffer, contentEncoding: string | string[] | undefined): Promise<Buffer> {
@@ -3730,6 +4036,23 @@ export function createApp(params?: {
       return { error: { type: "not_found", message: "聊天会话不存在。" } };
     }
     return { item };
+  });
+
+  app.get("/_gateway/chats/:id/export", async (request, reply) => {
+    const id = String((request.params as { id?: string }).id ?? "");
+    const owner = await getRequestOwner(request);
+    const item = await ctx.gatewayDatabaseService.getChatConversation(id, owner);
+    if (!item) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "聊天会话不存在。" } };
+    }
+    const plan = await prepareChatExport(item);
+    const downloadName = chatExportDownloadName(item);
+    const asciiName = `conversation-${item.id.slice(0, 8) || "export"}.zip`;
+    reply.header("Content-Type", "application/zip");
+    reply.header("Content-Disposition", `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeContentDispositionFileName(downloadName)}`);
+    reply.header("Cache-Control", "private, no-store");
+    return reply.send(createChatExportZipStream(item, plan));
   });
 
   app.patch("/_gateway/chats/:id", async (request, reply) => {
