@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronUp, Clock3, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Info, LayoutDashboard, Loader2, LogOut, Maximize2, Menu, MessageSquarePlus, Minimize2, MoreHorizontal, Paperclip, Pencil, Play, RefreshCw, Send, Trash2, TriangleAlert, X } from "lucide-react";
-import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
+import { Children, isValidElement, memo, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 import katex from "katex";
 import rehypeKatex from "rehype-katex";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -1110,7 +1110,7 @@ function MarkdownPre({ children, onPreviewHtml, onPreviewImage }: MarkdownPrePro
   );
 }
 
-function ChatMessageContent(props: {
+const ChatMessageContent = memo(function ChatMessageContent(props: {
   id: string;
   content: string;
   status: ChatMessage["status"];
@@ -1207,7 +1207,7 @@ function ChatMessageContent(props: {
       ) : null}
     </div>
   );
-}
+});
 
 export function ChatPage(props: {
   config: AdminConfig | null;
@@ -1428,7 +1428,8 @@ export function ChatPage(props: {
   }, [messages, imageActions]);
 
   useEffect(() => {
-    adjustComposerHeight();
+    const frame = window.requestAnimationFrame(adjustComposerHeight);
+    return () => window.cancelAnimationFrame(frame);
   }, [input, attachments.length]);
 
   useEffect(() => {
@@ -2772,7 +2773,7 @@ export function ChatPage(props: {
     lastScrollTopRef.current = node.scrollTop;
   }
 
-  function openHtmlPreview(html: string, title = "HTML 预览") {
+  const openHtmlPreview = useCallback((html: string, title = "HTML 预览") => {
     setHtmlPreview({
       html,
       title,
@@ -2781,7 +2782,7 @@ export function ChatPage(props: {
     setHtmlPreviewMaximized(false);
     setHtmlPreviewPosition(null);
     setCopiedHtmlPreview(false);
-  }
+  }, []);
 
   async function copyHtmlPreview() {
     if (!htmlPreview) {
