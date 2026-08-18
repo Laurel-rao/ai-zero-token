@@ -990,14 +990,17 @@ export class GatewayDatabaseService {
     await this.prune("request_logs", "time", MAX_REQUEST_LOGS);
   }
 
-  async countGenerationHistory(owner?: string): Promise<number> {
+  async countGenerationHistory(owner?: string, query?: string, status?: GenerationHistoryItem["status"]): Promise<number> {
     await this.init();
     await this.deleteCoveredRunningGenerations(owner);
+    const queryPattern = query?.trim() ? `%${query.trim()}%` : null;
     const row = await this.database.get(`
         SELECT COUNT(*) AS count
         FROM generation_history
         WHERE (? IS NULL OR owner = ?)
-      `, owner ?? null, owner ?? null) as { count?: unknown } | undefined;
+          AND (? IS NULL OR LOWER(prompt) LIKE LOWER(?))
+          AND (? IS NULL OR status = ?)
+      `, owner ?? null, owner ?? null, queryPattern, queryPattern, status ?? null, status ?? null) as { count?: unknown } | undefined;
     return Number(row?.count ?? 0);
   }
 
@@ -1142,12 +1145,13 @@ export class GatewayDatabaseService {
     };
   }
 
-  async listGenerationHistory(limit = 10, owner?: string, options?: { light?: boolean; offset?: number }): Promise<GenerationHistoryItem[]> {
+  async listGenerationHistory(limit = 10, owner?: string, options?: { light?: boolean; offset?: number; query?: string; status?: GenerationHistoryItem["status"] }): Promise<GenerationHistoryItem[]> {
     await this.init();
     await this.deleteCoveredRunningGenerations(owner);
     const light = Boolean(options?.light);
     const safeLimit = clampLimit(limit, MAX_GENERATION_HISTORY);
     const safeOffset = Math.max(0, Math.trunc(options?.offset ?? 0));
+    const queryPattern = options?.query?.trim() ? `%${options.query.trim()}%` : null;
     const rows = await this.database.all(`
         SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
                prompt, ratio, size, quality, output_format AS outputFormat, duration_ms AS durationMs,
@@ -1155,10 +1159,12 @@ export class GatewayDatabaseService {
                reference_images_json AS referenceImagesJson, images_json AS imagesJson
         FROM generation_history
         WHERE (? IS NULL OR owner = ?)
+          AND (? IS NULL OR LOWER(prompt) LIKE LOWER(?))
+          AND (? IS NULL OR status = ?)
         ORDER BY created_at DESC
         LIMIT ?
         OFFSET ?
-      `, owner ?? null, owner ?? null, safeLimit, safeOffset) as Array<Record<string, unknown>>;
+      `, owner ?? null, owner ?? null, queryPattern, queryPattern, options?.status ?? null, options?.status ?? null, safeLimit, safeOffset) as Array<Record<string, unknown>>;
 
     const now = Date.now();
     return rows.map((row) => ({

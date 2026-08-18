@@ -1290,6 +1290,8 @@ const generationHistoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
   page: z.coerce.number().int().min(1).optional(),
   owner: z.string().min(1).max(120).optional(),
+  query: z.string().trim().max(500).optional(),
+  status: z.enum(["queued", "running", "success", "failed", "interrupted"]).optional(),
   light: z.coerce.boolean().optional(),
 });
 
@@ -4494,11 +4496,13 @@ export function createApp(params?: {
     const limit = parsed.success ? parsed.data.limit ?? 10 : 10;
     const page = parsed.success ? parsed.data.page ?? 1 : 1;
     const offset = (page - 1) * limit;
+    const query = parsed.success ? parsed.data.query : undefined;
+    const status = parsed.success ? parsed.data.status : undefined;
     const session = await getSessionFromRequest(request);
     const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
     const [items, total] = await Promise.all([
-      ctx.gatewayDatabaseService.listGenerationHistory(limit, owner, { light: parsed.success ? parsed.data.light ?? true : true, offset }),
-      ctx.gatewayDatabaseService.countGenerationHistory(owner),
+      ctx.gatewayDatabaseService.listGenerationHistory(limit, owner, { light: parsed.success ? parsed.data.light ?? true : true, offset, query, status }),
+      ctx.gatewayDatabaseService.countGenerationHistory(owner, query, status),
     ]);
     return {
       items,

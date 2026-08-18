@@ -10,6 +10,7 @@ import { profileLabel } from "@/shared/lib/profiles";
 import { userDisplayName } from "@/shared/lib/users";
 import type { UserRole } from "@/routes/routes";
 import { DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT } from "@/shared/lib/prompt-optimizer";
+import { Modal } from "@/shared/components/Modal";
 
 type GenerateTab = "create" | "history" | "report";
 type HistoryViewMode = "grid" | "list";
@@ -100,6 +101,7 @@ type HistoryOwnerOption = {
 };
 
 const GENERATE_HISTORY_PAGE_SIZE = 10;
+const HISTORY_REFERENCE_PAGE_SIZE = 12;
 
 function referencePreviewItems(images: ReferenceImageState[]): ModalImageItem[] {
   return images.map((image) => ({
@@ -705,6 +707,15 @@ export function GeneratePage(props: {
   const [historyEndTime, setHistoryEndTime] = useState("");
   const [historyOwnerFilter, setHistoryOwnerFilter] = useState("");
   const [historyOwnerUsage, setHistoryOwnerUsage] = useState<GenerationOwnerUsageResponse>({ items: [], total: 0 });
+  const [historyPickerOpen, setHistoryPickerOpen] = useState(false);
+  const [historyPickerItems, setHistoryPickerItems] = useState<GenerateHistoryItem[]>([]);
+  const [historyPickerLoading, setHistoryPickerLoading] = useState(false);
+  const [historyPickerPage, setHistoryPickerPage] = useState(1);
+  const [historyPickerTotal, setHistoryPickerTotal] = useState(0);
+  const [historyPickerTotalPages, setHistoryPickerTotalPages] = useState(1);
+  const [historyPickerQuery, setHistoryPickerQuery] = useState("");
+  const [historyPickerSelected, setHistoryPickerSelected] = useState<Map<string, ReferenceImageState>>(() => new Map());
+  const [historyPickerMessage, setHistoryPickerMessage] = useState<string | null>(null);
   const [historyViewMode, setHistoryViewMode] = useState<HistoryViewMode>(() => {
     try {
       return window.localStorage.getItem(HISTORY_VIEW_STORAGE_KEY) === "list" ? "list" : "grid";
@@ -766,6 +777,31 @@ export function GeneratePage(props: {
   const someSelectableHistorySelected = selectedCurrentPageCount > 0 && !allSelectableHistorySelected;
   const canGoPreviousHistoryPage = historyPage > 1 && !historyLoading;
   const canGoNextHistoryPage = historyPage < historyTotalPages && !historyLoading;
+  const historyPickerRoom = Math.max(0, MAX_REFERENCE_IMAGES - referenceImages.length);
+  const historyPickerCandidates = useMemo(() => {
+    const existingSources = new Set(referenceImages.flatMap((image) => [image.src, image.previewSrc]));
+    return historyPickerItems.flatMap((item) => item.images.flatMap((image, imageIndex) => {
+      const originalUrl = recoverHistoryReferenceUrl(image.url || "");
+      const previewUrl = recoverHistoryReferenceUrl(image.previewUrl || "");
+      const src = originalUrl || previewUrl;
+      if (!src) return [];
+      const previewSrc = previewUrl || src;
+      return [{
+        key: `${item.id}:${imageIndex}`,
+        item,
+        image,
+        imageIndex,
+        src,
+        previewSrc,
+        alreadyAdded: existingSources.has(src) || existingSources.has(previewSrc),
+      }];
+    }));
+  }, [historyPickerItems, referenceImages]);
+  const historyPickerScopeLabel = props.role !== "admin" || !historyOwnerFilter
+    ? "我的历史"
+    : historyOwnerFilter === "all"
+      ? "全部用户"
+      : userDisplayName(props.config, historyOwnerFilter);
   const historyOwnerOptions = useMemo(() => {
     const usageByOwner = new Map(historyOwnerUsage.items.map((item) => [item.owner, item.count]));
     const names = new Set<string>();
@@ -827,7 +863,10 @@ export function GeneratePage(props: {
             className="control"
             placeholder="检索提示词"
             value={historyPromptQuery}
-            onChange={(event) => setHistoryPromptQuery(event.target.value)}
+            onChange={(event) => {
+              setHistoryPromptQuery(event.target.value);
+              setHistoryPage(1);
+            }}
           />
         </div>
       </label>
@@ -1003,6 +1042,9 @@ export function GeneratePage(props: {
       if (props.role === "admin" && historyOwnerFilter) {
         params.set("owner", historyOwnerFilter);
       }
+      if (historyPromptQuery.trim()) {
+        params.set("query", historyPromptQuery.trim());
+      }
       const [next, nextOwnerUsage] = await Promise.all([
         fetchJson<GenerateHistoryResponse>(`/_gateway/generations/history?${params.toString()}`),
         props.role === "admin"
@@ -1061,8 +1103,68 @@ export function GeneratePage(props: {
   }
 
   useEffect(() => {
-    refreshHistory({ silent: true }).catch(() => undefined);
-  }, [historyOwnerFilter, historyPage]);
+    const timer = window.setTimeout(() => {
+      refreshHistory({ silent: true }).catch(() => undefined);
+    }, historyPromptQuery.trim() ? 250 : 0);
+    return () => window.clearTimeout(timer);
+  }, [historyOwnerFilter, historyPage, historyPromptQuery]);
+
+  useEffect(() => {
+    if (!historyPickerOpen) return undefined;
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setHistoryPickerLoading(true);
+      setHistoryPickerMessage(null);
+      try {
+        const params = new URLSearchParams({
+          limit: String(HISTORY_REFERENCE_PAGE_SIZE),
+          page: String(historyPickerPage),
+          light: "true",
+          status: "success",
+        });
+        if (props.role === "admin" && historyOwnerFilter) {
+          params.set("owner", historyOwnerFilter);
+        }
+        if (historyPickerQuery.trim()) {
+          params.set("query", historyPickerQuery.trim());
+        }
+        const next = await fetchJson<GenerateHistoryResponse>(`/_gateway/generations/history?${params.toString()}`, {
+          signal: controller.signal,
+        });
+        setHistoryPickerItems(next.items.filter((item) => item.status === "success" && item.images.length > 0));
+        setHistoryPickerTotal(next.total ?? next.items.length);
+        const nextTotalPages = next.totalPages ?? Math.max(1, Math.ceil((next.total ?? next.items.length) / HISTORY_REFERENCE_PAGE_SIZE));
+        setHistoryPickerTotalPages(nextTotalPages);
+        if (historyPickerPage > nextTotalPages) {
+          setHistoryPickerPage(nextTotalPages);
+        }
+      } catch (error) {
+        if ((error as { name?: string }).name !== "AbortError") {
+          setHistoryPickerItems([]);
+          setHistoryPickerMessage(`读取生图历史失败：${errorMessage(error)}`);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setHistoryPickerLoading(false);
+        }
+      }
+    }, historyPickerQuery.trim() ? 250 : 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [historyOwnerFilter, historyPickerOpen, historyPickerPage, historyPickerQuery, props.role]);
+
+  useEffect(() => {
+    if (!historyPickerOpen) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setHistoryPickerOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [historyPickerOpen]);
 
   useEffect(() => {
     try {
@@ -1232,6 +1334,42 @@ export function GeneratePage(props: {
   function clearReferences() {
     setReferenceImages([]);
     props.setStatus("已移除参考图，本次将走 images.generations。");
+  }
+
+  function openHistoryPicker() {
+    if (historyPickerRoom <= 0) {
+      props.setStatus(`参考图最多支持 ${MAX_REFERENCE_IMAGES} 张。`);
+      return;
+    }
+    setHistoryPickerPage(1);
+    setHistoryPickerQuery("");
+    setHistoryPickerSelected(new Map());
+    setHistoryPickerMessage(null);
+    setHistoryPickerOpen(true);
+  }
+
+  function toggleHistoryReference(key: string, image: ReferenceImageState, alreadyAdded: boolean) {
+    if (alreadyAdded) return;
+    if (!historyPickerSelected.has(key) && historyPickerSelected.size >= historyPickerRoom) {
+      setHistoryPickerMessage(`当前还可添加 ${historyPickerRoom} 张参考图。`);
+      return;
+    }
+    setHistoryPickerMessage(null);
+    setHistoryPickerSelected((current) => {
+      const next = new Map(current);
+      if (next.has(key)) next.delete(key);
+      else next.set(key, image);
+      return next;
+    });
+  }
+
+  function addSelectedHistoryReferences() {
+    const selected = Array.from(historyPickerSelected.values()).slice(0, historyPickerRoom);
+    if (selected.length === 0) return;
+    setReferenceImages((current) => [...current, ...selected]);
+    setHistoryPickerOpen(false);
+    setHistoryPickerSelected(new Map());
+    props.setStatus(`已从生图历史添加 ${selected.length} 张参考图，本次将走 images.edits。`);
   }
 
   function applyPromptExample(example: (typeof promptExamples)[number]) {
@@ -1664,6 +1802,10 @@ export function GeneratePage(props: {
                   <span>点击这里后按 Ctrl/Cmd+V，也可以选择本地图片</span>
                 </div>
                 <div className="reference-actions">
+                  <button className="btn-secondary" type="button" onClick={openHistoryPicker} disabled={historyPickerRoom <= 0}>
+                    <Images size={16} />
+                    从历史选择
+                  </button>
                   <label className="btn-secondary upload-btn">
                     <Upload size={16} />
                     添加图片
@@ -2095,6 +2237,106 @@ export function GeneratePage(props: {
           </div>
         </div>
       )}
+
+      {historyPickerOpen ? (
+        <Modal
+          title="从生图历史选择"
+          onClose={() => setHistoryPickerOpen(false)}
+          wide
+          className="history-reference-modal"
+          headerContent={<span className="history-reference-selected-count">已选 {historyPickerSelected.size}/{historyPickerRoom}</span>}
+        >
+          <div className="history-reference-picker">
+            <div className="history-reference-toolbar">
+              <label className="history-reference-search">
+                <Search size={17} aria-hidden="true" />
+                <input
+                  className="control"
+                  type="search"
+                  aria-label="搜索历史图片提示词"
+                  placeholder="搜索提示词"
+                  value={historyPickerQuery}
+                  onChange={(event) => {
+                    setHistoryPickerQuery(event.target.value);
+                    setHistoryPickerPage(1);
+                  }}
+                  autoFocus
+                />
+              </label>
+              <span>{historyPickerScopeLabel} · 共 {historyPickerTotal} 条记录</span>
+            </div>
+
+            {historyPickerMessage ? <div className="history-reference-message" role="status">{historyPickerMessage}</div> : null}
+
+            <div className="history-reference-results" aria-live="polite">
+              {historyPickerLoading ? (
+                <div className="history-reference-empty">
+                  <Loader2 className="spin" size={28} />
+                  <span>正在读取生图历史...</span>
+                </div>
+              ) : historyPickerCandidates.length > 0 ? (
+                <div className="history-reference-grid">
+                  {historyPickerCandidates.map(({ key, item, image, imageIndex, src, previewSrc, alreadyAdded }) => {
+                    const selected = historyPickerSelected.has(key);
+                    const name = image.filename || `历史图片-${imageIndex + 1}.png`;
+                    return (
+                      <button
+                        className={`history-reference-item ${selected ? "is-selected" : ""} ${alreadyAdded ? "is-added" : ""}`}
+                        type="button"
+                        key={key}
+                        onClick={() => toggleHistoryReference(key, {
+                          id: createClientId(`history-reference-${item.id}-${imageIndex + 1}`),
+                          src,
+                          previewSrc,
+                          name,
+                          size: image.size || image.previewSize || 0,
+                        }, alreadyAdded)}
+                        disabled={alreadyAdded}
+                        aria-pressed={alreadyAdded ? undefined : selected}
+                        aria-label={`${alreadyAdded ? "已添加" : selected ? "取消选择" : "选择"}：${item.prompt}`}
+                      >
+                        <span className="history-reference-image">
+                          <img src={previewSrc} alt="" loading="lazy" decoding="async" />
+                          {selected ? <span className="history-reference-check"><Check size={15} />已选</span> : null}
+                          {alreadyAdded ? <span className="history-reference-check is-added"><Check size={15} />已添加</span> : null}
+                        </span>
+                        <span className="history-reference-copy">
+                          <strong title={item.prompt}>{item.prompt}</strong>
+                          <small>{formatFullTime(item.createdAt)}{item.images.length > 1 ? ` · 第 ${imageIndex + 1} 张` : ""}</small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="history-reference-empty">
+                  <Images size={30} />
+                  <strong>{historyPickerQuery.trim() ? "没有匹配的历史图片" : "暂无可用的历史图片"}</strong>
+                </div>
+              )}
+            </div>
+
+            <div className="history-reference-footer">
+              <div className="history-reference-pager" aria-label="历史图片分页">
+                <button className="btn-secondary" type="button" onClick={() => setHistoryPickerPage((page) => Math.max(1, page - 1))} disabled={historyPickerPage <= 1 || historyPickerLoading}>
+                  上一页
+                </button>
+                <span>第 {historyPickerPage} / {historyPickerTotalPages} 页</span>
+                <button className="btn-secondary" type="button" onClick={() => setHistoryPickerPage((page) => Math.min(historyPickerTotalPages, page + 1))} disabled={historyPickerPage >= historyPickerTotalPages || historyPickerLoading}>
+                  下一页
+                </button>
+              </div>
+              <div className="history-reference-confirm">
+                <button className="btn-secondary" type="button" onClick={() => setHistoryPickerOpen(false)}>取消</button>
+                <button className="btn-primary" type="button" onClick={addSelectedHistoryReferences} disabled={historyPickerSelected.size === 0}>
+                  <ImagePlus size={16} />
+                  {historyPickerSelected.size > 0 ? `添加 ${historyPickerSelected.size} 张` : "添加"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   );
 }
