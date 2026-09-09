@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardE
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
 import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
-import { copyText, createClientId, errorMessage, extractPreviewImages, readFileAsDataUrl, summarizeJson } from "@/shared/lib/app-utils";
+import { copyText, createClientId, errorMessage, readFileAsDataUrl } from "@/shared/lib/app-utils";
 import { formatDuration, formatFullTime, formatJson } from "@/shared/lib/format";
 import { profileLabel } from "@/shared/lib/profiles";
 import { userDisplayName } from "@/shared/lib/users";
@@ -21,13 +21,6 @@ type OutputFormat = "png" | "webp" | "jpeg";
 type PreviewRatioClass = "ratio-square" | "ratio-wide" | "ratio-tall" | "ratio-classic";
 type ReferenceImageState = { id: string; src: string; previewSrc: string; name: string; size: number };
 type ResolutionOption = { preset: ResolutionPreset; label: string; disabled?: boolean; reason?: string };
-type GenerateRunSummary = {
-  durationMs: number;
-  waitDurationMs?: number;
-  status: "idle" | "running" | "success" | "limited" | "failed" | "suggested";
-  message: string;
-};
-
 type PromptSuggestion = {
   title: string;
   prompt: string;
@@ -47,6 +40,7 @@ type GenerateHistoryItem = {
   owner?: string;
   createdAt: number;
   startedAt?: number;
+  updatedAt?: number;
   status: "queued" | "running" | "success" | "failed" | "interrupted";
   endpoint: string;
   account: string;
@@ -58,6 +52,8 @@ type GenerateHistoryItem = {
   outputFormat?: OutputFormat;
   durationMs: number;
   waitDurationMs?: number;
+  request?: { n?: number };
+  responseSummary?: Record<string, unknown>;
   error?: string;
   referenceImages: Array<{
     name?: string;
@@ -76,6 +72,26 @@ type GenerateHistoryItem = {
     previewMimeType?: string;
     previewSize?: number;
   }>;
+};
+
+type PendingGenerationJob = {
+  id: string;
+  submittedAt: number;
+  status: "queued" | "running";
+  endpoint: string;
+  prompt: string;
+  ratio: string;
+  size: string;
+  count: number;
+  waitDurationMs?: number;
+  durationMs?: number;
+  pollError?: string;
+};
+
+type BackgroundGenerationResponse = {
+  id?: string;
+  status?: "queued";
+  history_url?: string;
 };
 
 type GenerateHistoryResponse = {
@@ -129,6 +145,26 @@ function historyPreviewItems(item: GenerateHistoryItem): ModalImageItem[] {
     filename: image.filename,
     ratio: image.width && image.height ? `${image.width}:${image.height}` : item.ratio || item.size,
   }));
+}
+
+function previewImagesFromHistory(item: GenerateHistoryItem): PreviewImage[] {
+  return item.images.flatMap((image, index) => {
+    const src = image.previewUrl || image.url;
+    const fullSrc = image.url || image.previewUrl;
+    if (!src || !fullSrc) return [];
+    const dimension = image.width && image.height ? `${image.width}×${image.height} · ` : "";
+    return [{
+      src,
+      fullSrc,
+      filename: image.filename || `generated-${index + 1}.${item.outputFormat || "png"}`,
+      meta: image.previewSize
+        ? `${dimension}预览 ${(image.previewSize / 1024).toFixed(1)} KB`
+        : `${dimension}${image.mimeType || "image"}`,
+      fullMeta: image.size ? `${image.mimeType || "image"}${dimension ? ` · ${dimension.trimEnd().replace(/ ·$/, "")}` : ""} · ${(image.size / 1024).toFixed(1)} KB` : undefined,
+      width: image.width,
+      height: image.height,
+    }];
+  });
 }
 
 type GenerateReportResponse = {
@@ -390,19 +426,6 @@ function generateStatusMeta(status: GenerateHistoryItem["status"]): { className:
   if (status === "running") return { className: "is-running", label: "处理中" };
   if (status === "interrupted") return { className: "is-interrupted", label: "已中断" };
   return { className: "is-failed", label: "失败" };
-}
-
-function extractErrorMessage(payload: unknown, fallback: string): string {
-  if (
-    payload &&
-    typeof payload === "object" &&
-    "error" in payload &&
-    typeof (payload as { error?: { message?: unknown } }).error?.message === "string"
-  ) {
-    return (payload as { error: { message: string } }).error.message;
-  }
-
-  return fallback;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -729,12 +752,13 @@ export function GeneratePage(props: {
   const [reportLoading, setReportLoading] = useState(false);
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null);
   const [manualCopyPrompt, setManualCopyPrompt] = useState<string | null>(null);
-  const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
-  const [elapsedNow, setElapsedNow] = useState(0);
-  const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
-  const [runSummary, setRunSummary] = useState<GenerateRunSummary | null>(null);
+  const [pendingJobs, setPendingJobs] = useState<PendingGenerationJob[]>([]);
+  const [pendingJobsNow, setPendingJobsNow] = useState(() => Date.now());
+  const [submittingGeneration, setSubmittingGeneration] = useState(false);
   const [promptSuggestion, setPromptSuggestion] = useState<PromptSuggestion | null>(null);
-  const generatingRef = useRef(false);
+  const submittingGenerationRef = useRef(false);
+  const pendingJobsRuntime = useRef({ pendingJobs, refreshHistory, refreshConfig: props.refreshConfig, setStatus: props.setStatus });
+  const hasPendingJobs = pendingJobs.length > 0;
 
   const selectedSize = useMemo(() => {
     const presetSize = sizeForPreset(ratio, resolutionPreset);
@@ -749,7 +773,8 @@ export function GeneratePage(props: {
   const referenceSummary = referenceImages.length > 0
     ? `${referenceImages.length}/${MAX_REFERENCE_IMAGES} 张参考图 · ${(referenceImages.reduce((sum, image) => sum + image.size, 0) / 1024).toFixed(1)} KB`
     : `可选，最多 ${MAX_REFERENCE_IMAGES} 张，上传后走图片编辑接口`;
-  const canGenerate = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && props.busy !== "test" && props.busy !== "prompt-optimize";
+  const duplicatePendingJob = pendingJobs.some((job) => job.endpoint === endpoint && job.prompt === prompt.trim());
+  const canGenerate = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && !submittingGeneration && !duplicatePendingJob && props.busy !== "prompt-optimize";
   const canOptimizePrompt = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && props.busy !== "test" && props.busy !== "prompt-optimize";
   const filteredHistory = useMemo(() => {
     const query = historyPromptQuery.trim().toLowerCase();
@@ -1181,15 +1206,106 @@ export function GeneratePage(props: {
   }, [tab, historyEndTime, historyOwnerFilter, historyStartTime]);
 
   useEffect(() => {
-    if (!generationStartedAt || props.busy !== "test") {
-      return undefined;
-    }
+    pendingJobsRuntime.current = { pendingJobs, refreshHistory, refreshConfig: props.refreshConfig, setStatus: props.setStatus };
+  });
 
-    const updateElapsed = () => setElapsedNow(performance.now() - generationStartedAt);
-    updateElapsed();
-    const timer = window.setInterval(updateElapsed, 1000);
+  useEffect(() => {
+    setPendingJobs([]);
+    if (!props.currentUser) return undefined;
+    const controller = new AbortController();
+    void Promise.all(["queued", "running"].map((status) => fetchJson<GenerateHistoryResponse>(
+      `/_gateway/generations/history?status=${status}&limit=100&light=false`,
+      { signal: controller.signal },
+    ))).then((responses) => {
+      if (controller.signal.aborted) return;
+      const restored = responses.flatMap((response) => response.items).flatMap((item): PendingGenerationJob[] => {
+        if (item.status !== "queued" && item.status !== "running") return [];
+        return [{
+          id: item.id,
+          submittedAt: item.createdAt,
+          status: item.status,
+          endpoint: item.endpoint,
+          prompt: item.prompt,
+          ratio: item.ratio || "auto",
+          size: item.size || "自动尺寸",
+          count: normalizeGenerationCount(String(item.request?.n ?? 1)),
+          waitDurationMs: item.waitDurationMs,
+          durationMs: item.durationMs,
+        }];
+      });
+      setPendingJobs((current) => Array.from(new Map([...restored, ...current].map((job) => [job.id, job])).values())
+        .sort((left, right) => right.submittedAt - left.submittedAt));
+    }).catch((error) => {
+      if (!controller.signal.aborted) pendingJobsRuntime.current.setStatus(`恢复生图队列失败：${errorMessage(error)}`);
+    });
+    return () => controller.abort();
+  }, [props.currentUser]);
+
+  useEffect(() => {
+    if (!hasPendingJobs) return undefined;
+    const timer = window.setInterval(() => setPendingJobsNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [generationStartedAt, props.busy]);
+  }, [hasPendingJobs]);
+
+  useEffect(() => {
+    if (!hasPendingJobs) return undefined;
+
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const refreshPendingJobs = async () => {
+      await Promise.all(pendingJobsRuntime.current.pendingJobs.map(async (job) => {
+        try {
+          const result = await fetchJson<{ item: GenerateHistoryItem }>(`/_gateway/generations/history/${encodeURIComponent(job.id)}`, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          const item = result.item;
+          if (item.status === "queued" || item.status === "running") {
+            setPendingJobs((items) => {
+              const index = items.findIndex((current) => current.id === job.id);
+              if (index < 0) return items;
+              const current = items[index]!;
+              const status = item.status === "queued" ? "queued" : "running";
+              if (current.status === status && current.waitDurationMs === item.waitDurationMs && current.durationMs === item.durationMs && !current.pollError) {
+                return items;
+              }
+              const next = [...items];
+              next[index] = { ...current, status, waitDurationMs: item.waitDurationMs, durationMs: item.durationMs, pollError: undefined };
+              return next;
+            });
+            return;
+          }
+
+          setPendingJobs((items) => items.filter((current) => current.id !== job.id));
+          const runtime = pendingJobsRuntime.current;
+          runtime.refreshHistory({ silent: true }).catch(() => undefined);
+          if (item.status === "success") {
+            const images = previewImagesFromHistory(item);
+            setResultImages(images);
+            setResponseBody(formatJson({ id: item.id, status: item.status, response: item.responseSummary, images: item.images.length }));
+            setPromptSuggestion(null);
+            runtime.setStatus(images.length > 0 ? `生图完成，耗时 ${formatDuration(item.durationMs)}。` : "生图完成，但没有可预览图片。");
+            runtime.refreshConfig({ silent: true }).catch(() => undefined);
+            return;
+          }
+
+          const suggestion = extractPromptSuggestion(item.error || "");
+          setPromptSuggestion(suggestion);
+          setResponseBody(formatJson({ id: item.id, status: item.status, error: item.error }));
+          runtime.setStatus(suggestion ? "已提取上游给出的替代方案，可点击采纳。" : `生图失败：${item.error || "任务已中断。"}`);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          const pollError = errorMessage(error);
+          setPendingJobs((items) => items.map((current) => current.id === job.id ? { ...current, pollError } : current));
+        }
+      }));
+      if (!controller.signal.aborted) timer = window.setTimeout(() => void refreshPendingJobs(), 2000);
+    };
+
+    void refreshPendingJobs();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [hasPendingJobs, props.currentUser]);
 
   function toggleHistorySelection(item: GenerateHistoryItem) {
     setSelectedHistoryItems((current) => {
@@ -1474,28 +1590,21 @@ export function GeneratePage(props: {
   }
 
   async function runGenerate() {
-    if (generatingRef.current || props.busy === "test") {
-      props.setStatus("已有生图任务正在执行，请等待完成。");
+    if (submittingGenerationRef.current) {
+      props.setStatus("正在提交当前生图任务，请稍候。");
+      return;
+    }
+    if (duplicatePendingJob) {
+      props.setStatus("相同提示词的任务仍在队列中，请修改提示词或等待完成。");
       return;
     }
     if (!selectedSizeValid) {
       props.setStatus("自定义尺寸格式应为 宽x高，例如 2160x3840。");
       return;
     }
-    generatingRef.current = true;
-    const startedAt = performance.now();
-    props.setBusy("test");
-    setGenerationStartedAt(startedAt);
-    setElapsedNow(0);
-    setLastDurationMs(null);
-    setRunSummary({
-      durationMs: 0,
-      status: "running",
-      message: "正在生成图片...",
-    });
+    submittingGenerationRef.current = true;
+    setSubmittingGeneration(true);
     setPromptSuggestion(null);
-    setResponseBody("正在生成图片...");
-    setResultImages([]);
     const imageCount = normalizeGenerationCount(generationCount);
     setGenerationCount(String(imageCount));
     try {
@@ -1509,6 +1618,7 @@ export function GeneratePage(props: {
             quality,
             output_format: outputFormat,
             response_format: "b64_json",
+            _gateway_background: true,
           }
         : {
             model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
@@ -1518,92 +1628,54 @@ export function GeneratePage(props: {
             quality,
             output_format: outputFormat,
             response_format: "b64_json",
+            _gateway_background: true,
           };
 
-      const response = await fetch(endpoint, {
+      const result = await fetchJson<BackgroundGenerationResponse>(endpoint, {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: formatJson(body),
       });
-      const text = await response.text();
-      let parsed: unknown = text;
-      try {
-        parsed = text ? JSON.parse(text) : null;
-      } catch {
-        parsed = text;
+      if (!result.id || result.status !== "queued") {
+        throw new Error("服务端未返回可跟踪的生图任务。");
       }
-      const durationMs = performance.now() - startedAt;
-      setLastDurationMs(durationMs);
-      setResponseBody(typeof parsed === "string" ? parsed : formatJson(summarizeJson(parsed)));
-      refreshHistory({ silent: true }).catch(() => undefined);
-
-      if (!response.ok) {
-        const message = extractErrorMessage(parsed, `HTTP ${response.status}`);
-        const suggestion = extractPromptSuggestion(parsed);
-        setPromptSuggestion(suggestion);
-        setRunSummary({
-          durationMs,
-          status: suggestion ? "suggested" : response.status === 429 ? "limited" : "failed",
-          message: suggestion ? "上游拒绝了原请求，但返回了可替代提示词。" : message,
-        });
-        props.setStatus(suggestion ? "已提取上游给出的替代方案，可点击采纳。" : `生图失败：${message}`);
-        return;
-      }
-
-      if (parsed === null || typeof parsed === "undefined" || parsed === "") {
-        setResponseBody("响应为空：服务端没有返回图片或错误详情，请查看历史/请求日志。");
-        setRunSummary({
-          durationMs,
-          status: "failed",
-          message: "服务端返回空响应。",
-        });
-        props.setStatus("生图异常：服务端返回空响应，已刷新服务端历史。");
-        return;
-      }
-
-      const images = extractPreviewImages(parsed);
-      setResultImages(images);
-      const suggestion = images.length > 0 ? null : extractPromptSuggestion(parsed);
-      setPromptSuggestion(suggestion);
-      setRunSummary({
-        durationMs,
-        status: images.length > 0 ? "success" : suggestion ? "suggested" : "failed",
-        message: images.length > 0 ? "生图完成。" : suggestion ? "上游未返回图片，但给出了可替代提示词。" : "请求成功，但响应里没有图片。",
-      });
+      const jobId = result.id;
+      const submittedAt = Date.now();
+      setPendingJobs((jobs) => [{
+        id: jobId,
+        submittedAt,
+        status: "queued",
+        endpoint,
+        prompt: prompt.trim(),
+        ratio,
+        size: selectedSize,
+        count: imageCount,
+      }, ...jobs.filter((job) => job.id !== jobId)]);
+      setResponseBody(formatJson({ id: result.id, status: "queued", history_url: result.history_url }));
       props.setRequestLogs((items) => [
         {
-          id: createClientId("request"),
-          time: Date.now(),
+          id: jobId,
+          time: submittedAt,
           method: "POST",
           endpoint,
           account: profileLabel(props.config?.profile, props.showEmails),
           model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
-          statusCode: response.status,
-          durationMs,
+          statusCode: 202,
+          durationMs: 0,
           source: "生图工作台",
         },
         ...items,
       ].slice(0, 20));
-      props.setStatus(images.length > 0 ? `生图完成，耗时 ${formatDuration(durationMs)}。` : suggestion ? "已提取上游给出的替代方案，可点击采纳。" : "生图异常：请求成功，但响应里没有图片。");
-      props.refreshConfig({ silent: true }).catch(() => undefined);
+      props.setStatus(`生图任务已加入队列，可继续提交下一项。`);
     } catch (error) {
       const message = errorMessage(error);
-      const durationMs = performance.now() - startedAt;
       const suggestion = extractPromptSuggestion(message);
-      setLastDurationMs(durationMs);
       setPromptSuggestion(suggestion);
-      setRunSummary({
-        durationMs,
-        status: suggestion ? "suggested" : "failed",
-        message: suggestion ? "上游拒绝了原请求，但返回了可替代提示词。" : message,
-      });
       setResponseBody(message);
       props.setStatus(suggestion ? "已提取上游给出的替代方案，可点击采纳。" : `生图失败：${message}`);
     } finally {
-      generatingRef.current = false;
-      setGenerationStartedAt(null);
-      props.setBusy(null);
+      submittingGenerationRef.current = false;
+      setSubmittingGeneration(false);
     }
   }
 
@@ -1847,31 +1919,47 @@ export function GeneratePage(props: {
               ) : null}
             </details>
 
-            {(props.busy === "test" || runSummary || lastDurationMs !== null) ? (
-              <div className={`generate-duration ${runSummary?.status ? `is-${runSummary.status}` : ""}`}>
-                <span>排队 {formatGenerateElapsed(runSummary?.waitDurationMs ?? 0)}</span>
-                <strong>耗时 {formatGenerateElapsed(props.busy === "test" ? elapsedNow : runSummary?.durationMs ?? lastDurationMs ?? 0)}</strong>
-                <em>
-                  {props.busy === "test"
-                    ? "生成中"
-                    : runSummary?.status === "success"
-                      ? "成功"
-                    : runSummary?.status === "limited"
-                      ? "限额限制"
-                      : runSummary?.status === "suggested"
-                        ? "可采纳"
-                      : runSummary?.status === "failed"
-                        ? "失败"
-                        : "待开始"}
-                </em>
-                <small title={runSummary?.message || ""}>{runSummary?.message || "等待提交生图请求。"}</small>
-              </div>
-            ) : null}
-
             <button className="btn-primary generate-submit" type="button" onClick={runGenerate} disabled={!canGenerate}>
-              {props.busy === "test" ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
-              开始生图
+              {submittingGeneration ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+              {submittingGeneration ? "正在加入队列" : "开始生图"}
             </button>
+            {duplicatePendingJob ? <p className="field-hint">已有相同提示词的任务，修改提示词后可继续提交。</p> : null}
+
+            {pendingJobs.length > 0 ? (
+              <section className="generation-queue" aria-label="进行中的生图任务">
+                <div className="generation-queue-heading">
+                  <div>
+                    <strong>进行中的任务</strong>
+                    <span>可继续提交，任务按服务端并发策略处理</span>
+                  </div>
+                  <span className="generation-queue-count">{pendingJobs.length} 项</span>
+                </div>
+                <div className="generation-queue-list">
+                  {pendingJobs.map((job) => {
+                    const meta = generateStatusMeta(job.status);
+                    const elapsed = job.status === "running"
+                      ? Math.max(job.durationMs ?? 0, pendingJobsNow - job.submittedAt - (job.waitDurationMs ?? 0))
+                      : Math.max(job.waitDurationMs ?? 0, pendingJobsNow - job.submittedAt);
+                    return (
+                      <article className="generation-queue-item" key={job.id}>
+                        <div className="generation-queue-item-main">
+                          <div className="generation-queue-item-topline">
+                            <span className={`generate-status ${meta.className}`}>{job.status === "running" ? <Loader2 className="spin" size={12} /> : null}{meta.label}</span>
+                            <span>{job.size} · {job.count} 张</span>
+                          </div>
+                          <p title={job.prompt}>{job.prompt}</p>
+                          {job.pollError ? <span className="generation-queue-item-error" role="status">状态同步失败，将自动重试：{job.pollError}</span> : null}
+                        </div>
+                        <div className="generation-queue-item-timing">
+                          <strong>{job.status === "queued" ? `已排队 ${formatGenerateElapsed(elapsed)}` : `生成 ${formatGenerateElapsed(elapsed)}`}</strong>
+                          <span>{job.endpoint === "/v1/images/edits" ? "参考图编辑" : "文生图"}</span>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
 
             <div className="prompt-examples" aria-label="示例提示词">
               {promptExamples.map((example) => (

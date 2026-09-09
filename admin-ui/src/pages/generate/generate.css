@@ -647,6 +647,121 @@
   font-size: 14px;
 }
 
+.generation-queue {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.generation-queue-heading,
+.generation-queue-item-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.generation-queue-heading > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.generation-queue-heading strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.generation-queue-heading > div span,
+.generation-queue-item-topline > span:last-child,
+.generation-queue-item-timing span {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.generation-queue-count {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: #1d4ed8;
+  background: #dbeafe;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.generation-queue-list {
+  display: grid;
+  gap: 6px;
+}
+
+.generation-queue-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.generation-queue-item-main {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.generation-queue-item-topline {
+  justify-content: flex-start;
+}
+
+.generation-queue-item-topline > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generation-queue-item p {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generation-queue-item-timing {
+  min-width: 72px;
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+  text-align: right;
+}
+
+.generation-queue-item-timing strong {
+  color: #1e40af;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.generation-queue-item .generate-status {
+  gap: 4px;
+}
+
+.generation-queue-item-error {
+  color: #b91c1c;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .prompt-examples {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2183,6 +2298,22 @@
 
   .prompt-examples {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .generation-queue-item {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .generation-queue-item-timing {
+    width: 100%;
+    grid-template-columns: 1fr auto;
+    justify-items: start;
+    text-align: left;
+  }
+
+  .generation-queue-item-timing span {
+    text-align: right;
   }
 
   .generate-preview-card button {
