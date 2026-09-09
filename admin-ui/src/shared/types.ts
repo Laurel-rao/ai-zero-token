@@ -55,6 +55,13 @@ export type GatewaySettings = {
   version: number;
   defaultProvider: string;
   defaultModel: string;
+  modelRouting: {
+    chatModel: string;
+    imageClassifierModel: string;
+    imageGenerationModel: string;
+    imageOrchestratorModel: string;
+    promptOptimizerModel: string;
+  };
   branding: {
     title: string;
     appIconUrl: string;
@@ -131,6 +138,7 @@ export type ModelInfo = {
   id: string;
   name: string;
   input: Array<"text" | "image">;
+  output?: Array<"text" | "image">;
   source: string;
   isDefault?: boolean;
 };

@@ -28,8 +28,6 @@ const COMPOSER_MAX_HEIGHT = 150;
 const CHAT_HISTORY_LIMIT = 100;
 const CHAT_MESSAGE_PAGE_SIZE = 80;
 const CHAT_DETAIL_CACHE_LIMIT = 8;
-const CHAT_IMAGE_CLASSIFIER_MODEL = "gpt-5.6-terra";
-const CHAT_IMAGE_GENERATION_MODEL = "gpt-image-2";
 const CHAT_IMAGE_GENERATION_SIZE = "1024x576";
 const CHAT_IMAGE_GENERATION_QUALITY = "high";
 const CHAT_IMAGE_POLL_INTERVAL_MS = 2000;
@@ -1223,7 +1221,7 @@ export function ChatPage(props: {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
-  const [model, setModel] = useState(props.config?.settings.defaultModel || "");
+  const [model, setModel] = useState(props.config?.settings.modelRouting?.chatModel || props.config?.settings.defaultModel || "");
   const [loading, setLoading] = useState(false);
   const [sendingConversationIds, setSendingConversationIds] = useState<Set<string>>(() => new Set());
   const [creatingConversationStream, setCreatingConversationStream] = useState(false);
@@ -1279,10 +1277,11 @@ export function ChatPage(props: {
   const detailConversation = useMemo(() => conversations.find((item) => item.id === detailConversationId) ?? null, [conversations, detailConversationId]);
   const activeCachedConversation = activeId ? conversationCacheRef.current.get(activeId) ?? null : null;
   const canLoadOlderMessages = Boolean((activeCachedConversation ?? activeConversation)?.hasMoreMessages && messages.length > 0);
+  const configuredChatModel = props.config?.settings.modelRouting?.chatModel || props.config?.settings.defaultModel || "";
   const textModels = useMemo(() => props.config?.models.filter((item) => item.input.includes("text")) ?? [], [props.config?.models]);
   const selectableTextModels = textModels.length > 0
     ? textModels
-    : [{ id: props.config?.settings.defaultModel || "gpt-5.4", name: props.config?.settings.defaultModel || "gpt-5.4", input: ["text" as const], provider: "openai-codex", source: "default" }];
+    : configuredChatModel ? [{ id: configuredChatModel, name: configuredChatModel, input: ["text" as const], provider: "openai-codex", source: "default" }] : [];
   const activeConversationSending = activeId ? sendingConversationIds.has(activeId) : creatingConversationStream;
   const activeQueuedSubmissions = activeId ? queuedSubmissions[activeId] ?? [] : [];
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !uploadingAttachments && (!creatingConversationStream || Boolean(activeId));
@@ -1290,10 +1289,10 @@ export function ChatPage(props: {
   const attachmentNoticeStatus = attachmentNoticeTone(attachmentNotice, uploadingAttachments);
 
   useEffect(() => {
-    if (!model && props.config?.settings.defaultModel) {
-      setModel(props.config.settings.defaultModel);
+    if (!model && configuredChatModel) {
+      setModel(configuredChatModel);
     }
-  }, [model, props.config?.settings.defaultModel]);
+  }, [configuredChatModel, model]);
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -1837,7 +1836,7 @@ export function ChatPage(props: {
       setEditingMessage(null);
       setActiveConversationId(id);
       setMessages(cached.messages);
-      setModel(cached.model || props.config?.settings.defaultModel || model);
+      setModel(cached.model || configuredChatModel || model);
       setHistoryOpen(false);
     } else {
       setActiveConversationId(id);
@@ -1859,7 +1858,7 @@ export function ChatPage(props: {
       setMessages(result.item.messages);
       cacheConversation(result.item);
       mergeConversationSummary(result.item);
-      setModel(result.item.model || props.config?.settings.defaultModel || model);
+      setModel(result.item.model || configuredChatModel || model);
       setHistoryOpen(false);
     } catch (error) {
       if ((error as { name?: string }).name !== "AbortError") {
@@ -1922,7 +1921,7 @@ export function ChatPage(props: {
       const result = await fetchJson<{ item: ChatConversation & { messages: ChatMessage[] } }>("/_gateway/chats", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "新对话", model: model || props.config?.settings.defaultModel }),
+        body: JSON.stringify({ title: "新对话", model: model || configuredChatModel }),
       });
       shouldStickToBottomRef.current = true;
       setConversations((items) => [result.item, ...items.filter((item) => item.id !== result.item.id)]);
@@ -2338,7 +2337,7 @@ export function ChatPage(props: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: CHAT_IMAGE_CLASSIFIER_MODEL,
+          model: props.config?.settings.modelRouting?.imageClassifierModel || configuredChatModel,
           messages: [
             {
               role: "system",
@@ -2407,7 +2406,7 @@ export function ChatPage(props: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: CHAT_IMAGE_GENERATION_MODEL,
+          model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
           prompt,
           n: 1,
           size: CHAT_IMAGE_GENERATION_SIZE,
@@ -2538,7 +2537,7 @@ export function ChatPage(props: {
       conversationId,
       content,
       attachments: sendingAttachments,
-      model: model || props.config?.settings.defaultModel || "",
+      model: model || configuredChatModel,
       queuedAt,
     };
   }
@@ -2685,7 +2684,7 @@ export function ChatPage(props: {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: model || props.config?.settings.defaultModel }),
+        body: JSON.stringify({ model: model || configuredChatModel }),
         signal: controller.signal,
       });
       await readChatStream(response, targetId);
@@ -2720,7 +2719,7 @@ export function ChatPage(props: {
         method: "PATCH",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, model: model || props.config?.settings.defaultModel }),
+        body: JSON.stringify({ content, model: model || configuredChatModel }),
         signal: controller.signal,
       });
       await readChatStream(response, targetId);
@@ -3406,7 +3405,7 @@ export function ChatPage(props: {
               </div>
               <div>
                 <dt>使用模型</dt>
-                <dd>{detailConversation.model || props.config?.settings.defaultModel || "-"}</dd>
+                <dd>{detailConversation.model || configuredChatModel || "-"}</dd>
               </div>
               <div>
                 <dt>创建时间</dt>

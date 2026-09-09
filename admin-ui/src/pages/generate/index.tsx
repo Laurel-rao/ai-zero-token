@@ -1441,7 +1441,7 @@ export function GeneratePage(props: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: formatJson({
-          model: props.config?.settings.defaultModel || "gpt-5.4",
+          model: props.config?.settings.modelRouting?.promptOptimizerModel || props.config?.settings.defaultModel || "gpt-5.4",
           messages: [
             { role: "system", content: optimizerSystemPrompt },
             {
@@ -1501,7 +1501,7 @@ export function GeneratePage(props: {
     try {
       const body = referenceImages.length > 0
         ? {
-            model: "gpt-image-2",
+            model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
             prompt: prompt.trim(),
             images: referenceImages.map((image) => ({ image_url: image.src })),
             n: imageCount,
@@ -1511,7 +1511,7 @@ export function GeneratePage(props: {
             response_format: "b64_json",
           }
         : {
-            model: "gpt-image-2",
+            model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
             prompt: prompt.trim(),
             n: imageCount,
             size: selectedSize,
@@ -1578,7 +1578,7 @@ export function GeneratePage(props: {
           method: "POST",
           endpoint,
           account: profileLabel(props.config?.profile, props.showEmails),
-          model: "gpt-image-2",
+          model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
           statusCode: response.status,
           durationMs,
           source: "生图工作台",

@@ -70,6 +70,10 @@ export type ModalImage = ModalImageItem & { gallery?: ModalImageItem[]; index?: 
 
 export type SettingDraft = {
   defaultModel: string;
+  imageClassifierModel: string;
+  imageGenerationModel: string;
+  imageOrchestratorModel: string;
+  promptOptimizerModel: string;
   brandingTitle: string;
   brandingAppIconUrl: string;
   brandingFaviconUrl: string;

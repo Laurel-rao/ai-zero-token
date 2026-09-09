@@ -93,7 +93,8 @@ macOS 桌面端还会常驻菜单栏，提供快速账号面板。可以从菜�
 - 导出单个账号或勾选导出多个账号，并在账号卡片上显示导出状态。
 - 勾选后批量删除账号。
 - 将已保存账号应用到本机 Codex。
-- 配置默认文本模型和上游代理。
+- 在系统设置中从网关 `/models` 目录选择聊天模型、生图检查模型、生图服务模型、生图编排模型和提示词优化模型。
+- 配置上游代理。
 - 开启当前 API 账号额度耗尽后的自动切换，并配置不参与自动轮换的账号名单。
 - 为账号池较多的场景调整全局额度刷新并发数。
 - 测试 `models`、`responses`、`chat.completions`、`images.generations`、`images.edits`。
@@ -281,7 +282,7 @@ AZT_BODY_LIMIT_MB=256 azt start
 
 ChatGPT Images 的可用性和额度由上游账号决定。Plus、Team、Pro 等付费账号走 Codex Responses 的 `image_generation` tool。Free 账号只有在设置里开启“Free 账号生图”时才走 ChatGPT 网页图片链路；关闭时继续走原先 Codex 图片工具链路。Free 账号限制比付费账号更严格，官方没有公开固定张数；如果网页链路也耗尽额度，网关会展示上游真实返回。
 
-付费账号图片请求内部使用 `gpt-5.4-mini` 作为编排模型，并把请求里的图片模型（例如 `gpt-image-2`）传给 `image_generation` tool；开启“Free 账号生图”后，Free 账号会把同样的请求转换为 ChatGPT 网页图片任务。
+付费账号图片请求会使用系统设置中的“生图编排模型”调用 Responses API，再把“生图服务模型”（例如 `gpt-image-2`）传给 `image_generation` tool；开启“Free 账号生图”后，Free 账号会把同样的请求转换为 ChatGPT 网页图片任务。
 
 对于 JSON 图生图，base64 通常比原始图片大约 33%。在默认 `128 MiB` 请求体上限下，原始图片约 `96 MiB` 是比较实际的上限，再大就容易被 JSON 开销和本地内存影响。大图或批量场景建议优先使用可访问的图片 URL。
 

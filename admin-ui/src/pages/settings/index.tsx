@@ -18,9 +18,9 @@ import {
   UsersRound,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
-import type { AdminConfig, ProfileSummary } from "@/shared/types";
+import type { AdminConfig, ModelCatalogInfo, ModelInfo, ProfileSummary } from "@/shared/types";
 import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
 import { errorMessage, readFileAsDataUrl } from "@/shared/lib/app-utils";
 import { formatDuration, formatFileSize, formatFullTime, formatJson } from "@/shared/lib/format";
@@ -40,8 +40,13 @@ function timeoutMinutesToDraft(value: number | undefined): string {
 function createSettingsDraft(config: AdminConfig): SettingDraft {
   const imageLimits = config.settings.image?.limits;
   const branding = normalizeBranding(config.settings.branding);
+  const modelRouting = config.settings.modelRouting;
   return {
-    defaultModel: config.settings.defaultModel,
+    defaultModel: modelRouting?.chatModel || config.settings.defaultModel,
+    imageClassifierModel: modelRouting?.imageClassifierModel || "",
+    imageGenerationModel: modelRouting?.imageGenerationModel || "",
+    imageOrchestratorModel: modelRouting?.imageOrchestratorModel || "",
+    promptOptimizerModel: modelRouting?.promptOptimizerModel || "",
     brandingTitle: branding.title,
     brandingAppIconUrl: branding.appIconUrl,
     brandingFaviconUrl: branding.faviconUrl,
@@ -79,6 +84,18 @@ function profileSearchText(profile: ProfileSummary): string {
 }
 
 type SettingSectionId = "model" | "branding" | "api" | "wecom" | "proxy" | "runtime" | "limits" | "rotation" | "display";
+
+type ModelSettingField = "defaultModel" | "imageClassifierModel" | "imageGenerationModel" | "imageOrchestratorModel" | "promptOptimizerModel";
+
+const MODEL_SETTING_FIELDS: Array<{ key: ModelSettingField; label: string; hint: string; output: "text" | "image" }> = [
+  { key: "defaultModel", label: "聊天模型", hint: "新聊天及未指定模型的文本接口使用；已有会话保留原模型。", output: "text" },
+  { key: "imageClassifierModel", label: "生图检查模型", hint: "判断聊天回复是否包含可用于生图的提示词，不负责生成图片。", output: "text" },
+  { key: "imageGenerationModel", label: "生图服务模型", hint: "实际输出图片，供生图工作台和聊天生图使用。", output: "image" },
+  { key: "imageOrchestratorModel", label: "生图编排模型", hint: "服务端调用图片生成工具的文本模型，与图片输出模型不同。", output: "text" },
+  { key: "promptOptimizerModel", label: "提示词优化模型", hint: "生图工作台“优化提示词”按钮使用的文本模型。", output: "text" },
+];
+
+type ModelsResponse = { data: ModelInfo[]; catalog: ModelCatalogInfo };
 
 type SettingSectionMeta = {
   id: SettingSectionId;
@@ -131,6 +148,10 @@ export function SettingsPage(props: {
 }) {
   const [settingsDraft, setSettingsDraft] = useState<SettingDraft>({
     defaultModel: "",
+    imageClassifierModel: "",
+    imageGenerationModel: "",
+    imageOrchestratorModel: "",
+    promptOptimizerModel: "",
     brandingTitle: "AI Zero Token",
     brandingAppIconUrl: "",
     brandingFaviconUrl: "",
@@ -160,7 +181,30 @@ export function SettingsPage(props: {
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
   const [openSections, setOpenSections] = useState<Set<SettingSectionId>>(() => new Set(props.role === "user" ? ["api"] : ["model"]));
   const [brandingUploadBusy, setBrandingUploadBusy] = useState<BrandingAssetKind | null>(null);
+  const [modelDirectory, setModelDirectory] = useState<ModelsResponse | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
   const settingsDirty = settingsDirtyFields.size > 0;
+
+  const loadModelDirectory = useCallback(async (signal?: AbortSignal) => {
+    setModelsLoading(true);
+    setModelsError("");
+    try {
+      const result = await fetchJson<ModelsResponse>("/_gateway/models", { signal });
+      if (!signal?.aborted) setModelDirectory(result);
+    } catch (error) {
+      if (!signal?.aborted) setModelsError(`读取模型目录失败：${errorMessage(error)}`);
+    } finally {
+      if (!signal?.aborted) setModelsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (props.role !== "admin") return;
+    const controller = new AbortController();
+    void loadModelDirectory(controller.signal);
+    return () => controller.abort();
+  }, [loadModelDirectory, props.role]);
 
   useEffect(() => {
     if (!props.config || settingsDirty) {
@@ -211,7 +255,14 @@ export function SettingsPage(props: {
     (profile) => !excludedProfileIds.has(profile.profileId) && autoSwitchEligibility(profile).key === "ready",
   ).length;
   const autoSwitchBlockedCount = Math.max(0, autoSwitchTotalCount - autoSwitchExcludedCount - autoSwitchRuntimeReadyCount);
-  const modelCount = props.config?.modelCatalog.modelCount || props.config?.models.length || 0;
+  const textModels = modelDirectory?.data.filter((model) => model.output?.includes("text")) ?? [];
+  const imageModels = modelDirectory?.data.filter((model) => model.output?.includes("image")) ?? [];
+  const modelCount = textModels.length;
+  const imageModelCount = imageModels.length;
+  const invalidModelFields = MODEL_SETTING_FIELDS.filter((field) => {
+    const models = field.output === "image" ? imageModels : textModels;
+    return !models.some((model) => model.id === settingsDraft[field.key]);
+  });
   const modelAutoRefresh = props.config?.modelAutoRefresh;
   const isAdmin = props.role === "admin";
   const wecomConfigured = Boolean(settingsDraft.wecomEnabled && settingsDraft.wecomCorpId.trim() && settingsDraft.wecomAgentId.trim());
@@ -236,12 +287,12 @@ export function SettingsPage(props: {
     {
       id: "model",
       title: "模型配置",
-      description: "选择默认文本模型及同步模型目录",
+      description: "为聊天、检查和生图链路选择模型",
       icon: Layers3,
       tone: "violet",
-      status: selectedModel,
-      statusTone: "success",
-      metrics: [`${modelCount} 个模型`, props.config?.modelCatalog.source ? `来源 ${props.config.modelCatalog.source}` : "来源 -", modelAutoRefreshStatus],
+      status: modelsLoading ? "加载目录中" : modelsError ? "目录加载失败" : invalidModelFields.length > 0 ? "有模型待选择" : selectedModel,
+      statusTone: modelsError || invalidModelFields.length > 0 ? "warn" : "success",
+      metrics: [`${modelCount} 个文本模型`, `${imageModelCount} 个生图模型`, modelAutoRefreshStatus],
     },
     {
       id: "branding",
@@ -387,6 +438,18 @@ export function SettingsPage(props: {
       }
       return;
     }
+    if (MODEL_SETTING_FIELDS.some((field) => hasDirtyField(field.key))) {
+      if (modelsLoading || modelsError || !modelDirectory) {
+        props.setStatus("请先成功加载模型目录，再保存模型设置。");
+        return;
+      }
+      const invalidField = invalidModelFields.find((field) => hasDirtyField(field.key));
+      if (invalidField) {
+        props.setStatus(`${invalidField.label}不在当前目录中，请从下拉列表重新选择。`);
+        setOpenSections((current) => new Set([...current, "model"]));
+        return;
+      }
+    }
     const parseLimit = (value: string, label: string, max = 100_000): number | null => {
       const parsed = Number.parseInt(value || "0", 10);
       if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) {
@@ -467,7 +530,13 @@ export function SettingsPage(props: {
     }
 
     const payload: {
-      defaultModel?: string;
+      modelRouting?: {
+        chatModel?: string;
+        imageClassifierModel?: string;
+        imageGenerationModel?: string;
+        imageOrchestratorModel?: string;
+        promptOptimizerModel?: string;
+      };
       branding?: { title?: string; appIconUrl?: string; faviconUrl?: string };
       security?: { apiKey?: string; clearApiKey?: boolean };
       networkProxy?: { enabled: boolean; url: string; noProxy: string };
@@ -495,7 +564,18 @@ export function SettingsPage(props: {
     } = {};
 
     if (hasDirtyField("defaultModel")) {
-      payload.defaultModel = settingsDraft.defaultModel;
+      payload.modelRouting = {
+        chatModel: settingsDraft.defaultModel,
+      };
+    }
+    if (hasDirtyField("imageClassifierModel", "imageGenerationModel", "imageOrchestratorModel", "promptOptimizerModel")) {
+      payload.modelRouting = {
+        ...(payload.modelRouting || {}),
+        ...(hasDirtyField("imageClassifierModel") ? { imageClassifierModel: settingsDraft.imageClassifierModel } : {}),
+        ...(hasDirtyField("imageGenerationModel") ? { imageGenerationModel: settingsDraft.imageGenerationModel } : {}),
+        ...(hasDirtyField("imageOrchestratorModel") ? { imageOrchestratorModel: settingsDraft.imageOrchestratorModel } : {}),
+        ...(hasDirtyField("promptOptimizerModel") ? { promptOptimizerModel: settingsDraft.promptOptimizerModel } : {}),
+      };
     }
     if (hasDirtyField("brandingTitle", "brandingAppIconUrl", "brandingFaviconUrl")) {
       payload.branding = {};
@@ -632,16 +712,18 @@ export function SettingsPage(props: {
 
   async function refreshModels() {
     props.setBusy("models");
+    setModelsLoading(true);
     try {
-      const result = await fetchJson<{
-        catalog?: { modelCount?: number; source?: string; fetchedAt?: string };
-      }>("/_gateway/models/refresh", { method: "POST" });
+      const result = await fetchJson<ModelsResponse>("/_gateway/models/refresh", { method: "POST" });
+      setModelDirectory(result);
+      setModelsError("");
       await props.refreshConfig({ silent: true });
       const count = result.catalog?.modelCount ?? 0;
       props.setStatus(count > 0 ? `Codex 模型列表已从网络同步，共 ${count} 个。` : "Codex 模型列表已从网络同步。");
     } catch (error) {
       props.setStatus(errorMessage(error));
     } finally {
+      setModelsLoading(false);
       props.setBusy(null);
     }
   }
@@ -745,33 +827,57 @@ export function SettingsPage(props: {
           {renderSectionHeader(settingsSections[0])}
           {openSections.has("model") ? (
             <div className="settings-config-body">
-              <div className="settings-form-grid two-columns">
-                <label className="field">
-                  <span>默认文本模型</span>
-                  <select className="control" value={settingsDraft.defaultModel} onChange={(event) => markSettingsDirty({ defaultModel: event.target.value })}>
-                    {(props.config?.models || []).map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+              <div className="settings-form-grid two-columns settings-model-grid" aria-busy={modelsLoading}>
+                {MODEL_SETTING_FIELDS.map((field) => {
+                  const options = field.output === "image" ? imageModels : textModels;
+                  const value = settingsDraft[field.key];
+                  const available = options.some((model) => model.id === value);
+                  return (
+                    <div className="field" key={field.key}>
+                      <label htmlFor={`setting-${field.key}`}>{field.label}</label>
+                      <select
+                        id={`setting-${field.key}`}
+                        className="control"
+                        value={value}
+                        disabled={!props.config || modelsLoading || Boolean(modelsError) || options.length === 0 || props.busy === "settings"}
+                        aria-describedby={`setting-${field.key}-hint`}
+                        aria-invalid={Boolean(modelDirectory && !modelsLoading && !modelsError && !available)}
+                        onChange={(event) => markSettingsDirty({ [field.key]: event.target.value })}
+                      >
+                        {!available ? <option value={value} disabled>{modelsLoading ? "正在加载模型…" : value ? `${value}（当前目录不可用）` : "请选择模型"}</option> : null}
+                        {options.map((model) => (
+                          <option key={model.id} value={model.id}>{model.id}</option>
+                        ))}
+                      </select>
+                      <small className="field-hint" id={`setting-${field.key}-hint`}>
+                        {field.hint}
+                        {modelDirectory && !modelsLoading && !modelsError && options.length === 0 ? " 暂无此类模型，请同步目录。" : null}
+                        {modelDirectory && !modelsLoading && !modelsError && value && !available && options.length > 0 ? " 当前值已失效，请重新选择，不会自动替换。" : null}
+                      </small>
+                    </div>
+                  );
+                })}
                 <div className="settings-info-box">
                   <span>模型目录</span>
-                  <strong>{props.config?.modelCatalog.source || "-"}</strong>
+                  <strong>{modelDirectory?.catalog.source || "-"}</strong>
                   <p>
-                    当前可用 {modelCount} 个模型。服务器每 1 小时自动同步 Codex 模型，也可手动立即同步。
+                    从 /_gateway/models 加载 {modelCount} 个文本模型、{imageModelCount} 个生图模型，无需填写模型名。文本目录来自 Codex，图片目录为网关支持列表；上游账号实际权限仍需以调用结果为准。
                     {modelAutoRefreshDetail ? ` ${modelAutoRefreshDetail}。` : ""}
                     {modelAutoRefresh?.lastError ? ` 最近错误：${modelAutoRefresh.lastError}` : ""}
                   </p>
+                  {modelsLoading ? <p role="status">正在加载模型目录…</p> : null}
+                  {modelsError ? <p role="alert">{modelsError}；已选配置保留，请重试加载。</p> : null}
+                  {modelDirectory && !modelsLoading && !modelsError && modelDirectory.data.length === 0 ? <p role="status">模型目录为空，请同步后再选择。</p> : null}
                   <div className="settings-inline-actions">
-                    <button className="btn-secondary" type="button" onClick={refreshModels} disabled={props.busy === "models"}>
+                    <button className="btn-secondary" type="button" onClick={() => void loadModelDirectory()} disabled={modelsLoading || props.busy === "settings"}>重新加载目录</button>
+                    <button className="btn-secondary" type="button" onClick={refreshModels} disabled={modelsLoading || props.busy === "settings"}>
                       {props.busy === "models" ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
                       同步 Codex 模型
                     </button>
                   </div>
                 </div>
               </div>
+              <p className="settings-status-note">保存后对后续请求生效，无需重启；请求显式指定的模型优先，已在执行的任务和已有聊天不会被强制改写。</p>
             </div>
           ) : null}
         </section> : null}
