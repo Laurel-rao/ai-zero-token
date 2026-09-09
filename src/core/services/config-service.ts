@@ -1,4 +1,5 @@
 import type { GatewaySettings, ProviderId } from "../types.js";
+import { isSupportedImageModel } from "../models/image-models.js";
 import { getPreferredCodexModel, hasCodexModel } from "../models/openai-codex-models.js";
 import {
   createDefaultSettings,
@@ -136,7 +137,17 @@ export class ConfigService {
     if (provider !== "openai-codex") {
       throw new Error(`暂不支持 provider: ${provider}`);
     }
-    return (await hasCodexModel(settings.defaultModel)) ? settings.defaultModel : getPreferredCodexModel();
+    const model = settings.modelRouting.chatModel || settings.defaultModel;
+    return (await hasCodexModel(model)) ? model : getPreferredCodexModel();
+  }
+
+  async getImageOrchestratorModel(): Promise<string> {
+    return (await this.getSettings()).modelRouting.imageOrchestratorModel;
+  }
+
+  async getImageGenerationModel(): Promise<string> {
+    const model = (await this.getSettings()).modelRouting.imageGenerationModel;
+    return isSupportedImageModel(model) ? model : "gpt-image-2";
   }
 
   async setDefaultModel(model: string, provider: ProviderId = "openai-codex"): Promise<GatewaySettings> {
@@ -152,6 +163,10 @@ export class ConfigService {
       ...settings,
       defaultProvider: provider,
       defaultModel: model,
+      modelRouting: {
+        ...settings.modelRouting,
+        chatModel: model,
+      },
     };
     await saveSettings(next);
     return next;
@@ -223,6 +238,7 @@ export class ConfigService {
 
   async updateSettings(params: {
     defaultModel?: string;
+    modelRouting?: Partial<GatewaySettings["modelRouting"]>;
     branding?: BrandingParams;
     security?: { apiKeyHash?: string };
     networkProxy?: NetworkProxyParams;
@@ -248,13 +264,56 @@ export class ConfigService {
     let next: GatewaySettings = { ...settings };
 
     if (params.defaultModel) {
-      if (!(await hasCodexModel(params.defaultModel))) {
+      const model = params.defaultModel.trim();
+      if (!(await hasCodexModel(model))) {
         throw new Error(`当前网关未找到可用模型: ${params.defaultModel}`);
       }
       next = {
         ...next,
         defaultProvider: "openai-codex",
-        defaultModel: params.defaultModel,
+        defaultModel: model,
+        modelRouting: {
+          ...next.modelRouting,
+          chatModel: model,
+        },
+      };
+    }
+
+    if (params.modelRouting) {
+      const routing = { ...params.modelRouting };
+      const textModels: Array<[Exclude<keyof GatewaySettings["modelRouting"], "imageGenerationModel">, string]> = [
+        ["chatModel", "聊天模型"],
+        ["imageClassifierModel", "生图检查模型"],
+        ["imageOrchestratorModel", "生图编排模型"],
+        ["promptOptimizerModel", "提示词优化模型"],
+      ];
+      for (const [key, label] of textModels) {
+        const model = routing[key];
+        if (model === undefined) {
+          continue;
+        }
+        const normalizedModel = model.trim();
+        if (isSupportedImageModel(normalizedModel) || !(await hasCodexModel(normalizedModel))) {
+          throw Object.assign(new Error(`${label}未找到可用文本模型: ${model}，请同步模型目录后重新选择。`), { statusCode: 400 });
+        }
+        routing[key] = normalizedModel;
+      }
+
+      if (routing.imageGenerationModel !== undefined) {
+        const normalizedModel = routing.imageGenerationModel.trim();
+        if (!isSupportedImageModel(normalizedModel)) {
+          throw Object.assign(new Error(`生图服务模型不受支持: ${routing.imageGenerationModel}`), { statusCode: 400 });
+        }
+        routing.imageGenerationModel = normalizedModel;
+      }
+
+      next = {
+        ...next,
+        defaultModel: routing.chatModel ?? next.defaultModel,
+        modelRouting: {
+          ...next.modelRouting,
+          ...routing,
+        },
       };
     }
 

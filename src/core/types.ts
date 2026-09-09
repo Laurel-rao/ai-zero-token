@@ -88,6 +88,7 @@ export type ModelInfo = {
   id: string;
   name: string;
   input: Array<"text" | "image">;
+  output?: Array<"text" | "image">;
   source: "static" | "codex-cache" | "codex-network";
   isDefault?: boolean;
 };
@@ -154,6 +155,13 @@ export type GatewaySettings = {
   version: 1;
   defaultProvider: ProviderId;
   defaultModel: string;
+  modelRouting: {
+    chatModel: string;
+    imageClassifierModel: string;
+    imageGenerationModel: string;
+    imageOrchestratorModel: string;
+    promptOptimizerModel: string;
+  };
   branding: {
     title: string;
     appIconUrl: string;

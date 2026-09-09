@@ -1139,6 +1139,15 @@ const gatewayUserGroupParamsSchema = z.object({
 
 const settingsUpdateSchema = z.object({
   defaultModel: z.string().min(1).optional(),
+  modelRouting: z
+    .object({
+      chatModel: z.string().trim().min(1).optional(),
+      imageClassifierModel: z.string().trim().min(1).optional(),
+      imageGenerationModel: z.string().trim().min(1).optional(),
+      imageOrchestratorModel: z.string().trim().min(1).optional(),
+      promptOptimizerModel: z.string().trim().min(1).optional(),
+    })
+    .optional(),
   branding: z
     .object({
       title: z.string().trim().min(1).max(80).optional(),
@@ -2240,7 +2249,7 @@ function summarizeCodexChatBody(body: Record<string, unknown>): Record<string, u
 async function buildOpenAIModelsResponse(ctx: ReturnType<typeof createGatewayContext>) {
   return {
     object: "list",
-    data: (await ctx.modelService.listModels()).map((model) => ({
+    data: (await ctx.modelService.listAvailableModels()).map((model) => ({
       id: model.id,
       object: "model",
       owned_by: model.provider,
@@ -5359,14 +5368,14 @@ export function createApp(params?: {
   app.get("/_gateway/status", async () => ctx.authService.getStatus());
 
   app.get("/_gateway/models", async () => ({
-    data: await ctx.modelService.listModels(),
+    data: await ctx.modelService.listAvailableModels(),
     catalog: await ctx.modelService.getCatalog(),
   }));
 
   app.post("/_gateway/models/refresh", async () => {
     const result = await ctx.modelService.refreshModels();
     return {
-      data: result.models,
+      data: await ctx.modelService.listAvailableModels(),
       catalog: result.catalog,
     };
   });
@@ -6842,6 +6851,8 @@ export function createApp(params?: {
       };
     }
 
+    const settings = await ctx.configService.getSettings();
+    parsed.data.model ??= settings.modelRouting.imageGenerationModel;
     const validationError = validateImageRequest(parsed.data);
     if (validationError) {
       console.error("[gateway:image] validation failure", {
@@ -6887,7 +6898,6 @@ export function createApp(params?: {
     });
 
     const activeProfile = await ctx.authService.getActiveProfile();
-    const settings = await ctx.configService.getSettings();
     const imageGenerationTimeoutMs = getImageGenerationTimeoutMs(settings);
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
     const ownerPolicy = await getImageOwnerPolicy(requestOwner);
@@ -7271,6 +7281,8 @@ export function createApp(params?: {
       };
     }
 
+    const settings = await ctx.configService.getSettings();
+    parsed.data.model ??= settings.modelRouting.imageGenerationModel;
     const validationError = validateImageEditRequest(parsed.data);
     if (validationError) {
       console.error("[gateway:image:edit] validation failure", {
@@ -7367,7 +7379,6 @@ export function createApp(params?: {
     });
 
     const activeProfile = await ctx.authService.getActiveProfile();
-    const settings = await ctx.configService.getSettings();
     const imageGenerationTimeoutMs = getImageGenerationTimeoutMs(settings);
     const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
     const ownerPolicy = await getImageOwnerPolicy(requestOwner);

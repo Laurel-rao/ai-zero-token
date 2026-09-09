@@ -16,6 +16,7 @@ let latestCodexVersionCache: { version: string; checkedAt: number } | null = nul
 let latestCodexVersionInFlight: Promise<string> | null = null;
 
 export const CODEX_MODEL_INFOS: ModelInfo[] = [
+  { provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: ["text", "image"], source: "static" },
   { provider: "openai-codex", id: "gpt-5.4", name: "GPT-5.4", input: ["text", "image"], source: "static" },
   { provider: "openai-codex", id: "gpt-5.2", name: "GPT-5.2", input: ["text", "image"], source: "static" },
   { provider: "openai-codex", id: "gpt-5.2-codex", name: "GPT-5.2 Codex", input: ["text", "image"], source: "static" },
@@ -28,6 +29,7 @@ export const CODEX_MODEL_INFOS: ModelInfo[] = [
 ];
 
 export const SUPPORTED_CODEX_MODELS = [
+  "gpt-5.6-terra",
   "gpt-5.4",
   "gpt-5.2",
   "gpt-5.2-codex",
@@ -258,7 +260,10 @@ export async function getCodexModelCatalog(): Promise<{
   try {
     const raw = await fs.readFile(cachePath, "utf8");
     const parsed = JSON.parse(raw) as CodexModelsCacheFile;
-    const models = dedupeModels((parsed.models ?? []).map(normalizeCodexCacheEntry).filter(Boolean) as ModelInfo[]);
+    const models = dedupeModels([
+      ...(parsed.models ?? []).map(normalizeCodexCacheEntry).filter(Boolean) as ModelInfo[],
+      ...CODEX_MODEL_INFOS,
+    ]);
     if (models.length > 0) {
       return {
         models,

@@ -3,6 +3,7 @@ import {
   hasCodexModel,
   refreshCodexModelCatalogFromNetwork,
 } from "../models/openai-codex-models.js";
+import { IMAGE_MODEL_INFOS } from "../models/image-models.js";
 import type { ModelCatalogInfo, ModelInfo, ProviderId } from "../types.js";
 import type { AuthService } from "./auth-service.js";
 import { ConfigService } from "./config-service.js";
@@ -51,6 +52,15 @@ export class ModelService {
       ...model,
       isDefault: model.id === defaultModel,
     }));
+  }
+
+  async listAvailableModels(): Promise<ModelInfo[]> {
+    const models = await this.listModels();
+    const byId = new Map<string, ModelInfo>(models.map((model) => [model.id, { ...model, output: ["text"] }]));
+    for (const model of IMAGE_MODEL_INFOS) {
+      byId.set(model.id, model);
+    }
+    return Array.from(byId.values());
   }
 
   async getCatalog(provider: ProviderId = "openai-codex"): Promise<ModelCatalogInfo> {

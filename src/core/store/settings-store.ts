@@ -23,6 +23,13 @@ export function createDefaultSettings(): GatewaySettings {
     version: 1,
     defaultProvider: "openai-codex",
     defaultModel: "gpt-5.4",
+    modelRouting: {
+      chatModel: "gpt-5.4",
+      imageClassifierModel: "gpt-5.6-terra",
+      imageGenerationModel: "gpt-image-2",
+      imageOrchestratorModel: "gpt-5.6-terra",
+      promptOptimizerModel: "gpt-5.4",
+    },
     branding: {
       title: "AI Zero Token",
       appIconUrl: "",
@@ -82,6 +89,13 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
     version: 1,
     defaultProvider: parsed.defaultProvider ?? defaults.defaultProvider,
     defaultModel: parsed.defaultModel ?? defaults.defaultModel,
+    modelRouting: {
+      chatModel: normalizeTrimmedString(parsed.modelRouting?.chatModel, parsed.defaultModel ?? defaults.modelRouting.chatModel, 120),
+      imageClassifierModel: normalizeTrimmedString(parsed.modelRouting?.imageClassifierModel, defaults.modelRouting.imageClassifierModel, 120) || defaults.modelRouting.imageClassifierModel,
+      imageGenerationModel: normalizeTrimmedString(parsed.modelRouting?.imageGenerationModel, defaults.modelRouting.imageGenerationModel, 120),
+      imageOrchestratorModel: normalizeTrimmedString(parsed.modelRouting?.imageOrchestratorModel, defaults.modelRouting.imageOrchestratorModel, 120) || defaults.modelRouting.imageOrchestratorModel,
+      promptOptimizerModel: normalizeTrimmedString(parsed.modelRouting?.promptOptimizerModel, parsed.defaultModel ?? defaults.modelRouting.promptOptimizerModel, 120),
+    },
     branding: normalizeBranding(parsed.branding, defaults.branding),
     security: {
       apiKeyHash: normalizeTrimmedString(parsed.security?.apiKeyHash, defaults.security.apiKeyHash, 128),

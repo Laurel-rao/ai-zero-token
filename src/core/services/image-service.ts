@@ -2,6 +2,7 @@ import { AuthService } from "./auth-service.js";
 import { ConfigService } from "./config-service.js";
 import { askOpenAICodex } from "../providers/openai-codex/chat.js";
 import { generateChatGPTWebImage } from "../providers/openai-codex/chatgpt-web-image.js";
+import { isSupportedImageModel, SUPPORTED_IMAGE_MODELS } from "../models/image-models.js";
 import type { OAuthProfile } from "../types.js";
 import { RequestThrottleService } from "./request-throttle-service.js";
 type ImageRequest = {
@@ -80,14 +81,6 @@ type ImageParseFailureMetadata = {
   raw?: unknown;
 };
 
-const SUPPORTED_IMAGE_MODELS = new Set([
-  "gpt-image-1",
-  "gpt-image-1-mini",
-  "gpt-image-1.5",
-  "gpt-image-2",
-]);
-
-const IMAGE_ORCHESTRATOR_MODEL = "gpt-5.4-mini";
 const MAX_IMAGE_REQUEST_COUNT = 10;
 
 const SUPPORTED_IMAGE_QUALITIES = new Set([
@@ -749,8 +742,8 @@ export class ImageService {
       return "gpt-image-2";
     }
 
-    if (!SUPPORTED_IMAGE_MODELS.has(model)) {
-      throw new Error(`当前网关仅支持这些生图模型: ${Array.from(SUPPORTED_IMAGE_MODELS).join(", ")}`);
+    if (!isSupportedImageModel(model)) {
+      throw new Error(`当前网关仅支持这些生图模型: ${SUPPORTED_IMAGE_MODELS.join(", ")}`);
     }
 
     return model;
@@ -771,9 +764,9 @@ export class ImageService {
 
   private async generateSingle(request: ImageRequest, lifecycle?: ImageRequestLifecycle): Promise<ImageResult> {
     const profile = await this.deps.authService.requireUsableProfile("openai-codex");
-    const orchestratorModel = IMAGE_ORCHESTRATOR_MODEL;
-    const requestedImageModel = this.resolveRequestedImageModel(request.model);
     const settings = await this.deps.configService.getSettings();
+    const orchestratorModel = await this.deps.configService.getImageOrchestratorModel();
+    const requestedImageModel = this.resolveRequestedImageModel(request.model || settings.modelRouting.imageGenerationModel);
     const requestSummary = {
       requestedImageModel,
       orchestratorModel,
