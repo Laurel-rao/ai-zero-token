@@ -1901,6 +1901,12 @@
 }
 
 .generate-history-table-error {
+  max-width: 100%;
+  width: fit-content;
+  padding: 2px 6px;
+  border: 1px solid #fecdd3;
+  border-radius: 4px;
+  background: #fff1f2;
   overflow: hidden;
   color: #dc2626;
   font-size: 11px;
