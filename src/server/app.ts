@@ -6806,6 +6806,7 @@ export function createApp(params?: {
       textLength: result.text.length,
       toolCallCount: result.toolCalls.length,
       artifactCount: result.artifacts.length,
+      rawPreview: result.text ? undefined : JSON.stringify(result.raw).slice(0, 20000),
     });
 
     if (parsed.data.stream) {
