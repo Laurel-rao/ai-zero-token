@@ -565,8 +565,11 @@ export function extractCodexTextDeltaFromSsePayload(payload: unknown): string {
     return event.text;
   }
   const response = asRecord(event.response);
-  if (response && typeof response.output_text === "string") {
-    return response.output_text;
+  if (response) {
+    const completedText = extractOutputText(response);
+    if (completedText) {
+      return completedText;
+    }
   }
   return "";
 }
