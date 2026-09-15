@@ -2333,32 +2333,24 @@ export function ChatPage(props: {
       [message.id]: { status: "checking" },
     }));
     try {
-      const result = await fetchJson<ChatCompletionResponse>("/v1/chat/completions", {
+      const result = await fetchJson<{ output_text?: string; output?: Array<{ content?: Array<{ text?: string }> }> }>("/v1/responses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: props.config?.settings.modelRouting?.imageClassifierModel || configuredChatModel,
-          messages: [
-            {
-              role: "system",
-              content: [
+          instructions: [
                 "你是聊天内容到生图动作的判定器。",
                 "判断 assistant 回复是否已经给出了可以直接用于图片生成的画面描述、提示词、分镜画面、海报/商品图/插画/摄影等视觉生成需求。",
                 "只有当回复内容适合立即调用图片生成时才返回 shouldGenerate=true。",
                 "如果只是普通问答、代码、表格、解释、拒绝、无明确画面主体或需要继续追问，返回 false。",
                 "返回严格 JSON，不要 Markdown：{\"shouldGenerate\":boolean,\"prompt\":\"中文生图提示词\",\"reason\":\"简短原因\"}",
               ].join("\n"),
-            },
-            {
-              role: "user",
-              content: `assistant 回复：\n${content.slice(0, 6000)}`,
-            },
-          ],
-          temperature: 0,
-          max_tokens: 900,
+          input: `assistant 回复：\n${content.slice(0, 6000)}`,
+          reasoning: { effort: "low" },
+          max_output_tokens: 900,
         }),
       });
-      const text = result.choices?.[0]?.message?.content?.trim() || "";
+      const text = result.output_text?.trim() || result.output?.[0]?.content?.[0]?.text?.trim() || "";
       const decision = parseChatImageDecision(text);
       setImageActions((current) => {
         if (!current[message.id]) {
