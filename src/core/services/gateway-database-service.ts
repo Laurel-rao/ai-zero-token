@@ -1194,7 +1194,6 @@ export class GatewayDatabaseService {
 
   async getGenerationHistoryItem(id: string, owner?: string): Promise<GenerationHistoryItem | null> {
     await this.init();
-    await this.deleteCoveredRunningGenerations(owner);
     const row = await this.database.get(`
         SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
                prompt, ratio, size, quality, output_format AS outputFormat, duration_ms AS durationMs,
