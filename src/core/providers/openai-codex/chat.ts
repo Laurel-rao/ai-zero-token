@@ -558,6 +558,16 @@ export function extractCodexTextDeltaFromSsePayload(payload: unknown): string {
   if (typeof event.delta === "string") {
     return event.delta;
   }
+  // Some Codex gateway responses send the completed text on a
+  // response.output_text.done event (or nest it under response) without a
+  // top-level delta. Preserve that text so chat streams do not finish empty.
+  if (event.type === "response.output_text.done" && typeof event.text === "string") {
+    return event.text;
+  }
+  const response = asRecord(event.response);
+  if (response && typeof response.output_text === "string") {
+    return response.output_text;
+  }
   return "";
 }
 
