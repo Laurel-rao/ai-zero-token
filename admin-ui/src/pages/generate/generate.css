@@ -1890,6 +1890,25 @@
   white-space: nowrap;
 }
 
+.generate-history-table-prompt-cell {
+  grid-column: 4;
+  grid-row: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.generate-history-table-error {
+  overflow: hidden;
+  color: #dc2626;
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .generate-history-table-prompt {
   grid-column: 4;
   grid-row: 1;
