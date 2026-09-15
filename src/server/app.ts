@@ -2455,6 +2455,9 @@ function extractGatewayChatDeltasFromBufferedText(bufferedText: string, flush = 
     }
     try {
       const parsed = JSON.parse(data) as unknown;
+      if (flush) {
+        console.info("[gateway:chat:sse-final]", JSON.stringify(parsed).slice(0, 20000));
+      }
       const delta = extractCodexTextDeltaFromSsePayload(parsed);
       if (delta) {
         deltas.push(delta);
