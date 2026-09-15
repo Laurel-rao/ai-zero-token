@@ -2437,7 +2437,10 @@ function writeGatewayChatSse(reply: FastifyReply, event: string, payload: Record
 
 function extractGatewayChatDeltasFromBufferedText(bufferedText: string, flush = false): { deltas: string[]; rest: string } {
   const deltas: string[] = [];
-  const parts = bufferedText.split("\n\n");
+  // Upstream SSE may use CRLF separators; normalize before splitting so
+  // complete events are not left buffered until the stream ends.
+  const normalizedText = bufferedText.replace(/\r\n/g, "\n");
+  const parts = normalizedText.split("\n\n");
   const rest = flush ? "" : parts.pop() ?? "";
   for (const block of parts) {
     const data = block
