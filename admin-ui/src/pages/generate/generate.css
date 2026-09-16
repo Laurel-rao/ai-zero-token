@@ -1910,11 +1910,14 @@
   grid-column: 4 !important;
   grid-row: 1 !important;
   min-width: 0;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
   justify-content: center;
+  align-items: flex-start;
   gap: 2px;
   overflow: hidden;
+  text-align: left;
 }
 
 .generate-history-table-error {
@@ -1933,9 +1936,15 @@
   white-space: nowrap;
 }
 
+.generate-history-grid.is-table .generate-history-card:has(.generate-history-table-error) {
+  min-height: 78px;
+}
+
 .generate-history-table-prompt {
   display: block;
   min-width: 0;
+  width: 100%;
+  text-align: left;
 }
 
 .generate-history-table-time {
