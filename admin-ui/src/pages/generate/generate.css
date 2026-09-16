@@ -1813,9 +1813,11 @@
 }
 
 .generate-history-grid.is-table .generate-history-card {
-  min-height: 68px;
+  min-height: 72px;
   padding: 6px 10px;
   display: grid;
+  grid-template-rows: minmax(52px, auto);
+  align-items: center;
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
@@ -1922,26 +1924,45 @@
 }
 
 .generate-history-table-error-row {
-  grid-column: 4 / -2;
+  grid-column: 4;
   grid-row: 2;
+  position: relative;
+  width: min(100%, 680px);
   max-width: 100%;
   min-width: 0;
   align-self: start;
   justify-self: stretch;
-  padding: 2px 6px;
+  box-sizing: border-box;
+  padding: 5px 8px 5px 24px;
   border: 1px solid #fecdd3;
   border-radius: 4px;
   background: #fff1f2;
   overflow: hidden;
   color: #dc2626;
   font-size: 11px;
-  line-height: 1.3;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.generate-history-table-error-row::before {
+  content: "!";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin-left: -19px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .generate-history-grid.is-table .generate-history-card:has(.generate-history-table-error-row) {
-  min-height: 78px;
+  grid-template-rows: minmax(52px, auto) auto;
+  min-height: 84px;
 }
 
 .generate-history-table-prompt {
