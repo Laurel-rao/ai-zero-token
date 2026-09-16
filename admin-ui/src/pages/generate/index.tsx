@@ -2185,8 +2185,8 @@ export function GeneratePage(props: {
                       <span className={`generate-status generate-history-table-status ${statusMeta.className}`} role="cell">{statusMeta.label}</span>
                       <div className="generate-history-table-prompt-cell" role="cell">
                         <strong className="generate-history-table-prompt" title={item.prompt}>{item.prompt}</strong>
-                        {item.error ? <span className="generate-history-table-error" title={item.error}>失败原因：{item.error}</span> : null}
                       </div>
+                      {item.error ? <div className="generate-history-table-error-row" role="cell" title={item.error}>失败原因：{item.error}</div> : null}
                       <span className="generate-history-table-time" role="cell">{formatFullTime(item.createdAt)}</span>
                       <span className="generate-history-table-spec" role="cell">
                         {firstImage?.width && firstImage?.height ? `${firstImage.width}×${firstImage.height}` : item.ratio || item.size || "-"}

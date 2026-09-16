@@ -1785,6 +1785,7 @@
 
 .generate-history-grid.is-table.is-user-view .generate-history-card-actions {
   grid-column: 8;
+  grid-row: 1 / span 2;
 }
 
 .generate-history-table-head {
@@ -1920,10 +1921,13 @@
   text-align: left;
 }
 
-.generate-history-table-error {
+.generate-history-table-error-row {
+  grid-column: 4 / -2;
+  grid-row: 2;
   max-width: 100%;
-  width: fit-content;
-  max-width: 100%;
+  min-width: 0;
+  align-self: start;
+  justify-self: stretch;
   padding: 2px 6px;
   border: 1px solid #fecdd3;
   border-radius: 4px;
@@ -1936,7 +1940,7 @@
   white-space: nowrap;
 }
 
-.generate-history-grid.is-table .generate-history-card:has(.generate-history-table-error) {
+.generate-history-grid.is-table .generate-history-card:has(.generate-history-table-error-row) {
   min-height: 78px;
 }
 
@@ -1965,7 +1969,7 @@
 
 .generate-history-grid.is-table .generate-history-card-actions {
   grid-column: 9;
-  grid-row: 1;
+  grid-row: 1 / span 2;
   display: flex;
   justify-content: flex-end;
   gap: 4px;
