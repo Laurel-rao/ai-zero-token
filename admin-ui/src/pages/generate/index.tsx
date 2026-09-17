@@ -356,10 +356,6 @@ function percentLabel(value: number): string {  if (!Number.isFinite(value)) {
   return `${value.toFixed(value >= 99.95 || value < 10 ? 1 : 0)}%`;
 }
 
-function normalizePromptKey(prompt: string): string {
-  return prompt.trim().replace(/\s+/g, " ");
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -760,8 +756,9 @@ export function GeneratePage(props: {
   const referenceSummary = referenceImages.length > 0
     ? `${referenceImages.length}/${MAX_REFERENCE_IMAGES} 张参考图 · ${(referenceImages.reduce((sum, image) => sum + image.size, 0) / 1024).toFixed(1)} KB`
     : `可选，最多 ${MAX_REFERENCE_IMAGES} 张，上传后走图片编辑接口`;
+  // Informational only: the same prompt may be queued again (async queue), so this never blocks submission.
   const duplicatePendingJob = pendingJobs.some((job) => job.endpoint === endpoint && job.prompt === prompt.trim());
-  const canGenerate = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && !submittingGeneration && !duplicatePendingJob && props.busy !== "prompt-optimize";
+  const canGenerate = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && !submittingGeneration && props.busy !== "prompt-optimize";
   const canOptimizePrompt = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && props.busy !== "test" && props.busy !== "prompt-optimize";
   const historyRange = useMemo(
     () => parseHistoryTimeRange(historyFilters.startTime, historyFilters.endTime),
@@ -777,10 +774,6 @@ export function GeneratePage(props: {
   const canGoNextHistoryPage = historyPage < historyTotalPages && !historyLoading;
   const historyFilterTotal = useMemo(() => historyFilterCount(historyFilters), [historyFilters]);
   const reportFilterTotal = useMemo(() => historyFilterCount(reportFilters), [reportFilters]);
-  const historyPendingPromptIds = useMemo(
-    () => new Set(pendingJobs.map((job) => normalizePromptKey(job.prompt))),
-    [pendingJobs],
-  );
   const historyPickerRoom = Math.max(0, MAX_REFERENCE_IMAGES - referenceImages.length);
   const historyPickerCandidates = useMemo(() => {
     const existingSources = new Set(referenceImages.flatMap((image) => [image.src, image.previewSrc]));
@@ -884,15 +877,13 @@ export function GeneratePage(props: {
         if (!props.config?.profile) {
           return "当前没有可用账号，无法重试";
         }
-        if (historyPendingPromptIds.has(normalizePromptKey(item.prompt))) {
-          return "相同提示词的任务仍在队列中";
-        }
+        // Same-prompt jobs may be queued again; only a missing account or non-retryable row blocks here.
         return undefined;
       }
       default:
         return undefined;
     }
-  }, [bulkDownloading, historyPendingPromptIds, props.config?.profile]);
+  }, [bulkDownloading, props.config?.profile]);
 
   const renderHistoryFilters = () => (
     <div className="generate-history-filters">
@@ -1672,10 +1663,6 @@ export function GeneratePage(props: {
       props.setStatus("正在提交当前生图任务，请稍候。");
       return;
     }
-    if (duplicatePendingJob) {
-      props.setStatus("相同提示词的任务仍在队列中，请修改提示词或等待完成。");
-      return;
-    }
     if (!selectedSizeValid) {
       props.setStatus("自定义尺寸格式应为 宽x高，例如 2160x3840。");
       return;
@@ -2057,7 +2044,7 @@ export function GeneratePage(props: {
               {submittingGeneration ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
               {submittingGeneration ? "正在加入队列" : "开始生图"}
             </button>
-            {duplicatePendingJob ? <p className="field-hint">已有相同提示词的任务，修改提示词后可继续提交。</p> : null}
+            {duplicatePendingJob ? <p className="field-hint">相同提示词的任务已在队列中，仍可再次提交。</p> : null}
 
             {pendingJobs.length > 0 ? (
               <section className="generation-queue" aria-label="进行中的生图任务">

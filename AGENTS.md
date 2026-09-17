@@ -143,8 +143,8 @@ NODE'"'"''
 - Generated images are saved locally under the persisted state volume.
 - Image previews are compressed server-side, but UI previews must display complete images with `object-fit: contain` and must not crop.
 - The request log UI must not display account information in the list, detail panel, detail JSON, or copied detail payload.
-- The image generation page must prevent duplicate submissions while one generation is running.
-- Successful/failed generation saves clean up covered stale `running` history rows for the same owner, endpoint, and prompt.
+- The image generation page must prevent double-submitting a single click (an in-flight submit guard), but the same prompt may be queued again: generation is an async queue, so do not block resubmission by prompt equality.
+- Successful/failed generation saves clean up covered stale `running` history rows for the same owner, endpoint, and prompt. That cleanup must only remove rows that are not newer than the completed one, so a newer queued task is never deleted by an older task finishing.
 
 ## Release Defaults
 

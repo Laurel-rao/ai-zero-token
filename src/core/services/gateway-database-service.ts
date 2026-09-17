@@ -1652,6 +1652,8 @@ export class GatewayDatabaseService {
   private async deleteCoveredRunningGenerations(owner?: string, target?: GenerationDedupTarget): Promise<void> {
     const oneHourMs = 60 * 60 * 1000;
     if (target) {
+      // Only supersede pending rows that are NOT newer than the completed one. A newer
+      // queued row is a separate task the user submitted on purpose, so it must survive.
       await this.database.run(`
           DELETE FROM generation_history
           WHERE status IN ('queued', 'running')
@@ -1659,8 +1661,9 @@ export class GatewayDatabaseService {
             AND endpoint = ?
             AND prompt = ?
             AND (? IS NULL OR owner = ?)
-            AND ABS(created_at - ?) <= ?
-        `, target.id, target.endpoint, target.prompt, target.owner ?? null, target.owner ?? null, target.createdAt, oneHourMs);
+            AND created_at < ?
+            AND created_at >= ?
+        `, target.id, target.endpoint, target.prompt, target.owner ?? null, target.owner ?? null, target.createdAt, target.createdAt - oneHourMs);
       return;
     }
 
@@ -1676,7 +1679,8 @@ export class GatewayDatabaseService {
               AND done.endpoint = generation_history.endpoint
               AND done.prompt = generation_history.prompt
               AND COALESCE(done.owner, '') = COALESCE(generation_history.owner, '')
-              AND ABS(done.created_at - generation_history.created_at) <= ?
+              AND done.created_at >= generation_history.created_at
+              AND done.created_at - generation_history.created_at <= ?
           )
       `, owner ?? null, owner ?? null, oneHourMs);
   }
