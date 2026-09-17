@@ -1065,10 +1065,18 @@ const adminLoginSchema = z.object({
   password: z.string().min(1),
 });
 
+/** Query strings are always strings here, so "false" must not coerce to true. */
+const booleanQueryParam = z.preprocess((value) => {
+  if (typeof value === "string") {
+    return !["false", "0", "no", "off", ""].includes(value.trim().toLowerCase());
+  }
+  return value;
+}, z.boolean().optional());
+
 const wecomCallbackQuerySchema = z.object({
   code: z.string().min(1),
   state: z.string().min(1),
-  embed: z.coerce.boolean().optional(),
+  embed: booleanQueryParam,
   channel: z.enum(["qr", "oauth"]).optional(),
 });
 
@@ -1301,7 +1309,9 @@ const generationHistoryQuerySchema = z.object({
   owner: z.string().min(1).max(120).optional(),
   query: z.string().trim().max(500).optional(),
   status: z.enum(["queued", "running", "success", "failed", "interrupted"]).optional(),
-  light: z.coerce.boolean().optional(),
+  startTime: z.coerce.number().int().nonnegative().optional(),
+  endTime: z.coerce.number().int().nonnegative().optional(),
+  light: booleanQueryParam,
 });
 
 const generationReportQuerySchema = z.object({
@@ -1333,6 +1343,22 @@ function estimateBase64Bytes(value: string): number {
   const base64 = value.trim().split(",", 2)[1] ?? "";
   const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
   return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+function normalizeGenerationTimeRange(startTime?: number, endTime?: number): { startTime?: number; endTime?: number } {
+  const normalize = (value: number | undefined): number | undefined => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      return undefined;
+    }
+    const truncated = Math.trunc(value);
+    return Number.isSafeInteger(truncated) ? truncated : undefined;
+  };
+  const normalizedStart = normalize(startTime);
+  const normalizedEnd = normalize(endTime);
+  if (normalizedStart !== undefined && normalizedEnd !== undefined && normalizedStart > normalizedEnd) {
+    return { startTime: normalizedEnd, endTime: normalizedStart };
+  }
+  return { startTime: normalizedStart, endTime: normalizedEnd };
 }
 
 const chatFileMimeTypesByExtension: Record<string, string> = {
@@ -1435,7 +1461,7 @@ const chatMessageImageGenerationBodySchema = z.object({
 const requestLogsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   owner: z.string().min(1).max(120).optional(),
-  details: z.coerce.boolean().optional(),
+  details: booleanQueryParam,
 });
 
 const gatewayUsersQuerySchema = z.object({
@@ -4514,11 +4540,21 @@ export function createApp(params?: {
     const offset = (page - 1) * limit;
     const query = parsed.success ? parsed.data.query : undefined;
     const status = parsed.success ? parsed.data.status : undefined;
+    const startTime = parsed.success ? parsed.data.startTime : undefined;
+    const endTime = parsed.success ? parsed.data.endTime : undefined;
+    const range = normalizeGenerationTimeRange(startTime, endTime);
     const session = await getSessionFromRequest(request);
     const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
     const [items, total] = await Promise.all([
-      ctx.gatewayDatabaseService.listGenerationHistory(limit, owner, { light: parsed.success ? parsed.data.light ?? true : true, offset, query, status }),
-      ctx.gatewayDatabaseService.countGenerationHistory(owner, query, status),
+      ctx.gatewayDatabaseService.listGenerationHistory(limit, owner, {
+        light: parsed.success ? parsed.data.light ?? true : true,
+        offset,
+        query,
+        status,
+        startTime: range.startTime,
+        endTime: range.endTime,
+      }),
+      ctx.gatewayDatabaseService.countGenerationHistory(owner, query, status, range),
     ]);
     return {
       items,
@@ -4527,6 +4563,8 @@ export function createApp(params?: {
       total,
       totalPages: Math.max(1, Math.ceil(total / limit)),
       hasMore: offset + items.length < total,
+      startTime: range.startTime,
+      endTime: range.endTime,
     };
   });
 
@@ -4547,10 +4585,10 @@ export function createApp(params?: {
     const parsed = generationReportQuerySchema.safeParse(request.query);
     const session = await getSessionFromRequest(request);
     const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
-    return ctx.gatewayDatabaseService.getGenerationReport(owner, parsed.success ? {
-      startTime: parsed.data.startTime,
-      endTime: parsed.data.endTime,
-    } : undefined);
+    const range = parsed.success
+      ? normalizeGenerationTimeRange(parsed.data.startTime, parsed.data.endTime)
+      : { startTime: undefined, endTime: undefined };
+    return ctx.gatewayDatabaseService.getGenerationReport(owner, range);
   });
 
   app.get("/_gateway/generations/history/:id", async (request, reply) => {

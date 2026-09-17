@@ -1,6 +1,6 @@
 import { Activity, BarChart3, Check, CheckCircle2, ChevronDown, ClipboardPaste, Copy, Download, Images, ImagePlus, LayoutGrid, List, Loader2, Pencil, RotateCcw, Search, Sparkles, Upload, Users, X } from "lucide-react";
 import { zipSync } from "fflate";
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, RequestLog } from "@/shared/types";
 import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
@@ -11,14 +11,33 @@ import { userDisplayName } from "@/shared/lib/users";
 import type { UserRole } from "@/routes/routes";
 import { DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT } from "@/shared/lib/prompt-optimizer";
 import { Modal } from "@/shared/components/Modal";
+import { HistoryPreviewThumb, HistoryTable, type HistoryMenuActionKey } from "./HistoryTable";
+import { HistoryDetailDrawer } from "./HistoryDetailDrawer";
+import { runHistoryAction } from "./history-actions";
+import {
+  EMPTY_HISTORY_FILTERS,
+  HISTORY_STATUS_FILTER_LABELS,
+  failureSummary,
+  generateStatusMeta,
+  historyFilterCount,
+  parseHistoryTimeRange,
+  ratioClassName,
+  type GenerationHistoryFilterState,
+} from "./history-helpers";
+import type {
+  GenerateHistoryItem,
+  GenerateHistoryResponse,
+  GenerationOwnerUsageResponse,
+  HistoryOwnerOption,
+  HistoryStatusFilter,
+  HistoryViewMode,
+  ImageQuality,
+  OutputFormat,
+} from "./history-types";
 
 type GenerateTab = "create" | "history" | "report";
-type HistoryViewMode = "grid" | "list";
 type ImageRatio = "1:1" | "16:9" | "9:16" | "4:3";
 type ResolutionPreset = "1k" | "2k" | "4k" | "custom";
-type ImageQuality = "low" | "medium" | "high" | "auto";
-type OutputFormat = "png" | "webp" | "jpeg";
-type PreviewRatioClass = "ratio-square" | "ratio-wide" | "ratio-tall" | "ratio-classic";
 type ReferenceImageState = { id: string; src: string; previewSrc: string; name: string; size: number };
 type ResolutionOption = { preset: ResolutionPreset; label: string; disabled?: boolean; reason?: string };
 type PromptSuggestion = {
@@ -32,45 +51,6 @@ type ChatCompletionResponse = {
     message?: {
       content?: string | null;
     };
-  }>;
-};
-
-type GenerateHistoryItem = {
-  id: string;
-  owner?: string;
-  createdAt: number;
-  startedAt?: number;
-  updatedAt?: number;
-  status: "queued" | "running" | "success" | "failed" | "interrupted";
-  endpoint: string;
-  account: string;
-  model: string;
-  prompt: string;
-  ratio?: string;
-  size?: string;
-  quality?: ImageQuality;
-  outputFormat?: OutputFormat;
-  durationMs: number;
-  waitDurationMs?: number;
-  request?: { n?: number };
-  responseSummary?: Record<string, unknown>;
-  error?: string;
-  referenceImages: Array<{
-    name?: string;
-    url?: string;
-    sourceType: "data-url" | "url" | "file-id";
-    source?: string;
-  }>;
-  images: Array<{
-    filename: string;
-    url: string;
-    mimeType: string;
-    size: number;
-    width?: number;
-    height?: number;
-    previewUrl?: string;
-    previewMimeType?: string;
-    previewSize?: number;
   }>;
 };
 
@@ -92,28 +72,6 @@ type BackgroundGenerationResponse = {
   id?: string;
   status?: "queued";
   history_url?: string;
-};
-
-type GenerateHistoryResponse = {
-  items: GenerateHistoryItem[];
-  page?: number;
-  limit?: number;
-  total?: number;
-  totalPages?: number;
-  hasMore?: boolean;
-};
-
-type GenerationOwnerUsageResponse = {
-  items: Array<{ owner: string; count: number }>;
-  total: number;
-};
-
-type HistoryOwnerOption = {
-  value: string;
-  label: string;
-  searchText: string;
-  count: number;
-  kind: "mine" | "all" | "user";
 };
 
 const GENERATE_HISTORY_PAGE_SIZE = 10;
@@ -289,27 +247,6 @@ function recoverHistoryReferenceUrl(value: string): string | null {
   }
 }
 
-function ratioClassName(value?: string): PreviewRatioClass {
-  const normalized = value?.trim();
-  const match = normalized?.match(/^(\d+(?:\.\d+)?)\s*[:xX]\s*(\d+(?:\.\d+)?)$/);
-  if (match) {
-    const width = Number(match[1]);
-    const height = Number(match[2]);
-    if (width > 0 && height > 0) {
-      const ratio = width / height;
-      if (ratio < 0.75) return "ratio-tall";
-      if (ratio > 1.45) return "ratio-wide";
-      if (ratio > 1.15) return "ratio-classic";
-      return "ratio-square";
-    }
-  }
-
-  if (normalized === "16:9") return "ratio-wide";
-  if (normalized === "9:16") return "ratio-tall";
-  if (normalized === "4:3") return "ratio-classic";
-  return "ratio-square";
-}
-
 const promptExamples: Array<{ key: string; label: string; ratio: ImageRatio; prompt: string }> = [
   {
     key: "beauty",
@@ -413,19 +350,14 @@ function isImageRatio(value?: string): value is ImageRatio {
   return ratioOptions.some((item) => item.ratio === value);
 }
 
-function percentLabel(value: number): string {
-  if (!Number.isFinite(value)) {
+function percentLabel(value: number): string {  if (!Number.isFinite(value)) {
     return "0%";
   }
   return `${value.toFixed(value >= 99.95 || value < 10 ? 1 : 0)}%`;
 }
 
-function generateStatusMeta(status: GenerateHistoryItem["status"]): { className: string; label: string } {
-  if (status === "success") return { className: "is-success", label: "成功" };
-  if (status === "queued") return { className: "is-queued", label: "排队中" };
-  if (status === "running") return { className: "is-running", label: "处理中" };
-  if (status === "interrupted") return { className: "is-interrupted", label: "已中断" };
-  return { className: "is-failed", label: "失败" };
+function normalizePromptKey(prompt: string): string {
+  return prompt.trim().replace(/\s+/g, " ");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -697,6 +629,51 @@ function HistoryOwnerSelect(props: {
   );
 }
 
+function HistoryCardActions(props: {
+  item: GenerateHistoryItem;
+  copied: boolean;
+  hint: (key: HistoryMenuActionKey, item: GenerateHistoryItem) => string | undefined;
+  onAction: (key: HistoryMenuActionKey, item: GenerateHistoryItem) => void;
+}) {
+  const { item, hint } = props;
+  const failed = Boolean(failureSummary(item.error));
+  const entries: Array<{ key: HistoryMenuActionKey; label: string; icon: typeof Pencil; hint?: string }> = failed
+    ? [
+        { key: "retry" as const, label: "重试", icon: RotateCcw, hint: hint("retry", item) },
+        { key: "reuse" as const, label: "再次使用", icon: RotateCcw },
+        { key: "copy" as const, label: props.copied ? "已复制" : "复制提示词", icon: Copy },
+        { key: "detail" as const, label: "查看详情", icon: Images },
+      ]
+    : [
+        { key: "edit" as const, label: "编辑首张", icon: Pencil, hint: hint("edit", item) },
+        { key: "reuse" as const, label: "再次使用", icon: RotateCcw },
+        { key: "copy" as const, label: props.copied ? "已复制" : "复制提示词", icon: Copy },
+        { key: "download" as const, label: item.images.length > 1 ? `下载全部（${item.images.length} 张）` : "下载图片", icon: Download, hint: hint("download", item) },
+        { key: "detail" as const, label: "查看详情", icon: Images },
+      ];
+
+  return (
+    <div className="generate-history-card-actions">
+      {entries.map((entry) => {
+        const Icon = entry.icon;
+        return (
+          <button
+            className={entry.key === "retry" ? "btn-primary" : "btn-secondary"}
+            type="button"
+            key={entry.key}
+            onClick={() => props.onAction(entry.key, item)}
+            disabled={Boolean(entry.hint)}
+            title={entry.hint ?? entry.label}
+          >
+            <Icon size={15} aria-hidden="true" />
+            {entry.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function GeneratePage(props: {
   config: AdminConfig | null;
   currentUser: string | null;
@@ -725,11 +702,11 @@ export function GeneratePage(props: {
   const [historyPage, setHistoryPage] = useState(1);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyTotalPages, setHistoryTotalPages] = useState(1);
-  const [historyPromptQuery, setHistoryPromptQuery] = useState("");
-  const [historyStartTime, setHistoryStartTime] = useState("");
-  const [historyEndTime, setHistoryEndTime] = useState("");
-  const [historyOwnerFilter, setHistoryOwnerFilter] = useState("");
+  const [historyFilters, setHistoryFilters] = useState<GenerationHistoryFilterState>({ ...EMPTY_HISTORY_FILTERS });
+  const [reportFilters, setReportFilters] = useState<GenerationHistoryFilterState>({ ...EMPTY_HISTORY_FILTERS });
   const [historyOwnerUsage, setHistoryOwnerUsage] = useState<GenerationOwnerUsageResponse>({ items: [], total: 0 });
+  const [historyReloadToken, setHistoryReloadToken] = useState(0);
+  const [historyDetailItem, setHistoryDetailItem] = useState<GenerateHistoryItem | null>(null);
   const [historyPickerOpen, setHistoryPickerOpen] = useState(false);
   const [historyPickerItems, setHistoryPickerItems] = useState<GenerateHistoryItem[]>([]);
   const [historyPickerLoading, setHistoryPickerLoading] = useState(false);
@@ -757,7 +734,17 @@ export function GeneratePage(props: {
   const [submittingGeneration, setSubmittingGeneration] = useState(false);
   const [promptSuggestion, setPromptSuggestion] = useState<PromptSuggestion | null>(null);
   const submittingGenerationRef = useRef(false);
-  const pendingJobsRuntime = useRef({ pendingJobs, refreshHistory, refreshConfig: props.refreshConfig, setStatus: props.setStatus });
+  const pendingJobsRuntime = useRef<{
+    pendingJobs: PendingGenerationJob[];
+    refreshHistory: (options?: { silent?: boolean }) => Promise<void>;
+    refreshConfig: (options?: { runtime?: boolean; silent?: boolean }) => Promise<AdminConfig>;
+    setStatus: (value: string) => void;
+  }>({
+    pendingJobs: [],
+    refreshHistory: async () => undefined,
+    refreshConfig: props.refreshConfig,
+    setStatus: props.setStatus,
+  });
   const hasPendingJobs = pendingJobs.length > 0;
 
   const selectedSize = useMemo(() => {
@@ -776,25 +763,11 @@ export function GeneratePage(props: {
   const duplicatePendingJob = pendingJobs.some((job) => job.endpoint === endpoint && job.prompt === prompt.trim());
   const canGenerate = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && !submittingGeneration && !duplicatePendingJob && props.busy !== "prompt-optimize";
   const canOptimizePrompt = Boolean(props.config?.profile) && prompt.trim().length > 0 && selectedSizeValid && props.busy !== "test" && props.busy !== "prompt-optimize";
-  const filteredHistory = useMemo(() => {
-    const query = historyPromptQuery.trim().toLowerCase();
-    const startMs = historyStartTime ? Date.parse(historyStartTime) : Number.NaN;
-    const endMs = historyEndTime ? Date.parse(historyEndTime) : Number.NaN;
-
-    return history.filter((item) => {
-      if (query && !item.prompt.toLowerCase().includes(query)) {
-        return false;
-      }
-      if (Number.isFinite(startMs) && item.createdAt < startMs) {
-        return false;
-      }
-      if (Number.isFinite(endMs) && item.createdAt > endMs) {
-        return false;
-      }
-      return true;
-    });
-  }, [history, historyEndTime, historyPromptQuery, historyStartTime]);
-  const selectableHistory = useMemo(() => filteredHistory.filter((item) => item.status === "success" && item.images.length > 0), [filteredHistory]);
+  const historyRange = useMemo(
+    () => parseHistoryTimeRange(historyFilters.startTime, historyFilters.endTime),
+    [historyFilters.endTime, historyFilters.startTime],
+  );
+  const selectableHistory = useMemo(() => history.filter((item) => item.status === "success" && item.images.length > 0), [history]);
   const selectedHistory = useMemo(() => Array.from(selectedHistoryItems.values()), [selectedHistoryItems]);
   const selectedCurrentPageCount = useMemo(() => selectableHistory.filter((item) => selectedHistoryItems.has(item.id)).length, [selectableHistory, selectedHistoryItems]);
   const selectedHistoryImageCount = useMemo(() => selectedHistory.reduce((total, item) => total + item.images.length, 0), [selectedHistory]);
@@ -802,6 +775,12 @@ export function GeneratePage(props: {
   const someSelectableHistorySelected = selectedCurrentPageCount > 0 && !allSelectableHistorySelected;
   const canGoPreviousHistoryPage = historyPage > 1 && !historyLoading;
   const canGoNextHistoryPage = historyPage < historyTotalPages && !historyLoading;
+  const historyFilterTotal = useMemo(() => historyFilterCount(historyFilters), [historyFilters]);
+  const reportFilterTotal = useMemo(() => historyFilterCount(reportFilters), [reportFilters]);
+  const historyPendingPromptIds = useMemo(
+    () => new Set(pendingJobs.map((job) => normalizePromptKey(job.prompt))),
+    [pendingJobs],
+  );
   const historyPickerRoom = Math.max(0, MAX_REFERENCE_IMAGES - referenceImages.length);
   const historyPickerCandidates = useMemo(() => {
     const existingSources = new Set(referenceImages.flatMap((image) => [image.src, image.previewSrc]));
@@ -822,11 +801,11 @@ export function GeneratePage(props: {
       }];
     }));
   }, [historyPickerItems, referenceImages]);
-  const historyPickerScopeLabel = props.role !== "admin" || !historyOwnerFilter
+  const historyPickerScopeLabel = props.role !== "admin" || !historyFilters.owner
     ? "我的历史"
-    : historyOwnerFilter === "all"
+    : historyFilters.owner === "all"
       ? "全部用户"
-      : userDisplayName(props.config, historyOwnerFilter);
+      : userDisplayName(props.config, historyFilters.owner);
   const historyOwnerOptions = useMemo(() => {
     const usageByOwner = new Map(historyOwnerUsage.items.map((item) => [item.owner, item.count]));
     const names = new Set<string>();
@@ -841,8 +820,8 @@ export function GeneratePage(props: {
         names.add(item.owner);
       }
     }
-    if (historyOwnerFilter && historyOwnerFilter !== "all") {
-      names.add(historyOwnerFilter);
+    if (historyFilters.owner && historyFilters.owner !== "all") {
+      names.add(historyFilters.owner);
     }
     if (props.currentUser) {
       names.delete(props.currentUser);
@@ -876,76 +855,136 @@ export function GeneratePage(props: {
       },
       ...userOptions,
     ];
-  }, [history, historyOwnerFilter, historyOwnerUsage, props.config, props.currentUser]);
+  }, [history, historyFilters.owner, historyOwnerUsage, props.config, props.currentUser]);
+
+  const updateHistoryFilters = useCallback((patch: Partial<GenerationHistoryFilterState>) => {
+    setHistoryFilters((current) => ({ ...current, ...patch }));
+    setHistoryPage(1);
+  }, []);
+
+  const resetHistoryFilters = useCallback(() => {
+    setHistoryFilters({ ...EMPTY_HISTORY_FILTERS });
+    setHistoryPage(1);
+  }, []);
+
+  const historyActionHint = useCallback((key: HistoryMenuActionKey, item: GenerateHistoryItem): string | undefined => {
+    if (bulkDownloading) {
+      return "正在打包下载，请稍候";
+    }
+    switch (key) {
+      case "edit":
+        return item.images.length === 0 ? "这条历史没有可编辑的生成图" : undefined;
+      case "download":
+        return item.images.length === 0 ? "这条历史没有可下载的生成图" : undefined;
+      case "retry": {
+        const summary = failureSummary(item.error);
+        if (!summary) {
+          return "只有失败或已中断的记录可以重试";
+        }
+        if (!props.config?.profile) {
+          return "当前没有可用账号，无法重试";
+        }
+        if (historyPendingPromptIds.has(normalizePromptKey(item.prompt))) {
+          return "相同提示词的任务仍在队列中";
+        }
+        return undefined;
+      }
+      default:
+        return undefined;
+    }
+  }, [bulkDownloading, historyPendingPromptIds, props.config?.profile]);
 
   const renderHistoryFilters = () => (
     <div className="generate-history-filters">
       <label className="field history-search-field">
         <span>提示词</span>
         <div className="history-search-control">
-          <Search size={16} />
+          <Search size={16} aria-hidden="true" />
           <input
             className="control"
+            type="search"
             placeholder="检索提示词"
-            value={historyPromptQuery}
-            onChange={(event) => {
-              setHistoryPromptQuery(event.target.value);
-              setHistoryPage(1);
-            }}
+            value={historyFilters.query}
+            onChange={(event) => updateHistoryFilters({ query: event.target.value })}
           />
         </div>
       </label>
       <label className="field">
         <span>开始时间</span>
-        <input className="control" type="datetime-local" value={historyStartTime} onChange={(event) => setHistoryStartTime(event.target.value)} />
+        <input
+          className="control"
+          type="datetime-local"
+          value={historyFilters.startTime}
+          max={historyFilters.endTime || undefined}
+          onChange={(event) => updateHistoryFilters({ startTime: event.target.value })}
+        />
       </label>
       <label className="field">
         <span>结束时间</span>
-        <input className="control" type="datetime-local" value={historyEndTime} onChange={(event) => setHistoryEndTime(event.target.value)} />
+        <input
+          className="control"
+          type="datetime-local"
+          value={historyFilters.endTime}
+          min={historyFilters.startTime || undefined}
+          onChange={(event) => updateHistoryFilters({ endTime: event.target.value })}
+        />
+      </label>
+      <label className="field">
+        <span>状态</span>
+        <select
+          className="control"
+          value={historyFilters.status}
+          onChange={(event) => updateHistoryFilters({ status: event.target.value as HistoryStatusFilter })}
+        >
+          {(Object.keys(HISTORY_STATUS_FILTER_LABELS) as HistoryStatusFilter[]).map((value) => (
+            <option value={value} key={value}>{HISTORY_STATUS_FILTER_LABELS[value]}</option>
+          ))}
+        </select>
       </label>
       {props.role === "admin" ? (
-        <>
-          <label className="field">
-            <span>用户范围</span>
-            <HistoryOwnerSelect options={historyOwnerOptions} value={historyOwnerFilter} onChange={(value) => {
-              setHistoryOwnerFilter(value);
-              setHistoryPage(1);
-            }} />
-          </label>
-        </>
+        <label className="field">
+          <span>用户范围</span>
+          <HistoryOwnerSelect options={historyOwnerOptions} value={historyFilters.owner} onChange={(value) => updateHistoryFilters({ owner: value })} />
+        </label>
       ) : null}
       <button
         className="btn-secondary history-filter-reset"
         type="button"
-        onClick={() => {
-          setHistoryPromptQuery("");
-          setHistoryStartTime("");
-          setHistoryEndTime("");
-        }}
-        disabled={!historyPromptQuery && !historyStartTime && !historyEndTime}
+        onClick={resetHistoryFilters}
+        disabled={historyFilterTotal === 0}
+        title={historyFilterTotal === 0 ? "没有可重置的筛选条件" : "清除提示词、时间、状态和用户范围"}
       >
-        <RotateCcw size={16} />
-        重置
+        <RotateCcw size={16} aria-hidden="true" />
+        重置{historyFilterTotal > 0 ? `（${historyFilterTotal}）` : ""}
       </button>
+      {historyRange.invalid ? (
+        <p className="generate-history-filter-error" role="status">
+          时间范围无效，请确认开始时间早于结束时间。
+        </p>
+      ) : null}
     </div>
   );
 
-  const renderHistoryPager = () => (
-    <div className="generate-history-pager" aria-label="生图历史分页">
+  const renderHistoryPager = (position: "top" | "bottom") => (
+    <div className="generate-history-pager" aria-label={`生图历史分页（${position === "top" ? "顶部" : "底部"}）`}>
       <button
         className="btn-secondary"
         type="button"
         onClick={() => setHistoryPage((value) => Math.max(1, value - 1))}
         disabled={!canGoPreviousHistoryPage}
+        aria-label="上一页"
       >
         上一页
       </button>
-      <span>第 {historyPage} / {historyTotalPages} 页 · 每页 {GENERATE_HISTORY_PAGE_SIZE} 条 · 共 {historyTotal} 条</span>
+      <span aria-live="polite">
+        第 {historyPage} / {historyTotalPages} 页 · 每页 {GENERATE_HISTORY_PAGE_SIZE} 条 · 共 {historyTotal} 条
+      </span>
       <button
         className="btn-secondary"
         type="button"
         onClick={() => setHistoryPage((value) => Math.min(historyTotalPages, value + 1))}
         disabled={!canGoNextHistoryPage}
+        aria-label="下一页"
       >
         下一页
       </button>
@@ -956,30 +995,43 @@ export function GeneratePage(props: {
     <div className="generate-report-filters">
       <label className="field">
         <span>开始时间</span>
-        <input className="control" type="datetime-local" value={historyStartTime} onChange={(event) => setHistoryStartTime(event.target.value)} />
+        <input
+          className="control"
+          type="datetime-local"
+          value={reportFilters.startTime}
+          max={reportFilters.endTime || undefined}
+          onChange={(event) => setReportFilters((current) => ({ ...current, startTime: event.target.value }))}
+        />
       </label>
       <label className="field">
         <span>结束时间</span>
-        <input className="control" type="datetime-local" value={historyEndTime} onChange={(event) => setHistoryEndTime(event.target.value)} />
+        <input
+          className="control"
+          type="datetime-local"
+          value={reportFilters.endTime}
+          min={reportFilters.startTime || undefined}
+          onChange={(event) => setReportFilters((current) => ({ ...current, endTime: event.target.value }))}
+        />
       </label>
       {props.role === "admin" ? (
         <label className="field">
           <span>用户范围</span>
-          <HistoryOwnerSelect options={historyOwnerOptions} value={historyOwnerFilter} onChange={setHistoryOwnerFilter} />
+          <HistoryOwnerSelect
+            options={historyOwnerOptions}
+            value={reportFilters.owner}
+            onChange={(value) => setReportFilters((current) => ({ ...current, owner: value }))}
+          />
         </label>
       ) : null}
       <button
         className="btn-secondary generate-report-filter-reset"
         type="button"
-        onClick={() => {
-          setHistoryStartTime("");
-          setHistoryEndTime("");
-          setHistoryOwnerFilter("");
-        }}
-        disabled={!historyStartTime && !historyEndTime && !historyOwnerFilter}
+        onClick={() => setReportFilters((current) => ({ ...current, startTime: "", endTime: "", owner: "" }))}
+        disabled={reportFilterTotal === 0}
+        title={reportFilterTotal === 0 ? "没有可重置的筛选条件" : "清除时间范围和用户范围"}
       >
-        <RotateCcw size={16} />
-        重置
+        <RotateCcw size={16} aria-hidden="true" />
+        重置{reportFilterTotal > 0 ? `（${reportFilterTotal}）` : ""}
       </button>
     </div>
   );
@@ -1054,22 +1106,41 @@ export function GeneratePage(props: {
     );
   };
 
-  async function refreshHistory(options?: { silent?: boolean }) {
+  function buildHistoryParams(limit: number, page: number, filters: GenerationHistoryFilterState, options?: { status?: string }): URLSearchParams {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      page: String(page),
+      light: "true",
+    });
+    if (props.role === "admin" && filters.owner) {
+      params.set("owner", filters.owner);
+    }
+    if (filters.query.trim()) {
+      params.set("query", filters.query.trim());
+    }
+    const status = options?.status ?? (filters.status === "all" ? undefined : filters.status);
+    if (status) {
+      params.set("status", status);
+    }
+    const range = parseHistoryTimeRange(filters.startTime, filters.endTime);
+    if (range.invalid) {
+      throw new Error("时间范围无效，请确认开始时间早于结束时间。");
+    }
+    if (range.startTime !== undefined) {
+      params.set("startTime", String(range.startTime));
+    }
+    if (range.endTime !== undefined) {
+      params.set("endTime", String(range.endTime));
+    }
+    return params;
+  }
+
+  const refreshHistory = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
       setHistoryLoading(true);
     }
     try {
-      const params = new URLSearchParams({
-        limit: String(GENERATE_HISTORY_PAGE_SIZE),
-        page: String(historyPage),
-        light: "true",
-      });
-      if (props.role === "admin" && historyOwnerFilter) {
-        params.set("owner", historyOwnerFilter);
-      }
-      if (historyPromptQuery.trim()) {
-        params.set("query", historyPromptQuery.trim());
-      }
+      const params = buildHistoryParams(GENERATE_HISTORY_PAGE_SIZE, historyPage, historyFilters);
       const [next, nextOwnerUsage] = await Promise.all([
         fetchJson<GenerateHistoryResponse>(`/_gateway/generations/history?${params.toString()}`),
         props.role === "admin"
@@ -1080,8 +1151,9 @@ export function GeneratePage(props: {
       if (nextOwnerUsage) {
         setHistoryOwnerUsage(nextOwnerUsage);
       }
-      setHistoryTotal(next.total ?? next.items.length);
-      const nextTotalPages = next.totalPages ?? Math.max(1, Math.ceil((next.total ?? next.items.length) / GENERATE_HISTORY_PAGE_SIZE));
+      const nextTotal = next.total ?? next.items.length;
+      setHistoryTotal(nextTotal);
+      const nextTotalPages = next.totalPages ?? Math.max(1, Math.ceil(nextTotal / GENERATE_HISTORY_PAGE_SIZE));
       setHistoryTotalPages(nextTotalPages);
       if (historyPage > nextTotalPages) {
         setHistoryPage(nextTotalPages);
@@ -1095,19 +1167,22 @@ export function GeneratePage(props: {
         setHistoryLoading(false);
       }
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyFilters, historyPage, props.role, props.setStatus]);
 
   async function refreshReport(options?: { silent?: boolean }) {
     setReportLoading(true);
     try {
       const params = new URLSearchParams();
-      if (props.role === "admin" && historyOwnerFilter) {
-        params.set("owner", historyOwnerFilter);
+      if (props.role === "admin" && reportFilters.owner) {
+        params.set("owner", reportFilters.owner);
       }
-      const startTime = historyStartTime ? Date.parse(historyStartTime) : Number.NaN;
-      const endTime = historyEndTime ? Date.parse(historyEndTime) : Number.NaN;
-      if (Number.isFinite(startTime)) params.set("startTime", String(startTime));
-      if (Number.isFinite(endTime)) params.set("endTime", String(endTime));
+      const range = parseHistoryTimeRange(reportFilters.startTime, reportFilters.endTime);
+      if (range.invalid) {
+        throw new Error("时间范围无效，请确认开始时间早于结束时间。");
+      }
+      if (range.startTime !== undefined) params.set("startTime", String(range.startTime));
+      if (range.endTime !== undefined) params.set("endTime", String(range.endTime));
       const query = params.size > 0 ? `?${params.toString()}` : "";
       setReport(await fetchJson<GenerateReportResponse>(`/_gateway/generations/report${query}`));
     } catch (error) {
@@ -1123,16 +1198,18 @@ export function GeneratePage(props: {
     if (props.role !== "admin" || reportLoading) {
       return;
     }
-    setHistoryOwnerFilter((current) => current === owner ? "all" : owner);
-    setHistoryPage(1);
+    setReportFilters((current) => ({ ...current, owner: current.owner === owner ? "all" : owner }));
   }
 
   useEffect(() => {
+    if (historyRange.invalid) {
+      return undefined;
+    }
     const timer = window.setTimeout(() => {
       refreshHistory({ silent: true }).catch(() => undefined);
-    }, historyPromptQuery.trim() ? 250 : 0);
+    }, historyFilters.query.trim() ? 250 : 0);
     return () => window.clearTimeout(timer);
-  }, [historyOwnerFilter, historyPage, historyPromptQuery]);
+  }, [historyFilters, historyRange.invalid, historyPage, historyReloadToken, refreshHistory]);
 
   useEffect(() => {
     if (!historyPickerOpen) return undefined;
@@ -1148,8 +1225,8 @@ export function GeneratePage(props: {
           light: "true",
           status: "success",
         });
-        if (props.role === "admin" && historyOwnerFilter) {
-          params.set("owner", historyOwnerFilter);
+        if (props.role === "admin" && historyFilters.owner) {
+          params.set("owner", historyFilters.owner);
         }
         if (historyPickerQuery.trim()) {
           params.set("query", historyPickerQuery.trim());
@@ -1180,7 +1257,7 @@ export function GeneratePage(props: {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [historyOwnerFilter, historyPickerOpen, historyPickerPage, historyPickerQuery, props.role]);
+  }, [historyFilters.owner, historyPickerOpen, historyPickerPage, historyPickerQuery, props.role]);
 
   useEffect(() => {
     if (!historyPickerOpen) return undefined;
@@ -1203,7 +1280,8 @@ export function GeneratePage(props: {
     if (tab === "report") {
       refreshReport({ silent: true }).catch(() => undefined);
     }
-  }, [tab, historyEndTime, historyOwnerFilter, historyStartTime]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, reportFilters]);
 
   useEffect(() => {
     pendingJobsRuntime.current = { pendingJobs, refreshHistory, refreshConfig: props.refreshConfig, setStatus: props.setStatus };
@@ -1696,6 +1774,7 @@ export function GeneratePage(props: {
         };
       });
     setReferenceImages(restoredReferences);
+    setHistoryDetailItem(null);
     setTab("create");
     const skippedCount = Math.max(0, item.referenceImages.length - restoredReferences.length);
     props.setStatus(skippedCount > 0
@@ -1728,6 +1807,7 @@ export function GeneratePage(props: {
     }]);
     setResultImages([]);
     setResponseBody("已将历史图片作为参考图，本次会走 images.edits。");
+    setHistoryDetailItem(null);
     setTab("create");
     props.setStatus(originalUrl
       ? "已将历史图片作为编辑参考图，提交时会由服务端读取原图。"
@@ -1750,6 +1830,60 @@ export function GeneratePage(props: {
         setManualCopyPrompt(item.prompt);
         props.setStatus("自动复制失败，已打开手动复制框。");
       });
+  }
+
+  function downloadHistoryItem(item: GenerateHistoryItem) {
+    if (item.images.length === 0) {
+      props.setStatus("这条历史没有可下载的生成图。");
+      return;
+    }
+    for (const image of item.images) {
+      const link = document.createElement("a");
+      link.href = image.url;
+      link.download = image.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+    props.setStatus(item.images.length > 1 ? `已开始下载 ${item.images.length} 张生成图。` : "已开始下载生成图。");
+  }
+
+  function retryHistoryItem(item: GenerateHistoryItem) {
+    const hint = historyActionHint("retry", item);
+    if (hint) {
+      props.setStatus(hint);
+      return;
+    }
+    setPrompt(item.prompt);
+    applyHistoryParameters(item);
+    setReferenceImages([]);
+    setResultImages([]);
+    setResponseBody("已带入失败记录的提示词和参数，可直接重新生图。");
+    setHistoryDetailItem(null);
+    setTab("create");
+    props.setStatus("已带入原提示词和生成参数，点击生图即可重试。");
+  }
+
+  function runHistoryRowAction(key: HistoryMenuActionKey, item: GenerateHistoryItem) {
+    if (key === "detail") {
+      setHistoryDetailItem(item);
+      return;
+    }
+    runHistoryAction(key, item, {
+      busy: bulkDownloading,
+      canRetry: !historyActionHint("retry", item),
+      canEdit: !historyActionHint("edit", item),
+      canReuse: true,
+      canCopy: Boolean(item.prompt.trim()),
+      canDownload: !historyActionHint("download", item),
+      retryDisabledReason: historyActionHint("retry", item),
+      onEdit: editFromHistory,
+      onReuse: reuseHistory,
+      onCopy: copyHistoryPrompt,
+      onDownload: downloadHistoryItem,
+      onRetry: retryHistoryItem,
+      setStatus: props.setStatus,
+    });
   }
 
   return (
@@ -2042,7 +2176,11 @@ export function GeneratePage(props: {
       ) : tab === "history" ? (
         <div className="generate-history">
           <div className="generate-history-actions">
-            <span>{historyLoading ? "正在读取服务端历史..." : `当前页显示 ${filteredHistory.length} / ${history.length} 条，服务器共 ${historyTotal} 条。`}</span>
+            <span>
+              {historyLoading
+                ? "正在读取服务端历史..."
+                : `按当前筛选共 ${historyTotal} 条${historyFilterTotal > 0 ? `（已启用 ${historyFilterTotal} 项筛选）` : ""}，本页 ${history.length} 条。`}
+            </span>
             <div className="generate-history-bulk-actions">
               <div className="generate-history-view-toggle" role="group" aria-label="历史记录显示方式">
                 <button
@@ -2052,7 +2190,7 @@ export function GeneratePage(props: {
                   aria-pressed={historyViewMode === "grid"}
                   title="宫格视图"
                 >
-                  <LayoutGrid size={16} />
+                  <LayoutGrid size={16} aria-hidden="true" />
                   <span>宫格</span>
                 </button>
                 <button
@@ -2062,169 +2200,134 @@ export function GeneratePage(props: {
                   aria-pressed={historyViewMode === "list"}
                   title="列表视图"
                 >
-                  <List size={16} />
+                  <List size={16} aria-hidden="true" />
                   <span>列表</span>
                 </button>
               </div>
-              <label className="generate-history-select-all">
-                <input
-                  type="checkbox"
-                  checked={allSelectableHistorySelected}
-                  ref={(element) => {
-                    if (element) element.indeterminate = someSelectableHistorySelected;
-                  }}
-                  onChange={toggleSelectAllHistory}
-                  disabled={selectableHistory.length === 0 || bulkDownloading}
-                />
-                <span>本页全选</span>
-              </label>
-              <span className="generate-history-selection-summary">
-                已选 {selectedHistory.length} 条 / {selectedHistoryImageCount} 张{selectedHistory.length > selectedCurrentPageCount ? `（含其他页 ${selectedHistory.length - selectedCurrentPageCount} 条）` : ""}
-              </span>
-              <button className="btn-primary" type="button" onClick={downloadSelectedHistoryImages} disabled={selectedHistory.length === 0 || bulkDownloading}>
-                {bulkDownloading ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-                {bulkDownloading ? "正在打包" : "批量下载"}
-              </button>
-              <button className="btn-secondary" type="button" onClick={() => refreshHistory()} disabled={historyLoading || bulkDownloading}>
-                <RotateCcw size={16} />
+              {historyViewMode === "grid" ? (
+                <label className="generate-history-select-all">
+                  <input
+                    type="checkbox"
+                    checked={allSelectableHistorySelected}
+                    ref={(element) => {
+                      if (element) element.indeterminate = someSelectableHistorySelected;
+                    }}
+                    onChange={toggleSelectAllHistory}
+                    disabled={selectableHistory.length === 0 || bulkDownloading}
+                    aria-label="本页全选可下载记录"
+                  />
+                  <span>本页全选</span>
+                </label>
+              ) : null}
+              {selectedHistory.length > 0 ? (
+                <>
+                  <span className="generate-history-selection-summary">
+                    已选 {selectedHistory.length} 条 / {selectedHistoryImageCount} 张{selectedHistory.length > selectedCurrentPageCount ? `（含其他页 ${selectedHistory.length - selectedCurrentPageCount} 条）` : ""}
+                  </span>
+                  <button className="btn-primary" type="button" onClick={downloadSelectedHistoryImages} disabled={bulkDownloading}>
+                    {bulkDownloading ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
+                    {bulkDownloading ? "正在打包" : "批量下载"}
+                  </button>
+                  <button className="btn-secondary" type="button" onClick={() => setSelectedHistoryItems(new Map())} disabled={bulkDownloading}>
+                    清除选择
+                  </button>
+                </>
+              ) : null}
+              <button className="btn-secondary" type="button" onClick={() => setHistoryReloadToken((value) => value + 1)} disabled={historyLoading || bulkDownloading}>
+                <RotateCcw size={16} aria-hidden="true" />
                 刷新
               </button>
             </div>
           </div>
           {renderHistoryFilters()}
-          {renderHistoryPager()}
-          {history.length === 0 ? (
-            <div className="empty-state">暂无生图历史。</div>
-          ) : filteredHistory.length === 0 ? (
-            <div className="empty-state">没有匹配的生图历史。</div>
+          {renderHistoryPager("top")}
+          {historyLoading && history.length === 0 ? (
+            <div className="empty-state">正在读取服务端历史...</div>
+          ) : history.length === 0 ? (
+            <div className="empty-state">{historyFilterTotal > 0 ? "没有匹配筛选条件的生图历史。" : "暂无生图历史。"}</div>
+          ) : historyViewMode === "list" ? (
+            <HistoryTable
+              items={history}
+              isAdmin={props.role === "admin"}
+              config={props.config}
+              loading={historyLoading}
+              bulkDownloading={bulkDownloading}
+              selectedIds={new Set(selectedHistoryItems.keys())}
+              allSelectableSelected={allSelectableHistorySelected}
+              someSelectableSelected={someSelectableHistorySelected}
+              onToggleSelect={toggleHistorySelection}
+              onToggleSelectAll={toggleSelectAllHistory}
+              onOpenPreview={(item, index) => {
+                const gallery = historyPreviewItems(item);
+                const target = gallery[index] ?? gallery[0];
+                if (target) {
+                  props.setPreviewImage({ ...target, gallery, index: index < gallery.length ? index : 0 });
+                }
+              }}
+              onOpenDetail={setHistoryDetailItem}
+              onMenuAction={runHistoryRowAction}
+              actionHint={historyActionHint}
+            />
           ) : (
-            <div className={`generate-history-grid ${historyViewMode === "list" ? `is-table ${props.role === "admin" ? "" : "is-user-view"}` : ""}`} role={historyViewMode === "list" ? "table" : undefined}>
-              {historyViewMode === "list" ? (
-                <div className="generate-history-table-head" role="row">
-                  <label className="generate-history-table-select-all" title="本页全选">
-                    <input
-                      type="checkbox"
-                      checked={allSelectableHistorySelected}
-                      ref={(element) => {
-                        if (element) element.indeterminate = someSelectableHistorySelected;
-                      }}
-                      onChange={toggleSelectAllHistory}
-                      disabled={selectableHistory.length === 0 || bulkDownloading}
-                      aria-label="本页全选"
-                    />
-                  </label>
-                  <span>预览</span>
-                  <span>状态</span>
-                  <span>提示词</span>
-                  <span>生成时间</span>
-                  <span>规格</span>
-                  <span>耗时</span>
-                  {props.role === "admin" ? <span>用户</span> : null}
-                  <span>操作</span>
-                </div>
-              ) : null}
-              {filteredHistory.map((item) => {
+            <div className="generate-history-grid">
+              {history.map((item) => {
                 const statusMeta = generateStatusMeta(item.status);
                 const firstImage = item.images[0];
                 const selectable = item.status === "success" && item.images.length > 0;
                 const selected = selectedHistoryItems.has(item.id);
+                const summary = failureSummary(item.error);
                 return (
-                <article className={`generate-history-card ${selected ? "is-selected" : ""}`} key={item.id} role={historyViewMode === "list" ? "row" : undefined}>
-                  {selectable ? (
-                    <label className="generate-history-card-select" title={selected ? "取消选择" : "选择此记录"}>
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={() => toggleHistorySelection(item)}
-                        disabled={bulkDownloading}
-                        aria-label={`${selected ? "取消选择" : "选择"}：${item.prompt}`}
-                      />
-                    </label>
-                  ) : null}
-                  <div className={`generate-history-thumbs ${item.images.length > 1 ? "is-multiple" : ""}`} role={historyViewMode === "list" ? "cell" : undefined}>
-                    {item.images.length > 0 ? item.images.slice(0, historyViewMode === "list" ? 1 : 4).map((image, index) => (
-                      <button
-                        className={`generate-history-thumb ${item.images.length === 1 ? ratioClassName(item.ratio || item.size) : ""}`}
-                        type="button"
-                        key={image.filename}
-                        onClick={() => {
-                          const gallery = historyPreviewItems(item);
-                          props.setPreviewImage({ ...gallery[index], gallery, index });
-                        }}
-                        aria-label={`预览第 ${index + 1} 张生成图`}
-                      >
-                        <img src={image.previewUrl || image.url} alt={`${item.prompt} - 第 ${index + 1} 张`} loading="lazy" decoding="async" />
-                        {item.images.length > 1 ? <span>{index + 1}</span> : null}
-                      </button>
-                    )) : (
-                      <div className="generate-history-thumb is-empty">
-                        <ImagePlus size={28} />
-                      </div>
-                    )}
-                    {item.images.length > (historyViewMode === "list" ? 1 : 4) ? <span className="generate-history-more">+{item.images.length - (historyViewMode === "list" ? 1 : 4)}</span> : null}
-                  </div>
-                  <div className="generate-history-card-info">
-                    <div className="generate-history-title-row">
-                      <span className={`generate-status ${statusMeta.className}`}>
-                        {statusMeta.label}
-                      </span>
-                      <strong className="history-prompt-text" title={item.prompt} data-full-prompt={item.prompt}>
-                        {item.prompt}
-                      </strong>
-                    </div>
-                    <span>
-                      {formatFullTime(item.createdAt)} · {firstImage?.width && firstImage?.height ? `${firstImage.width}×${firstImage.height}` : item.ratio || item.size} · {item.images.length > 0 ? `生成图 ${item.images.length}` : "无生成图"} · {item.referenceImages.length > 0 ? `参考图 ${item.referenceImages.length}` : "纯文本"} · {formatDuration(item.durationMs)}
-                      {item.waitDurationMs && item.waitDurationMs > 0 ? ` · 等待 ${formatDuration(item.waitDurationMs)}` : ""}
-                      {props.role === "admin" ? ` · 用户 ${userDisplayName(props.config, item.owner)}` : ""}
-                      {firstImage?.previewSize ? ` · 预览 ${(firstImage.previewSize / 1024).toFixed(0)} KB` : ""}
-                    </span>
-                    {item.error ? <span className="generate-history-error">{item.error}</span> : null}
-                  </div>
-                  {historyViewMode === "list" ? (
-                    <>
-                      <span className={`generate-status generate-history-table-status ${statusMeta.className}`} role="cell">{statusMeta.label}</span>
-                      <div className="generate-history-table-prompt-cell" role="cell">
-                        <strong className="generate-history-table-prompt" title={item.prompt}>{item.prompt}</strong>
-                      </div>
-                      {item.error ? <div className="generate-history-table-error-row" role="cell" title={item.error}>失败原因：{item.error}</div> : null}
-                      <span className="generate-history-table-time" role="cell">{formatFullTime(item.createdAt)}</span>
-                      <span className="generate-history-table-spec" role="cell">
-                        {firstImage?.width && firstImage?.height ? `${firstImage.width}×${firstImage.height}` : item.ratio || item.size || "-"}
-                        {item.images.length > 1 ? ` · ${item.images.length} 张` : ""}
-                      </span>
-                      <span className="generate-history-table-duration" role="cell">{formatDuration(item.durationMs)}</span>
-                      {props.role === "admin" ? <span className="generate-history-table-user" role="cell">{userDisplayName(props.config, item.owner)}</span> : null}
-                    </>
-                  ) : null}
-                  <div className="generate-history-card-actions">
-                    {firstImage ? (
-                      <button className="btn-secondary" type="button" onClick={() => editFromHistory(item)}>
-                        <Pencil size={15} />
-                        编辑首张
-                      </button>
+                  <article className={`generate-history-card ${selected ? "is-selected" : ""}`} key={item.id}>
+                    {selectable ? (
+                      <label className="generate-history-card-select" title={selected ? "取消选择" : "选择此记录"}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => toggleHistorySelection(item)}
+                          disabled={bulkDownloading}
+                          aria-label={`${selected ? "取消选择" : "选择"}：${item.prompt}`}
+                        />
+                      </label>
                     ) : null}
-                    <button className="btn-secondary" type="button" onClick={() => reuseHistory(item)}>
-                      <RotateCcw size={15} />
-                      再次使用
-                    </button>
-                    <button className="btn-secondary" type="button" onClick={() => copyHistoryPrompt(item)}>
-                      <Copy size={15} />
-                      {copiedPromptId === item.id ? "已复制" : "复制提示词"}
-                    </button>
-                    {item.images.slice(0, historyViewMode === "list" ? 1 : item.images.length).map((image, index) => (
-                      <a className="btn-secondary" href={image.url} download={image.filename} key={image.filename}>
-                        <Download size={15} />
-                        {item.images.length > 1 ? `下载 ${index + 1}` : "下载"}
-                      </a>
-                    ))}
-                  </div>
-                </article>
-              );
+                    <HistoryPreviewThumb
+                      item={item}
+                      onOpen={(target, index) => {
+                        const gallery = historyPreviewItems(target);
+                        const entry = gallery[index] ?? gallery[0];
+                        if (entry) {
+                          props.setPreviewImage({ ...entry, gallery, index: index < gallery.length ? index : 0 });
+                        }
+                      }}
+                    />
+                    <div className="generate-history-card-info">
+                      <div className="generate-history-title-row">
+                        <span className={`generate-status ${statusMeta.className}`}>{statusMeta.label}</span>
+                        <strong className="history-prompt-text" title={item.prompt} data-full-prompt={item.prompt}>
+                          {item.prompt}
+                        </strong>
+                      </div>
+                      <span>
+                        {formatFullTime(item.createdAt)} · {firstImage?.width && firstImage?.height ? `${firstImage.width}×${firstImage.height}` : item.ratio || item.size} · {item.images.length > 0 ? `生成图 ${item.images.length}` : "无生成图"} · {item.referenceImages.length > 0 ? `参考图 ${item.referenceImages.length}` : "纯文本"} · {formatDuration(item.durationMs)}
+                        {item.waitDurationMs && item.waitDurationMs > 0 ? ` · 等待 ${formatDuration(item.waitDurationMs)}` : ""}
+                        {props.role === "admin" ? ` · 用户 ${userDisplayName(props.config, item.owner)}` : ""}
+                        {firstImage?.previewSize ? ` · 预览 ${(firstImage.previewSize / 1024).toFixed(0)} KB` : ""}
+                      </span>
+                      {summary ? <span className="generate-history-error" title={item.error}>{summary}</span> : null}
+                    </div>
+                    <HistoryCardActions
+                      item={item}
+                      copied={copiedPromptId === item.id}
+                      hint={historyActionHint}
+                      onAction={runHistoryRowAction}
+                    />
+                  </article>
+                );
               })}
             </div>
           )}
-          {renderHistoryPager()}
+          {renderHistoryPager("bottom")}
         </div>
+
       ) : (
         <div className="generate-report">
           <div className="generate-report-heading">
@@ -2293,7 +2396,7 @@ export function GeneratePage(props: {
                   {report.users.slice(0, 12).map((item, index) => {
                     const maxRequestCount = report.users[0]?.requestCount ?? 1;
                     const displayName = userDisplayName(props.config, item.owner);
-                    const selected = historyOwnerFilter === item.owner;
+                    const selected = reportFilters.owner === item.owner;
                     return (
                       <button
                         className={`generate-report-user-row ${selected ? "is-selected" : ""}`}
@@ -2328,6 +2431,30 @@ export function GeneratePage(props: {
           </div>
         </div>
       )}
+
+      {historyDetailItem ? (
+        <HistoryDetailDrawer
+          key={historyDetailItem.id}
+          item={historyDetailItem}
+          isAdmin={props.role === "admin"}
+          config={props.config}
+          copiedPromptId={copiedPromptId}
+          onClose={() => setHistoryDetailItem(null)}
+          onClickAction={runHistoryRowAction}
+          actionHint={historyActionHint}
+          onOpenPreview={(item, index) => {
+            const gallery = historyPreviewItems(item);
+            const entry = gallery[index] ?? gallery[0];
+            if (entry) {
+              props.setPreviewImage({ ...entry, gallery, index: index < gallery.length ? index : 0 });
+            }
+          }}
+          onLoadFullRecord={async (item) => {
+            const result = await fetchJson<{ item: GenerateHistoryItem }>(`/_gateway/generations/history/${encodeURIComponent(item.id)}`);
+            return result.item;
+          }}
+        />
+      ) : null}
 
       {historyPickerOpen ? (
         <Modal

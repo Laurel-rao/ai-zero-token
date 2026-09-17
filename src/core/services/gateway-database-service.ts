@@ -80,6 +80,11 @@ export type GenerationOwnerUsage = {
   count: number;
 };
 
+export type GenerationHistoryFilterOptions = {
+  startTime?: number;
+  endTime?: number;
+};
+
 export type GenerationReport = {
   startTime?: number;
   endTime?: number;
@@ -431,6 +436,14 @@ function sanitizeGatewayUsername(value: string, prefix = ""): string {
 
 function clampLimit(limit: number | undefined, max: number): number {
   return Math.max(1, Math.min(limit ?? 100, max));
+}
+
+function normalizeGenerationFilterTime(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.trunc(value);
+  return Number.isSafeInteger(normalized) && normalized > 0 ? normalized : undefined;
 }
 
 function normalizeChatTitle(value: string | undefined): string {
@@ -990,17 +1003,27 @@ export class GatewayDatabaseService {
     await this.prune("request_logs", "time", MAX_REQUEST_LOGS);
   }
 
-  async countGenerationHistory(owner?: string, query?: string, status?: GenerationHistoryItem["status"]): Promise<number> {
+  async countGenerationHistory(owner?: string, query?: string, status?: GenerationHistoryItem["status"], options?: GenerationHistoryFilterOptions): Promise<number> {
     await this.init();
     await this.deleteCoveredRunningGenerations(owner);
     const queryPattern = query?.trim() ? `%${query.trim()}%` : null;
+    const startTime = normalizeGenerationFilterTime(options?.startTime);
+    const endTime = normalizeGenerationFilterTime(options?.endTime);
     const row = await this.database.get(`
         SELECT COUNT(*) AS count
         FROM generation_history
         WHERE (? IS NULL OR owner = ?)
           AND (? IS NULL OR LOWER(prompt) LIKE LOWER(?))
           AND (? IS NULL OR status = ?)
-      `, owner ?? null, owner ?? null, queryPattern, queryPattern, status ?? null, status ?? null) as { count?: unknown } | undefined;
+          AND (? IS NULL OR created_at >= ?)
+          AND (? IS NULL OR created_at <= ?)
+      `,
+      owner ?? null, owner ?? null,
+      queryPattern, queryPattern,
+      status ?? null, status ?? null,
+      startTime ?? null, startTime ?? null,
+      endTime ?? null, endTime ?? null,
+    ) as { count?: unknown } | undefined;
     return Number(row?.count ?? 0);
   }
 
@@ -1037,10 +1060,12 @@ export class GatewayDatabaseService {
   }
 
   async getGenerationReport(owner?: string, options?: { startTime?: number; endTime?: number }): Promise<GenerationReport> {
-    const history = await this.listGenerationHistory(MAX_GENERATION_HISTORY, owner, { light: true });
+    // Push the range into SQL so the report uses the same filtering path as the history list.
+    const startTime = normalizeGenerationFilterTime(options?.startTime);
+    const endTime = normalizeGenerationFilterTime(options?.endTime);
+    const history = await this.listGenerationHistory(MAX_GENERATION_HISTORY, owner, { light: true, startTime, endTime });
     const items = history
-      .filter((item) => !Number.isFinite(options?.startTime) || item.createdAt >= Number(options?.startTime))
-      .filter((item) => !Number.isFinite(options?.endTime) || item.createdAt <= Number(options?.endTime))
+      .slice()
       .sort((left, right) => left.createdAt - right.createdAt);
     const completed = items.filter((item) => item.status !== "queued" && item.status !== "running" && item.durationMs > 0);
     const successCount = items.filter((item) => item.status === "success").length;
@@ -1145,13 +1170,15 @@ export class GatewayDatabaseService {
     };
   }
 
-  async listGenerationHistory(limit = 10, owner?: string, options?: { light?: boolean; offset?: number; query?: string; status?: GenerationHistoryItem["status"] }): Promise<GenerationHistoryItem[]> {
+  async listGenerationHistory(limit = 10, owner?: string, options?: { light?: boolean; offset?: number; query?: string; status?: GenerationHistoryItem["status"] } & GenerationHistoryFilterOptions): Promise<GenerationHistoryItem[]> {
     await this.init();
     await this.deleteCoveredRunningGenerations(owner);
     const light = Boolean(options?.light);
     const safeLimit = clampLimit(limit, MAX_GENERATION_HISTORY);
     const safeOffset = Math.max(0, Math.trunc(options?.offset ?? 0));
     const queryPattern = options?.query?.trim() ? `%${options.query.trim()}%` : null;
+    const startTime = normalizeGenerationFilterTime(options?.startTime);
+    const endTime = normalizeGenerationFilterTime(options?.endTime);
     const rows = await this.database.all(`
         SELECT id, owner, created_at AS createdAt, started_at AS startedAt, updated_at AS updatedAt, status, endpoint, account, model,
                prompt, ratio, size, quality, output_format AS outputFormat, duration_ms AS durationMs,
@@ -1161,10 +1188,19 @@ export class GatewayDatabaseService {
         WHERE (? IS NULL OR owner = ?)
           AND (? IS NULL OR LOWER(prompt) LIKE LOWER(?))
           AND (? IS NULL OR status = ?)
+          AND (? IS NULL OR created_at >= ?)
+          AND (? IS NULL OR created_at <= ?)
         ORDER BY created_at DESC
         LIMIT ?
         OFFSET ?
-      `, owner ?? null, owner ?? null, queryPattern, queryPattern, options?.status ?? null, options?.status ?? null, safeLimit, safeOffset) as Array<Record<string, unknown>>;
+      `,
+      owner ?? null, owner ?? null,
+      queryPattern, queryPattern,
+      options?.status ?? null, options?.status ?? null,
+      startTime ?? null, startTime ?? null,
+      endTime ?? null, endTime ?? null,
+      safeLimit, safeOffset,
+    ) as Array<Record<string, unknown>>;
 
     const now = Date.now();
     return rows.map((row) => ({
