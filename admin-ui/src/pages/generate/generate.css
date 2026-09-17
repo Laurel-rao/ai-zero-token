@@ -104,7 +104,7 @@
 
 .generate-control-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px 8px;
   align-items: start;
 }
@@ -117,17 +117,11 @@
   grid-column: 1 / -1;
 }
 
-.custom-size-field {
+.image-size-field {
   min-width: 118px;
 }
 
-.custom-size-field .input:disabled {
-  color: var(--text-soft);
-  background: #f8fafc;
-  opacity: 1;
-}
-
-.custom-size-field .input.is-invalid {
+.image-size-field .input.is-invalid {
   border-color: #fca5a5;
   background: #fff7ed;
 }

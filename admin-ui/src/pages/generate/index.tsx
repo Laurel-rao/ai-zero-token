@@ -31,15 +31,12 @@ import type {
   HistoryOwnerOption,
   HistoryStatusFilter,
   HistoryViewMode,
-  ImageQuality,
   OutputFormat,
 } from "./history-types";
 
 type GenerateTab = "create" | "history" | "report";
 type ImageRatio = "1:1" | "16:9" | "9:16" | "4:3";
-type ResolutionPreset = "1k" | "2k" | "4k" | "custom";
 type ReferenceImageState = { id: string; src: string; previewSrc: string; name: string; size: number };
-type ResolutionOption = { preset: ResolutionPreset; label: string; disabled?: boolean; reason?: string };
 type PromptSuggestion = {
   title: string;
   prompt: string;
@@ -175,8 +172,6 @@ const EMPTY_GENERATE_REPORT: GenerateReportResponse = {
 };
 
 const DEFAULT_IMAGE_RATIO: ImageRatio = "16:9";
-const DEFAULT_RESOLUTION_PRESET: ResolutionPreset = "1k";
-const DEFAULT_IMAGE_QUALITY: ImageQuality = "high";
 
 const ratioOptions: Array<{ ratio: ImageRatio; label: string }> = [
   { ratio: "1:1", label: "1:1" },
@@ -184,33 +179,18 @@ const ratioOptions: Array<{ ratio: ImageRatio; label: string }> = [
   { ratio: "9:16", label: "9:16" },
   { ratio: "4:3", label: "4:3" },
 ];
-const CODEX_NATIVE_RESOLUTION_NOTICE = "当前 Codex 生图通道仅支持 1K 原生输出，2K/4K 暂不可用。";
-const resolutionOptions: ResolutionOption[] = [
-  { preset: "1k", label: "1K" },
-  { preset: "2k", label: "2K", disabled: true, reason: "暂不支持" },
-  { preset: "4k", label: "4K", disabled: true, reason: "暂不支持" },
-  { preset: "custom", label: "自定义" },
-];
-const resolutionSizes: Record<Exclude<ResolutionPreset, "custom">, Record<ImageRatio, string>> = {
-  "1k": {
-    "1:1": "1024x1024",
-    "16:9": "1024x576",
-    "9:16": "576x1024",
-    "4:3": "1024x768",
-  },
-  "2k": {
-    "1:1": "2048x2048",
-    "16:9": "2048x1152",
-    "9:16": "1152x2048",
-    "4:3": "2048x1536",
-  },
-  "4k": {
-    "1:1": "4096x4096",
-    "16:9": "3840x2160",
-    "9:16": "2160x3840",
-    "4:3": "3840x2880",
-  },
+const IMAGE_SIZE_HINT = "Codex 生图通道以 1K 原生输出为主，尺寸可直接编辑。";
+/** Default size applied when a ratio is picked; the size field stays freely editable. */
+const ratioSizes: Record<ImageRatio, string> = {
+  "1:1": "1024x1024",
+  "16:9": "1024x576",
+  "9:16": "576x1024",
+  "4:3": "1024x768",
 };
+
+function sizeForRatio(ratio: ImageRatio): string {
+  return ratioSizes[ratio];
+}
 const MIN_GENERATION_COUNT = 1;
 const MAX_GENERATION_COUNT = 10;
 const MAX_REFERENCE_IMAGES = 16;
@@ -296,14 +276,6 @@ function normalizeGenerationCount(value: string): number {
   return Math.min(MAX_GENERATION_COUNT, Math.max(MIN_GENERATION_COUNT, parsed));
 }
 
-function sizeForPreset(ratio: ImageRatio, preset: ResolutionPreset): string | null {
-  return preset === "custom" ? null : resolutionSizes[preset][ratio];
-}
-
-function isResolutionPresetDisabled(preset: ResolutionPreset): boolean {
-  return resolutionOptions.some((item) => item.preset === preset && item.disabled);
-}
-
 function customSizeValid(value: string): boolean {
   return /^\d{2,5}x\d{2,5}$/i.test(value.trim());
 }
@@ -328,22 +300,6 @@ function ratioFromSize(size?: string): ImageRatio | null {
     };
   }).sort((left, right) => left.diff - right.diff);
   return scored[0]?.diff < 0.02 ? scored[0].ratio : null;
-}
-
-function presetFromSize(size?: string): ResolutionPreset | null {
-  const normalized = size?.trim().toLowerCase();
-  if (!normalized) {
-    return null;
-  }
-  for (const option of resolutionOptions) {
-    if (option.preset === "custom") {
-      continue;
-    }
-    if (Object.values(resolutionSizes[option.preset]).some((item) => item.toLowerCase() === normalized)) {
-      return option.preset;
-    }
-  }
-  return null;
 }
 
 function isImageRatio(value?: string): value is ImageRatio {
@@ -685,9 +641,7 @@ export function GeneratePage(props: {
   const [tab, setTab] = useState<GenerateTab>("create");
   const [prompt, setPrompt] = useState("生成一张白底红苹果商品图，构图简洁，光线干净。");
   const [ratio, setRatio] = useState<ImageRatio>(DEFAULT_IMAGE_RATIO);
-  const [resolutionPreset, setResolutionPreset] = useState<ResolutionPreset>(DEFAULT_RESOLUTION_PRESET);
-  const [customSize, setCustomSize] = useState(sizeForPreset(DEFAULT_IMAGE_RATIO, DEFAULT_RESOLUTION_PRESET) ?? "1024x576");
-  const [quality, setQuality] = useState<ImageQuality>(DEFAULT_IMAGE_QUALITY);
+  const [imageSize, setImageSize] = useState(sizeForRatio(DEFAULT_IMAGE_RATIO));
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("png");
   const [generationCount, setGenerationCount] = useState("1");
   const [referenceImages, setReferenceImages] = useState<ReferenceImageState[]>([]);
@@ -743,11 +697,8 @@ export function GeneratePage(props: {
   });
   const hasPendingJobs = pendingJobs.length > 0;
 
-  const selectedSize = useMemo(() => {
-    const presetSize = sizeForPreset(ratio, resolutionPreset);
-    return presetSize ?? customSize.trim();
-  }, [customSize, ratio, resolutionPreset]);
-  const selectedSizeValid = resolutionPreset !== "custom" || customSizeValid(customSize);
+  const selectedSize = imageSize.trim();
+  const selectedSizeValid = customSizeValid(imageSize);
   const latestResultSize = useMemo(() => {
     const first = resultImages[0];
     return first?.width && first.height ? `${first.width}×${first.height}` : selectedSize;
@@ -1560,9 +1511,7 @@ export function GeneratePage(props: {
   function applyPromptExample(example: (typeof promptExamples)[number]) {
     setPrompt(example.prompt);
     setRatio(example.ratio);
-    if (resolutionPreset !== "custom") {
-      setCustomSize(sizeForPreset(example.ratio, resolutionPreset) ?? customSize);
-    }
+    setImageSize(sizeForRatio(example.ratio));
     setReferenceImages([]);
     setPromptSuggestion(null);
     props.setStatus(`已填入${example.label}示例提示词。`);
@@ -1570,35 +1519,15 @@ export function GeneratePage(props: {
 
   function applyRatio(nextRatio: ImageRatio) {
     setRatio(nextRatio);
-    if (resolutionPreset !== "custom") {
-      setCustomSize(sizeForPreset(nextRatio, resolutionPreset) ?? customSize);
-    }
-  }
-
-  function applyResolutionPreset(nextPreset: ResolutionPreset) {
-    if (isResolutionPresetDisabled(nextPreset)) {
-      props.setStatus(CODEX_NATIVE_RESOLUTION_NOTICE);
-      return;
-    }
-    setResolutionPreset(nextPreset);
-    const presetSize = sizeForPreset(ratio, nextPreset);
-    if (presetSize) {
-      setCustomSize(presetSize);
-    }
+    // Picking a ratio resets the size to that ratio's default; the field stays freely editable afterwards.
+    setImageSize(sizeForRatio(nextRatio));
   }
 
   function applyHistoryParameters(item: GenerateHistoryItem) {
     const nextRatio = isImageRatio(item.ratio) ? item.ratio : ratioFromSize(item.size) ?? DEFAULT_IMAGE_RATIO;
-    const matchedPreset = presetFromSize(item.size);
-    const nextPreset = matchedPreset && !isResolutionPresetDisabled(matchedPreset) ? matchedPreset : item.size && !matchedPreset ? "custom" : DEFAULT_RESOLUTION_PRESET;
     setRatio(nextRatio);
-    setResolutionPreset(nextPreset);
-    setCustomSize(nextPreset === "custom" ? item.size?.trim() || "1024x576" : sizeForPreset(nextRatio, nextPreset) || sizeForPreset(DEFAULT_IMAGE_RATIO, DEFAULT_RESOLUTION_PRESET) || "1024x576");
-    setQuality(item.quality || DEFAULT_IMAGE_QUALITY);
+    setImageSize(item.size?.trim() || sizeForRatio(nextRatio));
     setOutputFormat(item.outputFormat || "png");
-    if (matchedPreset && isResolutionPresetDisabled(matchedPreset)) {
-      props.setStatus(`历史记录原尺寸为 ${item.size}，${CODEX_NATIVE_RESOLUTION_NOTICE}`);
-    }
   }
 
   function acceptPromptSuggestion() {
@@ -1664,7 +1593,7 @@ export function GeneratePage(props: {
       return;
     }
     if (!selectedSizeValid) {
-      props.setStatus("自定义尺寸格式应为 宽x高，例如 2160x3840。");
+      props.setStatus("尺寸格式应为 宽x高，例如 1024x576。");
       return;
     }
     submittingGenerationRef.current = true;
@@ -1680,7 +1609,6 @@ export function GeneratePage(props: {
             images: referenceImages.map((image) => ({ image_url: image.src })),
             n: imageCount,
             size: selectedSize,
-            quality,
             output_format: outputFormat,
             response_format: "b64_json",
             _gateway_background: true,
@@ -1690,7 +1618,6 @@ export function GeneratePage(props: {
             prompt: prompt.trim(),
             n: imageCount,
             size: selectedSize,
-            quality,
             output_format: outputFormat,
             response_format: "b64_json",
             _gateway_background: true,
@@ -1925,40 +1852,21 @@ export function GeneratePage(props: {
                   {ratioOptions.map((item) => (
                     <button className={`ratio-btn ${ratio === item.ratio ? "is-active" : ""}`} key={item.ratio} type="button" onClick={() => applyRatio(item.ratio)}>
                       <strong>{item.label}</strong>
-                      <span>{sizeForPreset(item.ratio, resolutionPreset) ?? "自定义"}</span>
+                      <span>{sizeForRatio(item.ratio)}</span>
                     </button>
                   ))}
                 </div>
               </label>
-              <label className="field">
-                <span>分辨率</span>
-                <select className="control" value={resolutionPreset} onChange={(event) => applyResolutionPreset(event.target.value as ResolutionPreset)}>
-                  {resolutionOptions.map((item) => (
-                    <option key={item.preset} value={item.preset} disabled={item.disabled}>{item.reason ? `${item.label}（${item.reason}）` : item.label}</option>
-                  ))}
-                </select>
-                <small className="field-hint">{CODEX_NATIVE_RESOLUTION_NOTICE}</small>
-              </label>
-              <label className="field custom-size-field">
+              <label className="field image-size-field">
                 <span>尺寸</span>
                 <input
                   className={`input ${selectedSizeValid ? "" : "is-invalid"}`}
-                  disabled={resolutionPreset !== "custom"}
                   inputMode="numeric"
-                  placeholder="2160x3840"
-                  value={selectedSize}
-                  onChange={(event) => setCustomSize(event.target.value)}
+                  placeholder="1024x576"
+                  value={imageSize}
+                  onChange={(event) => setImageSize(event.target.value)}
                 />
-              </label>
-              <label className="field">
-                <span>质量倾向</span>
-                <select className="control" value={quality} onChange={(event) => setQuality(event.target.value as ImageQuality)}>
-                  <option value="low">低</option>
-                  <option value="medium">中</option>
-                  <option value="high">高</option>
-                  <option value="auto">自动</option>
-                </select>
-                <small className="field-hint">Codex 通道可能由上游自动决定，质量档位不保证严格生效。</small>
+                <small className="field-hint">{IMAGE_SIZE_HINT}</small>
               </label>
               <label className="field">
                 <span>格式</span>

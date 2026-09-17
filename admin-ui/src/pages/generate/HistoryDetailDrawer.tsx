@@ -218,7 +218,8 @@ export function HistoryDetailDrawer(props: HistoryDetailDrawerProps) {
                   <div><dt>接口</dt><dd>{item.endpoint}</dd></div>
                   <div><dt>模型</dt><dd>{item.model}</dd></div>
                   <div><dt>规格</dt><dd>{item.size || item.ratio || "-"}</dd></div>
-                  <div><dt>质量 / 格式</dt><dd>{item.quality || "-"} / {item.outputFormat || "-"}</dd></div>
+                  <div><dt>格式</dt><dd>{item.outputFormat || "-"}</dd></div>
+                  {item.quality ? <div><dt>质量</dt><dd>{item.quality}</dd></div> : null}
                   {props.isAdmin ? <div><dt>用户</dt><dd>{userDisplayName(props.config, item.owner)}</dd></div> : null}
                   <div><dt>参考图</dt><dd>{item.referenceImages.length > 0 ? `${item.referenceImages.length} 张` : "无（纯文本生成）"}</dd></div>
                 </dl>
