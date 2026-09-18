@@ -2922,7 +2922,10 @@ export function ChatPage(props: {
       return;
     }
     const target = event.target;
-    if (target instanceof HTMLElement && target.closest("button")) {
+    // Must be Element, not HTMLElement: the icon inside each action button is an
+    // SVGElement, so `instanceof HTMLElement` is false and the guard would miss it,
+    // letting the drag capture the pointer and swallow the button's click.
+    if (target instanceof Element && target.closest("button")) {
       return;
     }
     const frame = event.currentTarget.closest(".chat-html-preview-window") as HTMLDivElement | null;
