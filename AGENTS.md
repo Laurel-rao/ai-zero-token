@@ -32,36 +32,27 @@ npm run build
 
 ### Docker Deployment Command
 
-Deploy by syncing the built workspace to the server, rebuilding the Docker image, and recreating the container:
+Deploy with the repository script. It builds locally, syncs the workspace, rebuilds
+the Docker image, recreates the container, and prints the container status plus the
+auth status:
 
 ```bash
 cd /Users/raojiajun/mypro/server/nodejs/ai-zero-token
-npm run build && \
-rsync -az --delete \
-  --exclude .git \
-  --exclude node_modules \
-  --exclude release \
-  --exclude state \
-  --exclude tmp \
-  --exclude exports \
-  ./ root@64.83.17.240:/opt/ai-zero-token/src/ && \
-ssh root@64.83.17.240 '
-  cd /opt/ai-zero-token/src &&
-  docker build -t ai-zero-token:local . >/tmp/azt-build.log &&
-  docker rm -f ai-zero-token >/dev/null 2>&1 || true &&
-  docker run -d \
-    --name ai-zero-token \
-    --restart unless-stopped \
-    --env-file /opt/ai-zero-token/.env \
-    -e AI_ZERO_TOKEN_HOME=/data \
-    -p 127.0.0.1:8787:8787 \
-    -v /opt/ai-zero-token/state:/data \
-    ai-zero-token:local &&
-  sleep 2 &&
-  docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" &&
-    curl -s --max-time 10 http://127.0.0.1:8787/_gateway/auth/status
-'
+./update.sh
 ```
+
+`update.sh` already runs `npm run build` itself, so a separate build is not required.
+It uses `set -euo pipefail`, so a failed remote `docker build` aborts the deploy
+instead of restarting the container on a stale image.
+
+Default behavior is `DEPLOY_MODE=docker`, which matches production. For the
+PostgreSQL/Redis variant, set `DEPLOY_MODE=compose` (see
+`docs/DOCKER_POSTGRES_REDIS_DEPLOY.md`).
+
+All settings are overridable through environment variables:
+`REMOTE_HOST`, `PUBLIC_URL`, `REMOTE_SRC`, `REMOTE_ENV`, `REMOTE_STATE`,
+`IMAGE_NAME`, `CONTAINER_NAME`, `HOST_BIND`, `HOST_PORT`, `CONTAINER_PORT`,
+`DEPLOY_MODE`, `COMPOSE_PROJECT_NAME`.
 
 The service listens on `8787` inside the container. Nginx owns public ports
 `80` and `443` and proxies the domain to `127.0.0.1:8787`.

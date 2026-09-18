@@ -1,5 +1,5 @@
 import { Check, ChevronLeft, ChevronRight, Copy, Download, LoaderCircle, Maximize2, Minimize2, RotateCcw, RotateCw, X, ZoomIn, ZoomOut } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { Modal } from "./Modal";
 import type { ModalImage, ModalImageItem } from "@/shared/lib/app-types";
 
@@ -7,25 +7,52 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 6;
 const ZOOM_STEP = 0.25;
 
-function ratioClassName(value?: string): string {
-  const normalized = value?.trim();
-  const match = normalized?.match(/^(\d+(?:\.\d+)?)\s*[:xX]\s*(\d+(?:\.\d+)?)$/);
-  if (match) {
-    const width = Number(match[1]);
-    const height = Number(match[2]);
-    if (width > 0 && height > 0) {
-      const ratio = width / height;
-      if (ratio < 0.75) return "ratio-tall";
-      if (ratio > 1.45) return "ratio-wide";
-      if (ratio > 1.15) return "ratio-classic";
-      return "ratio-square";
-    }
-  }
+/** Smallest stage the modal is allowed to shrink to, so controls stay usable. */
+const MIN_STAGE_EDGE = 160;
+/** Viewport gutter kept around the dialog on every side; mirrors the CSS `calc(100vw - 40px)`. */
+const VIEWPORT_GUTTER = 20;
+/** The modal card keeps a 1px border on each side. */
+const CARD_BORDER = 2;
+/** Sub-pixel slack so a rounded size never triggers a scrollbar. */
+const FIT_SLACK = 1;
+/** Widest the preview dialog grows to, even on very wide displays; keep in sync with image-preview.css. */
+const PREVIEW_MAX_WIDTH = 1360;
+/** Narrowest dialog worth rendering, so the header toolbar still has room. */
+const MIN_CARD_WIDTH = 360;
+/** Space reserved for the header metadata so it stays readable instead of collapsing. */
+const META_MIN_WIDTH = 150;
 
-  if (normalized === "16:9") return "ratio-wide";
-  if (normalized === "9:16") return "ratio-tall";
-  if (normalized === "4:3") return "ratio-classic";
-  return "ratio-square";
+function parseAspectRatio(value?: string): number | null {
+  const normalized = value?.trim();
+  const match = normalized?.match(/^(\d+(?:\.\d+)?)\s*[:xX/]\s*(\d+(?:\.\d+)?)$/);
+  if (!match) {
+    return null;
+  }
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null;
+  }
+  return width / height;
+}
+
+/** Fit a box of the given width/height ratio into the available space, keeping the ratio intact. */
+function fitInside(availableWidth: number, availableHeight: number, ratio: number): { width: number; height: number } {
+  const safeRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+  const maxWidth = Math.max(1, availableWidth);
+  const maxHeight = Math.max(1, availableHeight);
+  let height = maxHeight;
+  let width = height * safeRatio;
+  if (width > maxWidth) {
+    width = maxWidth;
+    height = width / safeRatio;
+  }
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+function px(value: string | undefined): number {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function clampZoom(value: number): number {
@@ -116,9 +143,41 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   const hasPlaceholder = Boolean(activeImage.placeholderSrc && activeImage.placeholderSrc !== activeImage.src);
   const [imageLoaded, setImageLoaded] = useState(!hasPlaceholder);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  /** Measured natural ratio of the decoded file; preferred over the declared ratio when available. */
+  const [naturalRatio, setNaturalRatio] = useState<number | null>(null);
+  /** Natural pixel size, used to avoid upscaling a small image beyond 100%. */
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
+  /** Stage box computed from the live viewport so the image always fills the available space. */
+  const [stageSize, setStageSize] = useState<{ width: number; height: number } | null>(null);
+  /** Dialog width that hugs the fitted image, clamped to the viewport. */
+  const [cardWidth, setCardWidth] = useState<number | null>(null);
   const placeholderStyle = hasPlaceholder && !imageLoaded
     ? { backgroundImage: `url("${activeImage.placeholderSrc}")` }
     : undefined;
+  const declaredRatio = useMemo(() => parseAspectRatio(activeImage.ratio), [activeImage.ratio]);
+  const displayRatio = naturalRatio ?? declaredRatio ?? 1;
+  const stageStyle = useMemo<CSSProperties | undefined>(() => {
+    if (isFullscreen || !stageSize) {
+      return undefined;
+    }
+    return { width: `${stageSize.width}px`, height: `${stageSize.height}px` };
+  }, [isFullscreen, stageSize]);
+  const imageStyle = useMemo<CSSProperties>(() => {
+    const transform = `rotate(${rotation}deg) scale(${zoom})`;
+    // A quarter turn swaps the footprint, so the element is sized on swapped axes
+    // and the rotated result exactly fills the stage it was fitted for.
+    if (isQuarterTurn && !isFullscreen && stageSize) {
+      return { width: `${stageSize.height}px`, height: `${stageSize.width}px`, maxWidth: "none", maxHeight: "none", transform };
+    }
+    return { transform };
+  }, [isFullscreen, isQuarterTurn, rotation, stageSize, zoom]);
+  const modalStyle = useMemo<CSSProperties | undefined>(() => {
+    if (isFullscreen || !cardWidth) {
+      return undefined;
+    }
+    return { "--preview-card-width": `${cardWidth}px` } as CSSProperties;
+  }, [isFullscreen, cardWidth]);
 
   const resetView = () => {
     setZoom(1);
@@ -216,6 +275,110 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
     }
   }, []);
 
+  // Reset the measured ratio whenever another image becomes active.
+  useEffect(() => {
+    setNaturalRatio(null);
+    setNaturalSize(null);
+  }, [activeImage.src]);
+
+  // Keep the stage in sync with the visible viewport instead of a fixed pixel size.
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    const body = stage?.parentElement;
+    if (!stage || !body) {
+      return;
+    }
+    const header = body.previousElementSibling instanceof HTMLElement ? body.previousElementSibling : null;
+    const backdrop = body.closest(".modal-backdrop");
+    const card = body.closest(".modal-card");
+
+    let frame = 0;
+
+    const measure = () => {
+      frame = 0;
+      if (isFullscreen) {
+        return;
+      }
+      const bodyStyle = window.getComputedStyle(body);
+      const paddingX = px(bodyStyle.paddingLeft) + px(bodyStyle.paddingRight);
+      const paddingY = px(bodyStyle.paddingTop) + px(bodyStyle.paddingBottom);
+      // Derive the budget from the backdrop's content box and the header only.
+      // It never depends on the stage, so the computation cannot feed back into itself.
+      const backdropStyle = backdrop ? window.getComputedStyle(backdrop) : null;
+      const outerX = backdropStyle ? px(backdropStyle.paddingLeft) + px(backdropStyle.paddingRight) : VIEWPORT_GUTTER * 2;
+      const outerY = backdropStyle ? px(backdropStyle.paddingTop) + px(backdropStyle.paddingBottom) : VIEWPORT_GUTTER * 2;
+      const availableWidth = (backdrop?.clientWidth ?? window.innerWidth) - outerX;
+      const availableHeight = (backdrop?.clientHeight ?? window.innerHeight) - outerY;
+      const maxCardWidth = Math.min(PREVIEW_MAX_WIDTH, availableWidth);
+      const maxStageWidth = maxCardWidth - CARD_BORDER - paddingX;
+      const maxStageHeight = availableHeight - CARD_BORDER - (header?.getBoundingClientRect().height ?? 0) - paddingY;
+      const rotationRatio = isQuarterTurn ? 1 / displayRatio : displayRatio;
+      const fitted = fitInside(maxStageWidth, maxStageHeight, rotationRatio);
+      // Never upscale past 100%: a small image keeps its natural size, and the
+      // dialog then hugs that smaller box instead of leaving dead space around it.
+      const naturalBox = naturalSize && !isQuarterTurn
+        ? { width: naturalSize.width, height: naturalSize.height }
+        : naturalSize
+          ? { width: naturalSize.height, height: naturalSize.width }
+          : null;
+      const capped = naturalBox
+        ? { width: Math.min(fitted.width, naturalBox.width), height: Math.min(fitted.height, naturalBox.height) }
+        : fitted;
+      // Prefer the fitted box; only fall back to the minimum edge when it still fits.
+      const width = Math.max(1, Math.min(Math.max(capped.width - FIT_SLACK, MIN_STAGE_EDGE), maxStageWidth));
+      const height = Math.max(1, Math.min(Math.max(capped.height - FIT_SLACK, MIN_STAGE_EDGE), maxStageHeight));
+      // The dialog hugs the image, but must still be wide enough to keep the title
+      // and the whole toolbar on one line (the meta text alone may ellipsize).
+      const toolbar = header?.querySelector<HTMLElement>(".image-preview-toolbar");
+      const closeButton = header?.querySelector<HTMLElement>("button.btn-secondary");
+      const title = header?.querySelector<HTMLElement>("h3");
+      const headerStyle = header ? window.getComputedStyle(header) : null;
+      const headerChrome = headerStyle
+        ? px(headerStyle.paddingLeft) + px(headerStyle.paddingRight) + px(headerStyle.columnGap) * 2
+        : 0;
+      const minHeaderWidth = (title?.scrollWidth ?? 0) + (toolbar?.scrollWidth ?? 0) + (closeButton?.getBoundingClientRect().width ?? 0) + headerChrome;
+      const requiredWidth = Math.max(MIN_CARD_WIDTH, width + paddingX + CARD_BORDER);
+      // Reserve some room for the metadata line so it stays readable; it ellipsizes
+      // inside that space instead of pushing the toolbar out.
+      const cardWidth = Math.min(Math.max(requiredWidth, minHeaderWidth + META_MIN_WIDTH), maxCardWidth);
+
+      setStageSize((current) => (current && current.width === width && current.height === height ? current : { width, height }));
+      setCardWidth((current) => (current === cardWidth ? current : cardWidth));
+    };
+
+    const schedule = () => {
+      if (frame !== 0) {
+        return;
+      }
+      frame = window.requestAnimationFrame(measure);
+    };
+
+    schedule();
+    window.addEventListener("resize", schedule, { passive: true });
+    window.addEventListener("orientationchange", schedule);
+    // Also react to header wrapping and toolbar reflow, not just viewport resizes.
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
+    observer?.observe(body);
+    if (header) {
+      observer?.observe(header);
+    }
+    if (backdrop) {
+      observer?.observe(backdrop);
+    }
+    if (card) {
+      observer?.observe(card);
+    }
+
+    return () => {
+      if (frame !== 0) {
+        window.cancelAnimationFrame(frame);
+      }
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("orientationchange", schedule);
+      observer?.disconnect();
+    };
+  }, [displayRatio, isFullscreen, isQuarterTurn, naturalSize, copyFeedback, hasGalleryNavigation]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -299,6 +462,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
       title="图片预览"
       onClose={props.onClose}
       wide
+      style={modalStyle}
       className={`image-preview-modal${isFullscreen ? " is-fullscreen" : ""}`}
       headerContent={(
         <>
@@ -359,7 +523,9 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
         </button>
       ) : null}
       <div
-        className={`image-preview-stage ${ratioClassName(activeImage.ratio)} ${zoom > 1 ? "is-zoomed" : ""} ${isQuarterTurn ? "is-quarter-turn" : ""}`}
+        ref={stageRef}
+        className={`image-preview-stage ${zoom > 1 ? "is-zoomed" : ""} ${isQuarterTurn ? "is-quarter-turn" : ""} ${isFullscreen ? "is-fullscreen-stage" : ""}`}
+        style={stageStyle}
         onDoubleClick={() => {
           if (isFullscreen) {
             setIsFullscreen(false);
@@ -388,7 +554,12 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
             draggable={false}
             className={hasPlaceholder && !imageLoaded ? "is-loading-original" : undefined}
             decoding="async"
-            onLoad={() => {
+            onLoad={(event) => {
+              const target = event.currentTarget;
+              if (target.naturalWidth > 0 && target.naturalHeight > 0) {
+                setNaturalRatio(target.naturalWidth / target.naturalHeight);
+                setNaturalSize({ width: target.naturalWidth, height: target.naturalHeight });
+              }
               setImageLoaded(true);
               setImageLoadFailed(false);
             }}
@@ -396,7 +567,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
               setImageLoaded(false);
               setImageLoadFailed(true);
             }}
-            style={{ transform: `rotate(${rotation}deg) scale(${zoom})` }}
+            style={imageStyle}
           />
         </div>
         {hasPlaceholder && !imageLoaded && !imageLoadFailed ? (

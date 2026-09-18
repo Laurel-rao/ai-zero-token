@@ -1,10 +1,10 @@
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
-export function Modal(props: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; className?: string; headerContent?: ReactNode }) {
+export function Modal(props: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; className?: string; headerContent?: ReactNode; style?: CSSProperties }) {
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && props.onClose()}>
-      <section className={["modal-card", props.wide ? "wide" : "", props.className || ""].filter(Boolean).join(" ")} role="dialog" aria-modal="true">
+      <section className={["modal-card", props.wide ? "wide" : "", props.className || ""].filter(Boolean).join(" ")} style={props.style} role="dialog" aria-modal="true">
         <div className="modal-head">
           <h3>{props.title}</h3>
           {props.headerContent ? <div className="modal-head-content">{props.headerContent}</div> : null}

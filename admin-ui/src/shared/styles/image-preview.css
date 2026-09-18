@@ -11,6 +11,50 @@
   padding: 10px 14px;
 }
 
+/*
+ * The preview dialog hugs its content (the stage), which is measured from the
+ * live viewport in ImagePreviewModal.tsx. `--preview-card-width` is set there;
+ * the fallback applies only for the first paint, before that measurement.
+ */
+.modal-card.image-preview-modal:not(.is-fullscreen) {
+  width: var(--preview-card-width, min(980px, 100%));
+  max-width: min(1360px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Below 900px responsive.css presents the modal full-screen; keep it edge to edge. */
+@media (max-width: 900px) {
+  .modal-card.image-preview-modal:not(.is-fullscreen) {
+    width: 100%;
+    max-width: 100%;
+    max-height: none;
+    height: 100%;
+  }
+}
+
+.image-preview-modal .modal-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding: 14px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.modal-card.image-preview-modal:not(.is-fullscreen) .modal-head {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.modal-card.image-preview-modal:not(.is-fullscreen) .modal-head h3 {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .image-preview-modal .modal-head-content {
   min-width: 0;
   flex: 1 1 auto;
@@ -22,6 +66,7 @@
 
 .image-preview-header-meta {
   min-width: 0;
+  overflow: hidden;
   color: var(--text-soft);
   font-size: 12px;
   line-height: 1.4;
@@ -67,11 +112,7 @@
   display: block;
 }
 
-.image-preview-modal.is-fullscreen .image-preview-stage,
-.image-preview-modal.is-fullscreen .image-preview-stage.ratio-tall,
-.image-preview-modal.is-fullscreen .image-preview-stage.ratio-square,
-.image-preview-modal.is-fullscreen .image-preview-stage.ratio-classic,
-.image-preview-modal.is-fullscreen .image-preview-stage.ratio-wide {
+.image-preview-modal.is-fullscreen .image-preview-stage {
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -186,9 +227,11 @@
 }
 
 .image-preview-stage {
-  width: min(100%, 980px);
-  max-height: min(72vh, 760px);
-  min-height: 320px;
+  /* Fallback size for the first paint; the component replaces it with a
+     viewport-fitted box as soon as it has measured the dialog. */
+  width: 100%;
+  max-width: 100%;
+  height: min(72vh, 760px);
   margin: 0 auto;
   position: relative;
   overflow: hidden;
@@ -260,7 +303,9 @@
   object-fit: contain;
   display: block;
   max-width: 100%;
-  max-height: min(72vh, 760px);
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
   transform-origin: center;
   transition: transform 0.16s ease;
   will-change: transform;
@@ -319,26 +364,11 @@
   background: rgba(153, 27, 27, 0.9);
 }
 
-.image-preview-stage.is-quarter-turn img {
-  max-width: min(72vh, 760px);
-  max-height: 100%;
-}
-
-.image-preview-stage.ratio-tall {
-  width: min(460px, 100%, calc((72vh - 40px) * 9 / 16));
-}
-
-.image-preview-stage.ratio-square {
-  width: min(720px, 100%, calc(72vh - 40px));
-}
-
-.image-preview-stage.ratio-classic {
-  width: min(860px, 100%, calc((72vh - 40px) * 4 / 3));
-}
-
-.image-preview-stage.ratio-wide {
-  width: min(980px, 100%, calc((72vh - 40px) * 16 / 9));
-}
+/*
+ * The stage box is computed in ImagePreviewModal.tsx from the live viewport, so
+ * the previous fixed `ratio-*` classes are gone. Quarter-turn sizing is applied
+ * inline there too, because a rotated image must be sized on swapped axes.
+ */
 
 .preview-modal-meta {
   color: var(--text-soft);
