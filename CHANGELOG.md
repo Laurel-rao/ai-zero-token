@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an optional upstream image API channel (`image.apiChannel`, 系统设置 → 生图 API 渠道): when enabled, image generation and edits are forwarded to any OpenAI-compatible `/v1/images/{generations,edits}` endpoint with its own Base URL, API Key and model, so images can be produced with a relay key instead of Codex accounts; it can run as the primary route (falling back to Codex on failure) or as the fallback after Codex fails, does not consume Codex quota, and is recorded in history/usage as `API 渠道`.
 - Pushed a WeCom app message to the requester when a background image generation finishes or fails (`wecom.notifyImageResult`, on by default, toggled in 系统设置 → 企业微信), carrying the prompt, image count/duration or failure reason, and a link to the generate page; only `wxwork:` accounts receive it and delivery failures stay in the log without affecting generation.
 - Added `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` (GPT Image 2.5) to the supported image models and made `gpt-image-2.5-sunburst` the default image generation model for new installs.
 - Migrated stored settings whose image model still equalled that schema version's default (`gpt-image-2` at version 1, `gpt-image-2.5-flare` at version 2) to the new default, while keeping any model an admin chose explicitly.

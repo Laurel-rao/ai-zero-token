@@ -72,6 +72,13 @@ export function createDefaultSettings(): GatewaySettings {
         minIntervalSeconds: 0,
         userOverrides: [],
       },
+      apiChannel: {
+        enabled: false,
+        mode: "primary",
+        baseUrl: "",
+        apiKey: "",
+        model: DEFAULT_IMAGE_MODEL,
+      },
     },
     wecom: {
       enabled: false,
@@ -129,6 +136,7 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
       generationTimeoutMs: normalizeMilliseconds(parsed.image?.generationTimeoutMs, defaults.image.generationTimeoutMs, 60_000, 30 * 60 * 1000),
       promptOptimizerSystemPrompt: normalizeTrimmedString(parsed.image?.promptOptimizerSystemPrompt, defaults.image.promptOptimizerSystemPrompt, 8000),
       limits: normalizeImageLimits(parsed.image?.limits, defaults.image.limits),
+      apiChannel: normalizeImageApiChannel(parsed.image?.apiChannel, defaults.image.apiChannel),
     },
     wecom: {
       enabled: parsed.wecom?.enabled ?? defaults.wecom.enabled,
@@ -206,6 +214,7 @@ export function normalizeCountLimit(value: unknown, fallback = 0, max = 100_000)
 }
 
 type ImageLimitsSettings = GatewaySettings["image"]["limits"];
+type ImageApiChannelSettings = GatewaySettings["image"]["apiChannel"];
 type BrandingSettings = GatewaySettings["branding"];
 
 function normalizeBranding(value: unknown, fallback: BrandingSettings): BrandingSettings {
@@ -285,6 +294,21 @@ function normalizeImageLimits(value: unknown, fallback: ImageLimitsSettings): Im
     perUserHourly: normalizeCountLimit(record.perUserHourly, fallback.perUserHourly),
     minIntervalSeconds: normalizeCountLimit(record.minIntervalSeconds, fallback.minIntervalSeconds, 86_400),
     userOverrides: record.userOverrides === undefined ? fallback.userOverrides : normalizeImageLimitOverrides(record.userOverrides),
+  };
+}
+
+function normalizeImageApiChannel(value: unknown, fallback: ImageApiChannelSettings): ImageApiChannelSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return fallback;
+  }
+  const record = value as Record<string, unknown>;
+
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : fallback.enabled,
+    mode: record.mode === "fallback" ? "fallback" : record.mode === "primary" ? "primary" : fallback.mode,
+    baseUrl: normalizeTrimmedString(record.baseUrl, fallback.baseUrl, 500),
+    apiKey: normalizeTrimmedString(record.apiKey, fallback.apiKey, 500),
+    model: normalizeTrimmedString(record.model, fallback.model, 120) || fallback.model,
   };
 }
 

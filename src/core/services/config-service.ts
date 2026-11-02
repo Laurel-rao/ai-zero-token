@@ -118,6 +118,27 @@ function normalizeImageLimits(
   };
 }
 
+function normalizeImageApiChannelSave(
+  params: Partial<GatewaySettings["image"]["apiChannel"]> | undefined,
+  settings: GatewaySettings["image"]["apiChannel"],
+): GatewaySettings["image"]["apiChannel"] {
+  if (!params) {
+    return settings;
+  }
+
+  const baseUrl = params.baseUrl === undefined ? settings.baseUrl : params.baseUrl.trim().replace(/\/+$/, "");
+  const apiKey = params.apiKey === undefined ? settings.apiKey : params.apiKey.trim();
+  const enabled = params.enabled ?? settings.enabled;
+  const mode = params.mode === "fallback" ? "fallback" : params.mode === "primary" ? "primary" : settings.mode;
+  const model = params.model === undefined ? settings.model : params.model.trim() || settings.model;
+
+  if (enabled && (!baseUrl || !apiKey)) {
+    throw new Error("启用生图 API 渠道时必须填写 Base URL 和 API Key。");
+  }
+
+  return { enabled, mode, baseUrl, apiKey, model };
+}
+
 export class ConfigService {
   async getSettings(): Promise<GatewaySettings> {
     return this.ensureSettings();
@@ -256,6 +277,7 @@ export class ConfigService {
       generationTimeoutMs?: number;
       promptOptimizerSystemPrompt?: string;
       limits?: Partial<GatewaySettings["image"]["limits"]>;
+      apiChannel?: Partial<GatewaySettings["image"]["apiChannel"]>;
     };
     wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
     server?: { port: number };
@@ -383,6 +405,7 @@ export class ConfigService {
           generationTimeoutMs: normalizeMilliseconds(params.image.generationTimeoutMs, next.image.generationTimeoutMs, 60_000, 30 * 60 * 1000),
           promptOptimizerSystemPrompt: params.image.promptOptimizerSystemPrompt?.trim().slice(0, 8000) || next.image.promptOptimizerSystemPrompt,
           limits: normalizeImageLimits(params.image.limits, next.image.limits),
+          apiChannel: normalizeImageApiChannelSave(params.image.apiChannel, next.image.apiChannel),
         },
       };
     }

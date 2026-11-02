@@ -108,6 +108,13 @@ export type GatewaySettings = {
         minIntervalSeconds?: number;
       }>;
     };
+    apiChannel?: {
+      enabled: boolean;
+      mode: "primary" | "fallback";
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+    };
   };
   wecom: {
     enabled: boolean;

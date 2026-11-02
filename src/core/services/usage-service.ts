@@ -18,7 +18,7 @@ export type UsageTokenUsage = {
   cacheReadTokens?: number | null;
 };
 
-export type UsageImageRoute = "none" | "codex-tool" | "chatgpt-web";
+export type UsageImageRoute = "none" | "codex-tool" | "chatgpt-web" | "api-channel";
 
 export type UsageTokenStatus =
   | "captured"
@@ -421,7 +421,7 @@ function normalizeTokenUsageForEvent(value: unknown): UsageTokenUsage | null {
 }
 
 function normalizeImageRoute(value: unknown): UsageImageRoute {
-  return value === "codex-tool" || value === "chatgpt-web" ? value : "none";
+  return value === "codex-tool" || value === "chatgpt-web" || value === "api-channel" ? value : "none";
 }
 
 function normalizeTokenUsageStatus(value: unknown, tokenUsage: UsageTokenUsage | null, success: boolean): UsageTokenStatus {
@@ -608,6 +608,9 @@ function imageRouteLabel(route: string): string {
   }
   if (route === "chatgpt-web") {
     return "ChatGPT 网页生图";
+  }
+  if (route === "api-channel") {
+    return "外部 API 渠道";
   }
   return "非生图";
 }

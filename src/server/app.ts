@@ -1184,6 +1184,15 @@ const settingsUpdateSchema = z.object({
             .optional(),
         })
         .optional(),
+      apiChannel: z
+        .object({
+          enabled: z.boolean().optional(),
+          mode: z.enum(["primary", "fallback"]).optional(),
+          baseUrl: z.string().max(500).optional(),
+          apiKey: z.string().max(500).optional(),
+          model: z.string().trim().max(120).optional(),
+        })
+        .optional(),
     })
     .optional(),
   wecom: z
@@ -1719,6 +1728,18 @@ function extractImageInputs(input: unknown): Array<{ imageUrl: string }> {
 
 function isFreePlan(profile: OAuthProfile): boolean {
   return profile.quota?.planType?.toLowerCase() === "free";
+}
+
+/**
+ * 生图请求实际会走哪条上游路径。API 渠道为主渠道时优先记 api-channel，
+ * 成功响应还会用返回值里的 _gatewayImageRoute 覆盖（比如渠道失败回退到 Codex 的情况）。
+ */
+function resolveUsageImageRoute(settings: GatewaySettings, profile: OAuthProfile | null | undefined): UsageImageRoute {
+  const channel = settings.image.apiChannel;
+  if (channel?.enabled && channel.mode === "primary") {
+    return "api-channel";
+  }
+  return profile && isFreePlan(profile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
 }
 
 function normalizeResponseInput(input: unknown): unknown {
@@ -2618,6 +2639,13 @@ function serializeSettings(settings: GatewaySettings, isAdmin: boolean, envApiKe
     wecom: {
       ...settings.wecom,
       secret: isAdmin ? settings.wecom.secret : "",
+    },
+    image: {
+      ...settings.image,
+      apiChannel: {
+        ...settings.image.apiChannel,
+        apiKey: isAdmin ? settings.image.apiChannel.apiKey : "",
+      },
     },
   };
 }
@@ -6395,7 +6423,7 @@ export function createApp(params?: {
 
     const activeProfile = await ctx.authService.getActiveProfile();
     const imageGenerationTimeoutMs = getImageGenerationTimeoutMs(settings);
-    const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const imageRoute: UsageImageRoute = resolveUsageImageRoute(settings, activeProfile);
     const ownerPolicy = await getImageOwnerPolicy(requestOwner);
     const limit = await checkImageGenerationLimit(requestOwner, settings);
     if (!limit.allowed) {
@@ -6615,8 +6643,9 @@ export function createApp(params?: {
       }
 
     const responseProfile = response._gatewayProfile ?? activeProfile;
-    const responseImageRoute: UsageImageRoute = responseProfile && isFreePlan(responseProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
-    const { _gatewayProfile: _generationProfile, ...publicResponse } = response;
+    const responseImageRoute: UsageImageRoute = response._gatewayImageRoute ?? resolveUsageImageRoute(settings, responseProfile);
+    const imageAccountLabel = responseImageRoute === "api-channel" ? "API 渠道" : profileLogLabel(responseProfile);
+    const { _gatewayProfile: _generationProfile, _gatewayImageRoute: _generationImageRoute, ...publicResponse } = response;
     const durationMs = performance.now() - startedAt;
     console.info("[gateway:image] response ready", {
       method: request.method,
@@ -6632,7 +6661,7 @@ export function createApp(params?: {
       owner: requestOwner,
       method: request.method,
       endpoint: request.url,
-      account: profileLogLabel(responseProfile),
+      account: imageAccountLabel,
       model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       statusCode: 200,
       durationMs,
@@ -6663,7 +6692,7 @@ export function createApp(params?: {
       startedAt: generationStartedAt,
       status: "success",
       endpoint: request.url,
-      account: profileLogLabel(responseProfile),
+      account: imageAccountLabel,
       model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       prompt: parsed.data.prompt,
       ratio: ratioFromImageSize(publicResponse.size ?? parsed.data.size),
@@ -6898,7 +6927,7 @@ export function createApp(params?: {
 
     const activeProfile = await ctx.authService.getActiveProfile();
     const imageGenerationTimeoutMs = getImageGenerationTimeoutMs(settings);
-    const imageRoute: UsageImageRoute = activeProfile && isFreePlan(activeProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
+    const imageRoute: UsageImageRoute = resolveUsageImageRoute(settings, activeProfile);
     const ownerPolicy = await getImageOwnerPolicy(requestOwner);
     const limit = await checkImageGenerationLimit(requestOwner, settings);
     if (!limit.allowed) {
@@ -7115,8 +7144,9 @@ export function createApp(params?: {
       }
 
       const responseProfile = response._gatewayProfile ?? activeProfile;
-      const responseImageRoute: UsageImageRoute = responseProfile && isFreePlan(responseProfile) && settings.image.freeAccountWebGenerationEnabled ? "chatgpt-web" : "codex-tool";
-      const { _gatewayProfile: _editProfile, ...publicResponse } = response;
+      const responseImageRoute: UsageImageRoute = response._gatewayImageRoute ?? resolveUsageImageRoute(settings, responseProfile);
+    const imageAccountLabel = responseImageRoute === "api-channel" ? "API 渠道" : profileLogLabel(responseProfile);
+      const { _gatewayProfile: _editProfile, _gatewayImageRoute: _editImageRoute, ...publicResponse } = response;
       const durationMs = performance.now() - startedAt;
       console.info("[gateway:image:edit] response ready", {
         method: request.method,
@@ -7132,7 +7162,7 @@ export function createApp(params?: {
         owner: requestOwner,
         method: request.method,
         endpoint: request.url,
-        account: profileLogLabel(responseProfile),
+        account: imageAccountLabel,
         model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         statusCode: 200,
         durationMs,
@@ -7163,7 +7193,7 @@ export function createApp(params?: {
         startedAt: generationStartedAt,
         status: "success",
         endpoint: request.url,
-        account: profileLogLabel(responseProfile),
+        account: imageAccountLabel,
         model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         prompt: parsed.data.prompt,
         ratio: ratioFromImageSize(publicResponse.size ?? parsed.data.size),

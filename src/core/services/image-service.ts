@@ -3,8 +3,13 @@ import { ConfigService } from "./config-service.js";
 import { askOpenAICodex } from "../providers/openai-codex/chat.js";
 import { generateChatGPTWebImage } from "../providers/openai-codex/chatgpt-web-image.js";
 import { DEFAULT_IMAGE_MODEL, isSupportedImageModel, SUPPORTED_IMAGE_MODELS } from "../models/image-models.js";
-import type { OAuthProfile } from "../types.js";
+import type { GatewaySettings, OAuthProfile } from "../types.js";
 import { RequestThrottleService } from "./request-throttle-service.js";
+import {
+  requestImageApiChannel,
+  resolveImageApiChannel,
+  type ImageApiChannelConfig,
+} from "./image-api-channel-service.js";
 type ImageRequest = {
   prompt: string;
   model?: string;
@@ -51,6 +56,7 @@ type ImageResult = {
     total_tokens: number;
   };
   _gatewayProfile?: OAuthProfile;
+  _gatewayImageRoute?: "api-channel" | "codex-tool";
 };
 
 type ImageUsage = NonNullable<ImageResult["usage"]>;
@@ -146,6 +152,7 @@ function mergeImageResults(results: ImageResult[], count: number): ImageResult {
   }
   const data = results.flatMap((result) => result.data).slice(0, count);
   const lastProfile = [...results].reverse().find((result) => result._gatewayProfile)?._gatewayProfile;
+  const imageRoute = first._gatewayImageRoute;
   return {
     created: first.created,
     data,
@@ -155,6 +162,7 @@ function mergeImageResults(results: ImageResult[], count: number): ImageResult {
     size: first.size,
     usage: results.reduce<ImageResult["usage"] | undefined>((usage, result) => sumImageUsage(usage, result.usage), undefined),
     _gatewayProfile: lastProfile ?? first._gatewayProfile,
+    ...(imageRoute ? { _gatewayImageRoute: imageRoute } : {}),
   };
 }
 
@@ -765,8 +773,82 @@ export class ImageService {
   }
 
   private async generateSingle(request: ImageRequest, lifecycle?: ImageRequestLifecycle): Promise<ImageResult> {
-    const profile = await this.deps.authService.requireUsableProfile("openai-codex");
     const settings = await this.deps.configService.getSettings();
+    const channel = resolveImageApiChannel(settings);
+    let channelError: unknown;
+
+    if (channel?.mode === "primary") {
+      try {
+        return await this.generateViaImageApiChannel(channel, request, settings);
+      } catch (error) {
+        channelError = error;
+        console.warn("[gateway:image] API 渠道生成失败，改用 Codex 账号重试", {
+          baseUrl: channel.baseUrl,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    try {
+      const result = await this.generateViaCodex(request, lifecycle, settings);
+      // 渠道优先但失败、最终由 Codex 兜底时，把实际路径标出来，历史和用量才不会记错。
+      return channelError ? { ...result, _gatewayImageRoute: "codex-tool" } : result;
+    } catch (error) {
+      if (channel?.mode === "fallback") {
+        try {
+          return await this.generateViaImageApiChannel(channel, request, settings);
+        } catch (channelFallbackError) {
+          console.warn("[gateway:image] API 渠道回退失败", {
+            baseUrl: channel.baseUrl,
+            message: channelFallbackError instanceof Error ? channelFallbackError.message : String(channelFallbackError),
+          });
+        }
+      }
+      // 主渠道已经失败、Codex 也不可用时，优先把渠道错误抛给调用方，信息更直接。
+      throw channelError ?? error;
+    }
+  }
+
+  private async generateViaImageApiChannel(
+    channel: ImageApiChannelConfig,
+    request: ImageRequest,
+    settings: GatewaySettings,
+  ): Promise<ImageResult> {
+    const startedAt = Date.now();
+    console.info("[gateway:image] using API channel", {
+      baseUrl: channel.baseUrl,
+      mode: channel.mode,
+      model: channel.model,
+      inputImageCount: request.inputImages?.length ?? 0,
+    });
+    const result = await requestImageApiChannel({
+      channel,
+      request: {
+        prompt: request.prompt,
+        model: request.model,
+        size: request.size,
+        quality: request.quality,
+        background: request.background,
+        outputFormat: request.outputFormat,
+        outputCompression: request.outputCompression,
+        moderation: request.moderation,
+        inputImages: request.inputImages,
+      },
+      timeoutMs: settings.image.generationTimeoutMs,
+    });
+    console.info("[gateway:image] API channel response", {
+      imageCount: result.data.length,
+      durationMs: Date.now() - startedAt,
+    });
+    return { ...result };
+  }
+
+  private async generateViaCodex(
+    request: ImageRequest,
+    lifecycle: ImageRequestLifecycle | undefined,
+    settings: GatewaySettings,
+  ): Promise<ImageResult> {
+    const profile = await this.deps.authService.requireUsableProfile("openai-codex");
     const orchestratorModel = await this.deps.configService.getImageOrchestratorModel();
     const requestedImageModel = this.resolveRequestedImageModel(request.model || settings.modelRouting.imageGenerationModel);
     const requestSummary = {

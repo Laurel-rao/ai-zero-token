@@ -27,6 +27,7 @@ import { formatDuration, formatFileSize, formatFullTime, formatJson } from "@/sh
 import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
 import type { UserRole } from "@/routes/routes";
 import { normalizeBranding } from "@/shared/lib/branding";
+import { DEFAULT_IMAGE_MODEL } from "@/shared/lib/image-models";
 import { DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT } from "@/shared/lib/prompt-optimizer";
 
 function countToDraft(value: number | undefined): string {
@@ -72,6 +73,11 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
       perUserHourly: item.perUserHourly === undefined ? "" : String(item.perUserHourly),
       minIntervalSeconds: item.minIntervalSeconds === undefined ? "" : String(item.minIntervalSeconds),
     })),
+    imageApiChannelEnabled: Boolean(config.settings.image?.apiChannel?.enabled),
+    imageApiChannelMode: config.settings.image?.apiChannel?.mode === "fallback" ? "fallback" : "primary",
+    imageApiChannelBaseUrl: config.settings.image?.apiChannel?.baseUrl || "",
+    imageApiChannelApiKey: config.settings.image?.apiChannel?.apiKey || "",
+    imageApiChannelModel: config.settings.image?.apiChannel?.model || DEFAULT_IMAGE_MODEL,
     wecomEnabled: Boolean(config.settings.wecom?.enabled),
     wecomCorpId: config.settings.wecom?.corpId || "",
     wecomAgentId: config.settings.wecom?.agentId || "",
@@ -84,7 +90,7 @@ function profileSearchText(profile: ProfileSummary): string {
   return [profileLabel(profile, true), profile.email || "", profile.accountId, profile.codexAccountId || "", profile.profileId, getPlanType(profile)].join(" ").toLowerCase();
 }
 
-type SettingSectionId = "model" | "branding" | "api" | "wecom" | "proxy" | "runtime" | "limits" | "rotation" | "display";
+type SettingSectionId = "model" | "branding" | "api" | "wecom" | "proxy" | "runtime" | "limits" | "imageApi" | "rotation" | "display";
 
 type ModelSettingField = "defaultModel" | "imageClassifierModel" | "imageGenerationModel" | "imageOrchestratorModel" | "promptOptimizerModel";
 
@@ -173,6 +179,11 @@ export function SettingsPage(props: {
     imageLimitHourly: "0",
     imageLimitMinIntervalSeconds: "0",
     imageLimitUserOverrides: [],
+    imageApiChannelEnabled: false,
+    imageApiChannelMode: "primary",
+    imageApiChannelBaseUrl: "",
+    imageApiChannelApiKey: "",
+    imageApiChannelModel: DEFAULT_IMAGE_MODEL,
     wecomEnabled: false,
     wecomCorpId: "",
     wecomAgentId: "",
@@ -355,6 +366,20 @@ export function SettingsPage(props: {
       status: settingsDraft.imageLimitsEnabled ? "已启用" : "未启用",
       statusTone: settingsDraft.imageLimitsEnabled ? "success" : "muted",
       metrics: [`超时 ${settingsDraft.imageGenerationTimeoutMinutes || "10"} 分钟`, `24h ${limitLabel(settingsDraft.imageLimitDaily)}`, `1h ${limitLabel(settingsDraft.imageLimitHourly)}`],
+    },
+    {
+      id: "imageApi",
+      title: "生图 API 渠道",
+      description: "把生图请求转发到外部 OpenAI 兼容 API",
+      icon: Globe2,
+      tone: "indigo",
+      status: settingsDraft.imageApiChannelEnabled
+        ? settingsDraft.imageApiChannelBaseUrl.trim()
+          ? settingsDraft.imageApiChannelMode === "primary" ? "已启用（优先使用）" : "已启用（Codex 失败后回退）"
+          : "待补齐配置"
+        : "未启用",
+      statusTone: settingsDraft.imageApiChannelEnabled ? "success" : "muted",
+      metrics: [settingsDraft.imageApiChannelModel || "默认模型"],
     },
     {
       id: "rotation",
@@ -561,6 +586,13 @@ export function SettingsPage(props: {
             minIntervalSeconds?: number;
           }>;
         };
+        apiChannel?: {
+          enabled: boolean;
+          mode: "primary" | "fallback";
+          baseUrl: string;
+          apiKey?: string;
+          model: string;
+        };
       };
       wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
     } = {};
@@ -635,6 +667,11 @@ export function SettingsPage(props: {
         "imageLimitHourly",
         "imageLimitMinIntervalSeconds",
         "imageLimitUserOverrides",
+        "imageApiChannelEnabled",
+        "imageApiChannelMode",
+        "imageApiChannelBaseUrl",
+        "imageApiChannelApiKey",
+        "imageApiChannelModel",
       )
     ) {
       payload.image = {};
@@ -654,6 +691,15 @@ export function SettingsPage(props: {
           perUserHourly: imageLimitHourly,
           minIntervalSeconds: imageLimitMinIntervalSeconds,
           userOverrides: imageLimitUserOverrides,
+        };
+      }
+      if (hasDirtyField("imageApiChannelEnabled", "imageApiChannelMode", "imageApiChannelBaseUrl", "imageApiChannelApiKey", "imageApiChannelModel")) {
+        payload.image.apiChannel = {
+          enabled: settingsDraft.imageApiChannelEnabled,
+          mode: settingsDraft.imageApiChannelMode,
+          baseUrl: settingsDraft.imageApiChannelBaseUrl.trim(),
+          ...(hasDirtyField("imageApiChannelApiKey") || settingsDraft.imageApiChannelApiKey ? { apiKey: settingsDraft.imageApiChannelApiKey.trim() } : {}),
+          model: settingsDraft.imageApiChannelModel.trim(),
         };
       }
     }
@@ -1117,8 +1163,49 @@ export function SettingsPage(props: {
           ) : null}
         </section> : null}
 
-        {isAdmin ? <section className={`settings-config-card ${openSections.has("rotation") ? "is-open" : ""}`}>
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("imageApi") ? "is-open" : ""}`}>
           {renderSectionHeader(settingsSections[7])}
+          {openSections.has("imageApi") ? (
+            <div className="settings-config-body">
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={settingsDraft.imageApiChannelEnabled} onChange={(event) => markSettingsDirty({ imageApiChannelEnabled: event.target.checked })} />
+                <span>
+                  <strong>启用生图 API 渠道</strong>
+                  <em>把生图和改图请求转发给外部 OpenAI 兼容网关（/v1/images/generations、/v1/images/edits），走 API Key 计费，不消耗 Codex 账号额度。</em>
+                </span>
+              </label>
+              <div className="settings-form-grid three-columns">
+                <label className="field">
+                  <span>Base URL</span>
+                  <input className="input" value={settingsDraft.imageApiChannelBaseUrl} onChange={(event) => markSettingsDirty({ imageApiChannelBaseUrl: event.target.value })} placeholder="https://api.example.com" />
+                </label>
+                <label className="field">
+                  <span>API Key</span>
+                  <input className="input" type="password" value={settingsDraft.imageApiChannelApiKey} onChange={(event) => markSettingsDirty({ imageApiChannelApiKey: event.target.value })} placeholder="sk-..." />
+                </label>
+                <label className="field">
+                  <span>渠道模型</span>
+                  <input className="input" value={settingsDraft.imageApiChannelModel} onChange={(event) => markSettingsDirty({ imageApiChannelModel: event.target.value })} placeholder={DEFAULT_IMAGE_MODEL} />
+                </label>
+              </div>
+              <label className="field">
+                <span>使用方式</span>
+                <select
+                  className="control"
+                  value={settingsDraft.imageApiChannelMode}
+                  onChange={(event) => markSettingsDirty({ imageApiChannelMode: event.target.value === "fallback" ? "fallback" : "primary" })}
+                >
+                  <option value="primary">优先使用 API 渠道，失败后回退 Codex 账号</option>
+                  <option value="fallback">优先用 Codex 账号，失败后回退 API 渠道</option>
+                </select>
+              </label>
+              <p className="settings-status-note">Base URL 不带 /v1 后缀；渠道模型留空时沿用请求里的模型。API 渠道请求直接出网，不走 Codex 账号轮换，也不受代理设置影响。</p>
+            </div>
+          ) : null}
+        </section> : null}
+
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("rotation") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[8])}
           {openSections.has("rotation") ? (
             <div className="settings-config-body">
               <div className="auto-switch-counts" aria-label="自动轮换账号统计">
@@ -1167,7 +1254,7 @@ export function SettingsPage(props: {
         </section> : null}
 
         <section className={`settings-config-card ${openSections.has("display") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[8])}
+          {renderSectionHeader(settingsSections[9])}
           {openSections.has("display") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">

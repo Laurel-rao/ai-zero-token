@@ -99,6 +99,11 @@ export type SettingDraft = {
     perUserHourly: string;
     minIntervalSeconds: string;
   }>;
+  imageApiChannelEnabled: boolean;
+  imageApiChannelMode: "primary" | "fallback";
+  imageApiChannelBaseUrl: string;
+  imageApiChannelApiKey: string;
+  imageApiChannelModel: string;
   wecomEnabled: boolean;
   wecomCorpId: string;
   wecomAgentId: string;
