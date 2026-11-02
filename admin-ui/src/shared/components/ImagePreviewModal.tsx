@@ -1,6 +1,7 @@
 import { Check, ChevronLeft, ChevronRight, Copy, Download, LoaderCircle, Maximize2, Minimize2, RotateCcw, RotateCw, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { Modal } from "./Modal";
+import { ImageSaveOverlay } from "./ImageSaveOverlay";
 import type { ModalImage, ModalImageItem } from "@/shared/lib/app-types";
 import { saveImageToDevice } from "@/shared/api";
 
@@ -135,6 +136,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [saveOverlaySrc, setSaveOverlaySrc] = useState<string | null>(props.image.manualSave ? props.image.src : null);
   const [copyFeedback, setCopyFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
@@ -247,7 +249,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
     try {
       const result = await saveImageToDevice(activeImage.src, activeImage.filename || "ai-image.png");
       if (result === "manual") {
-        showCopyFeedback("success", "微信内请长按图片保存到相册");
+        setSaveOverlaySrc(activeImage.src);
       } else if (result === "shared") {
         showCopyFeedback("success", "已打开系统保存面板");
       } else {
@@ -611,6 +613,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
           </span>
         ) : null}
       </div>
+      {saveOverlaySrc ? <ImageSaveOverlay src={saveOverlaySrc} onClose={() => setSaveOverlaySrc(null)} /> : null}
     </Modal>
   );
 }

@@ -2830,10 +2830,22 @@ export function ChatPage(props: {
     props.setPreviewImage({ ...active, gallery, index });
   }
 
-  async function downloadChatImage(src: string, filename: string) {
+  async function downloadChatImage(images: PreviewImage[], index: number) {
+    const image = images[index];
+    if (!image) {
+      return;
+    }
     try {
-      const result = await saveImageToDevice(src, filename || "ai-image.png");
-      props.setStatus(result === "manual" ? "微信内请长按图片保存到相册" : result === "shared" ? "已打开系统保存面板" : "图片已开始下载");
+      const result = await saveImageToDevice(image.fullSrc || image.src, image.filename || "ai-image.png");
+      if (result === "manual") {
+        const gallery = chatGeneratedPreviewItems(images);
+        const active = gallery[index];
+        if (active) {
+          props.setPreviewImage({ ...active, manualSave: true, gallery, index });
+        }
+        return;
+      }
+      props.setStatus(result === "shared" ? "已打开系统保存面板" : "图片已开始下载");
     } catch (error) {
       props.setStatus(error instanceof Error && error.message ? error.message : "下载失败，请稍后重试");
     }
@@ -2913,7 +2925,7 @@ export function ChatPage(props: {
                 download={image.filename}
                 onClick={(event) => {
                   event.preventDefault();
-                  void downloadChatImage(image.fullSrc || image.src, image.filename);
+                  void downloadChatImage(images, index);
                 }}
               >
                 <Download size={14} />

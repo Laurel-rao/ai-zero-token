@@ -533,10 +533,12 @@ const SHARE_PAGE_STYLE = `
   .prompt { margin: 0 0 16px; font-size: 15px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
   .images { display: grid; gap: 12px; }
   figure { margin: 0; }
-  img { width: 100%; height: auto; display: block; border-radius: 10px; background: #f2f3f5; }
+  img { width: 100%; height: auto; display: block; border-radius: 10px; background: #f2f3f5; -webkit-touch-callout: default; -webkit-user-select: auto; user-select: auto; }
   .image-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
   .image-actions a, .image-actions button { font: inherit; font-size: 13px; color: #3370ff; background: none; border: 0; padding: 4px 2px; cursor: pointer; text-decoration: none; -webkit-tap-highlight-color: transparent; }
   .note { margin: 12px 0 0; font-size: 13px; color: #8a9099; }
+  .touch-hint { display: none; }
+  @media (hover: none) { .touch-hint { display: block; } }
   .meta { margin: 16px 0 0; font-size: 13px; color: #8a9099; display: flex; flex-wrap: wrap; gap: 8px 16px; }
   @media (prefers-color-scheme: dark) {
     body { background: #17181a; color: #e8eaed; }
@@ -583,6 +585,7 @@ function renderImageSharePage(params: {
   <section class="card">
     <p class="prompt">${escapeHtmlText(item.prompt)}</p>
     <div class="images">${images}</div>
+    <p class="note touch-hint">手机上长按图片即可保存到相册</p>
     <p class="note" id="share-note" hidden></p>
     <p class="meta">${meta}</p>
   </section>

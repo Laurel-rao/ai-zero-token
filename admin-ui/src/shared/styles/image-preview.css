@@ -430,3 +430,52 @@
     right: 8px;
   }
 }
+
+/* 微信 / 企微内「长按保存」浮层：只放一张原生图片，恢复浏览器默认长按菜单。 */
+.image-save-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 18px;
+  background: rgba(9, 12, 20, 0.94);
+  touch-action: auto;
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+.image-save-overlay-image {
+  max-width: 100%;
+  max-height: calc(100% - 76px);
+  object-fit: contain;
+  border-radius: 8px;
+  pointer-events: auto;
+  touch-action: auto;
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+.image-save-overlay-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.image-save-overlay-bar button {
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
