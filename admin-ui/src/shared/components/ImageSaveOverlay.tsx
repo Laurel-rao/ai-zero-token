@@ -11,7 +11,7 @@ export function ImageSaveOverlay(props: { src: string; hint?: string; onClose: (
     <div className="image-save-overlay" role="dialog" aria-modal="true" aria-label="保存图片">
       <img className="image-save-overlay-image" src={props.src} alt="" draggable={false} />
       <div className="image-save-overlay-bar">
-        <span>{props.hint ?? "长按图片 → 保存图片 / 存到相册"}</span>
+        <span>{props.hint ?? "长按图片 → 保存图片 / 存到相册；若没反应，点右上角 ••• 选择在浏览器中打开"}</span>
         <button type="button" onClick={props.onClose}>
           关闭
         </button>

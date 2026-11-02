@@ -56,13 +56,19 @@ export function downloadTextFile(filename: string, content: string, mimeType = "
   URL.revokeObjectURL(url);
 }
 
-export type ImageSaveResult = "shared" | "downloaded";
+export type ImageSaveResult = "shared" | "downloaded" | "manual";
+
+/** 微信 / 企业微信内置浏览器：`download` 属性会被忽略，点击会直接跳转到图片地址。 */
+export function isWechatWebview(): boolean {
+  return /MicroMessenger|wxwork/i.test(navigator.userAgent);
+}
 
 /**
- * 把图片保存到设备，和分享页 `/s/<token>` 的「保存图片」保持同一套逻辑：
- * - 支持文件分享的浏览器（iOS Safari / 企微 / 微信）直接调起系统保存面板；
- * - 其它浏览器用 blob + download，避免 `download` 属性被忽略时整页跳转到图片地址。
- * 失败时抛错，由调用方降级成「长按保存」浮层。
+ * 把图片保存到设备。
+ * - 支持文件分享的浏览器（iOS Safari / Android Chrome）走系统保存面板；
+ * - 微信 / 企微内核没有可靠的下载能力（点了会跳转到图片页），返回 "manual"，
+ *   由调用方打开「长按保存」浮层；
+ * - 其它浏览器用 blob + download，避免整页跳转到图片地址。
  */
 export async function saveImageToDevice(src: string, filename: string): Promise<ImageSaveResult> {
   const response = await fetch(src, { credentials: "include" });
@@ -88,6 +94,10 @@ export async function saveImageToDevice(src: string, filename: string): Promise<
         return "shared";
       }
     }
+  }
+
+  if (isWechatWebview()) {
+    return "manual";
   }
 
   const objectUrl = URL.createObjectURL(blob);

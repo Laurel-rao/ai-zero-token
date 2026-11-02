@@ -539,6 +539,8 @@ const SHARE_PAGE_STYLE = `
   .note { margin: 12px 0 0; font-size: 13px; color: #8a9099; }
   .touch-hint { display: none; }
   @media (hover: none) { .touch-hint { display: block; } }
+  img.is-save-target { animation: save-pulse 1.2s ease-out 2; outline: 3px solid rgba(51, 112, 255, 0.55); outline-offset: 3px; }
+  @keyframes save-pulse { 0% { outline-offset: 3px; } 50% { outline-offset: 8px; } 100% { outline-offset: 3px; } }
   .meta { margin: 16px 0 0; font-size: 13px; color: #8a9099; display: flex; flex-wrap: wrap; gap: 8px 16px; }
   @media (prefers-color-scheme: dark) {
     body { background: #17181a; color: #e8eaed; }
@@ -601,6 +603,7 @@ function renderImageSharePage(params: {
     window.clearTimeout(timer);
     timer = window.setTimeout(function () { note.hidden = true; }, 4000);
   }
+  var isWechat = /MicroMessenger|wxwork/i.test(navigator.userAgent);
   document.addEventListener("click", function (event) {
     var target = event.target;
     var button = target && target.closest ? target.closest("[data-save]") : null;
@@ -609,6 +612,21 @@ function renderImageSharePage(params: {
     var src = button.getAttribute("data-save");
     var name = button.getAttribute("data-name") || "ai-image.png";
     if (!src) return;
+    function highlight() {
+      var img = button.closest("figure") && button.closest("figure").querySelector("img");
+      if (img) {
+        img.classList.remove("is-save-target");
+        void img.offsetWidth;
+        img.classList.add("is-save-target");
+        img.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+      showNote("长按图片即可保存到相册");
+    }
+    if (isWechat) {
+      // 微信 / 企微内核不支持网页下载，点击 download 会直接跳转到图片页，只能长按保存。
+      highlight();
+      return;
+    }
     fetch(src, { credentials: "same-origin" }).then(function (response) {
       if (!response.ok) throw new Error("image request failed");
       return response.blob();
