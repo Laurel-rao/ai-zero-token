@@ -248,15 +248,10 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
     setCopyFeedback(null);
     try {
       const result = await saveImageToDevice(activeImage.src, activeImage.filename || "ai-image.png");
-      if (result === "manual") {
-        setSaveOverlaySrc(activeImage.src);
-      } else if (result === "shared") {
-        showCopyFeedback("success", "已打开系统保存面板");
-      } else {
-        showCopyFeedback("success", "图片已开始下载");
-      }
-    } catch (error) {
-      showCopyFeedback("error", error instanceof Error && error.message ? error.message : "下载失败，请稍后重试");
+      showCopyFeedback("success", result === "shared" ? "已打开系统保存面板" : "图片已开始下载");
+    } catch {
+      // 保存失败时降级成长按保存浮层，至少还有一条路能把图存到相册。
+      setSaveOverlaySrc(activeImage.src);
     } finally {
       setIsDownloading(false);
     }

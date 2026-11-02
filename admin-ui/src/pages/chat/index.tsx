@@ -2837,16 +2837,15 @@ export function ChatPage(props: {
     }
     try {
       const result = await saveImageToDevice(image.fullSrc || image.src, image.filename || "ai-image.png");
-      if (result === "manual") {
-        const gallery = chatGeneratedPreviewItems(images);
-        const active = gallery[index];
-        if (active) {
-          props.setPreviewImage({ ...active, manualSave: true, gallery, index });
-        }
-        return;
-      }
       props.setStatus(result === "shared" ? "已打开系统保存面板" : "图片已开始下载");
     } catch (error) {
+      // 保存失败时打开「长按保存」浮层兜底。
+      const gallery = chatGeneratedPreviewItems(images);
+      const active = gallery[index];
+      if (active) {
+        props.setPreviewImage({ ...active, manualSave: true, gallery, index });
+        return;
+      }
       props.setStatus(error instanceof Error && error.message ? error.message : "下载失败，请稍后重试");
     }
   }

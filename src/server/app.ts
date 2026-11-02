@@ -601,7 +601,6 @@ function renderImageSharePage(params: {
     window.clearTimeout(timer);
     timer = window.setTimeout(function () { note.hidden = true; }, 4000);
   }
-  var isWechat = /MicroMessenger|wxwork/i.test(navigator.userAgent);
   document.addEventListener("click", function (event) {
     var target = event.target;
     var button = target && target.closest ? target.closest("[data-save]") : null;
@@ -618,7 +617,6 @@ function renderImageSharePage(params: {
       if (navigator.canShare && navigator.share && navigator.canShare({ files: [file] })) {
         return navigator.share({ files: [file], title: name });
       }
-      if (isWechat) { showNote("微信内请长按图片保存到相册"); return null; }
       var url = URL.createObjectURL(blob);
       var link = document.createElement("a");
       link.href = url;
@@ -631,7 +629,7 @@ function renderImageSharePage(params: {
       showNote("图片已开始下载");
       return null;
     }).catch(function () {
-      showNote(isWechat ? "微信内请长按图片保存到相册" : "保存失败，请长按图片保存");
+      showNote("保存失败，请长按图片保存");
     });
   });
 })();
