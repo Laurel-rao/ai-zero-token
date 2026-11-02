@@ -6,7 +6,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
-import { fetchJson } from "@/shared/api";
+import { fetchJson, saveImageToDevice } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
 import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, errorMessage } from "@/shared/lib/app-utils";
@@ -2830,6 +2830,15 @@ export function ChatPage(props: {
     props.setPreviewImage({ ...active, gallery, index });
   }
 
+  async function downloadChatImage(src: string, filename: string) {
+    try {
+      const result = await saveImageToDevice(src, filename || "ai-image.png");
+      props.setStatus(result === "manual" ? "微信内请长按图片保存到相册" : result === "shared" ? "已打开系统保存面板" : "图片已开始下载");
+    } catch (error) {
+      props.setStatus(error instanceof Error && error.message ? error.message : "下载失败，请稍后重试");
+    }
+  }
+
   function openChatAttachmentPreview(messageAttachments: ChatAttachment[], attachmentId: string) {
     const gallery = messageAttachments
       .filter((attachment) => attachment.kind === "image" && Boolean(attachmentImageSrc(attachment)))
@@ -2899,7 +2908,14 @@ export function ChatPage(props: {
                 <img src={image.src} alt={image.meta} loading="lazy" decoding="async" />
               </button>
               <figcaption>{image.meta}</figcaption>
-              <a href={image.fullSrc || image.src} download={image.filename}>
+              <a
+                href={image.fullSrc || image.src}
+                download={image.filename}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void downloadChatImage(image.fullSrc || image.src, image.filename);
+                }}
+              >
                 <Download size={14} />
                 下载
               </a>

@@ -2,6 +2,7 @@ import { Check, ChevronLeft, ChevronRight, Copy, Download, LoaderCircle, Maximiz
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { Modal } from "./Modal";
 import type { ModalImage, ModalImageItem } from "@/shared/lib/app-types";
+import { saveImageToDevice } from "@/shared/api";
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 6;
@@ -133,6 +134,7 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
@@ -233,6 +235,28 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
       showCopyFeedback("error", message);
     } finally {
       setIsCopying(false);
+    }
+  };
+
+  const downloadActiveImage = async () => {
+    if (isDownloading) {
+      return;
+    }
+    setIsDownloading(true);
+    setCopyFeedback(null);
+    try {
+      const result = await saveImageToDevice(activeImage.src, activeImage.filename || "ai-image.png");
+      if (result === "manual") {
+        showCopyFeedback("success", "微信内请长按图片保存到相册");
+      } else if (result === "shared") {
+        showCopyFeedback("success", "已打开系统保存面板");
+      } else {
+        showCopyFeedback("success", "图片已开始下载");
+      }
+    } catch (error) {
+      showCopyFeedback("error", error instanceof Error && error.message ? error.message : "下载失败，请稍后重试");
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -504,9 +528,16 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
             >
               {isCopying ? <LoaderCircle className="spin" size={16} /> : copyFeedback?.tone === "success" ? <Check size={16} /> : <Copy size={16} />}
             </button>
-            <a className="image-preview-tool" href={activeImage.src} download={activeImage.filename || "generated-image.png"} title="下载图片" aria-label="下载图片">
-              <Download size={16} />
-            </a>
+            <button
+              className="image-preview-tool"
+              type="button"
+              onClick={() => void downloadActiveImage()}
+              disabled={isDownloading}
+              title={isDownloading ? "正在准备下载" : "下载图片"}
+              aria-label={isDownloading ? "正在准备下载" : "下载图片"}
+            >
+              {isDownloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
+            </button>
           </div>
         </>
       )}

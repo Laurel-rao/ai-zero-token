@@ -46,6 +46,13 @@ export type GenerationReferenceAsset = {
 
 export type GenerationHistoryStatus = "queued" | "running" | "success" | "failed" | "interrupted";
 
+export type ImageShareLink = {
+  token: string;
+  generationId: string;
+  owner?: string;
+  createdAt: number;
+};
+
 export type GenerationHistoryItem = {
   id: string;
   owner?: string;
@@ -599,6 +606,13 @@ export class GatewayDatabaseService {
         images_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_generation_history_created_at ON generation_history(created_at DESC);
+      CREATE TABLE IF NOT EXISTS image_share_links (
+        token TEXT PRIMARY KEY,
+        generation_id TEXT NOT NULL,
+        owner TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_image_share_links_generation ON image_share_links(generation_id);
       CREATE TABLE IF NOT EXISTS chat_conversations (
         id TEXT PRIMARY KEY,
         owner TEXT,
@@ -1299,6 +1313,49 @@ export class GatewayDatabaseService {
     await this.init();
     const row = await this.database.get("SELECT owner FROM generation_history WHERE id = ?", id) as { owner?: unknown } | undefined;
     return typeof row?.owner === "string" ? row.owner : undefined;
+  }
+
+  async createImageShareLink(params: { generationId: string; owner?: string }): Promise<ImageShareLink> {
+    await this.init();
+    const existing = await this.database.get(
+      "SELECT token, generation_id AS generationId, owner, created_at AS createdAt FROM image_share_links WHERE generation_id = ? LIMIT 1",
+      params.generationId,
+    ) as Record<string, unknown> | undefined;
+    if (existing && typeof existing.token === "string") {
+      return {
+        token: existing.token,
+        generationId: params.generationId,
+        owner: typeof existing.owner === "string" ? existing.owner : undefined,
+        createdAt: Number(existing.createdAt ?? 0),
+      };
+    }
+    const token = crypto.randomBytes(16).toString("base64url");
+    const createdAt = Date.now();
+    await this.database.run(
+      "INSERT INTO image_share_links (token, generation_id, owner, created_at) VALUES (?, ?, ?, ?)",
+      token,
+      params.generationId,
+      params.owner ?? null,
+      createdAt,
+    );
+    return { token, generationId: params.generationId, owner: params.owner, createdAt };
+  }
+
+  async getImageShareLink(token: string): Promise<ImageShareLink | null> {
+    await this.init();
+    const row = await this.database.get(
+      "SELECT token, generation_id AS generationId, owner, created_at AS createdAt FROM image_share_links WHERE token = ? LIMIT 1",
+      token,
+    ) as Record<string, unknown> | undefined;
+    if (!row || typeof row.token !== "string" || typeof row.generationId !== "string") {
+      return null;
+    }
+    return {
+      token: row.token,
+      generationId: row.generationId,
+      owner: typeof row.owner === "string" ? row.owner : undefined,
+      createdAt: Number(row.createdAt ?? 0),
+    };
   }
 
   async getChatConversationOwner(id: string): Promise<string | undefined> {

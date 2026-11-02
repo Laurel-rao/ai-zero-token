@@ -55,3 +55,61 @@ export function downloadTextFile(filename: string, content: string, mimeType = "
   link.remove();
   URL.revokeObjectURL(url);
 }
+
+export type ImageSaveResult = "shared" | "downloaded" | "manual";
+
+/** 微信 / 企业微信内置浏览器：没有下载能力，只能长按图片保存。 */
+export function isWechatWebview(): boolean {
+  return /MicroMessenger|wxwork/i.test(navigator.userAgent);
+}
+
+/**
+ * 把图片保存到设备。
+ * - 支持文件分享的浏览器（iOS Safari / Android Chrome）直接调起系统保存面板；
+ * - 微信 / 企微内置浏览器没有下载能力，返回 "manual" 让调用方提示长按图片保存；
+ * - 其它浏览器用 blob + download 兜底，避免 `download` 属性被忽略时整页跳转到图片地址。
+ */
+export async function saveImageToDevice(src: string, filename: string): Promise<ImageSaveResult> {
+  const response = await fetch(src, { credentials: "include" });
+  if (!response.ok) {
+    throw new Error(`图片读取失败（${response.status}）`);
+  }
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) {
+    throw new Error("读取到的内容不是图片");
+  }
+  const file = new File([blob], filename, { type: blob.type || "image/png" });
+  const canShareFiles =
+    typeof navigator.share === "function" &&
+    typeof navigator.canShare === "function" &&
+    navigator.canShare({ files: [file] });
+
+  if (canShareFiles) {
+    try {
+      await navigator.share({ files: [file], title: filename });
+      return "shared";
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return "shared";
+      }
+    }
+  }
+
+  if (isWechatWebview()) {
+    return "manual";
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+  }
+  return "downloaded";
+}

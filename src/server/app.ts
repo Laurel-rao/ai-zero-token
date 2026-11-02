@@ -35,7 +35,7 @@ import {
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
 import { notifyWecomImageResult } from "../core/services/wecom-message-service.js";
-import type { ChatAttachment, ChatConversationDetail, ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
+import type { ChatAttachment, ChatConversationDetail, ChatMessage, GatewayUserRole, GenerationHistoryItem } from "../core/services/gateway-database-service.js";
 import { getBrandingAssetsDir, getChatAttachmentAssetsDir, getGenerationAssetsDir } from "../core/store/state-paths.js";
 
 const packageRoot = path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
@@ -408,6 +408,7 @@ function isPublicPath(method: string, url: string): boolean {
     pathOnly === "/_gateway/auth/wecom/complete" ||
     pathOnly === "/_gateway/auth/logout" ||
     pathOnly.startsWith("/_gateway/branding-assets/") ||
+    pathOnly.startsWith("/s/") ||
     pathOnly.startsWith("/assets/");
 }
 
@@ -501,6 +502,155 @@ function resolveGenerationImageFile(imagePath: string): { filePath: string; gene
     filePath,
     generationId: normalized.split(path.sep)[0] || normalized.split("/")[0] || "",
   };
+}
+
+function escapeHtmlText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatShareTimestamp(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+}
+
+const SHARE_PAGE_STYLE = `
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px 48px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; background: #f4f5f7; color: #1f2329; }
+  main { max-width: 880px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .hint { font-size: 12px; color: #8a9099; }
+  .card { background: #fff; border: 1px solid #e5e6eb; border-radius: 14px; padding: 18px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+  .prompt { margin: 0 0 16px; font-size: 15px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .images { display: grid; gap: 12px; }
+  figure { margin: 0; }
+  img { width: 100%; height: auto; display: block; border-radius: 10px; background: #f2f3f5; }
+  .image-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .image-actions a, .image-actions button { font: inherit; font-size: 13px; color: #3370ff; background: none; border: 0; padding: 4px 2px; cursor: pointer; text-decoration: none; -webkit-tap-highlight-color: transparent; }
+  .note { margin: 12px 0 0; font-size: 13px; color: #8a9099; }
+  .meta { margin: 16px 0 0; font-size: 13px; color: #8a9099; display: flex; flex-wrap: wrap; gap: 8px 16px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #17181a; color: #e8eaed; }
+    .card { background: #1f2023; border-color: #2f3136; }
+    img { background: #26282c; }
+    .hint, .meta { color: #9aa0a6; }
+  }
+`;
+
+function renderImageSharePage(params: {
+  item: GenerationHistoryItem;
+  token: string;
+}): string {
+  const { item, token } = params;
+  const images = item.images
+    .map((image, index) => {
+      const src = `/s/${encodeURIComponent(token)}/image/${index}`;
+      const width = image.width ? ` width="${image.width}"` : "";
+      const height = image.height ? ` height="${image.height}"` : "";
+      const name = escapeHtmlText(image.filename || `ai-image-${index + 1}.png`);
+      return `<figure><img loading="lazy" src="${src}" alt="生成图片 ${index + 1}"${width}${height} decoding="async" /><div class="image-actions"><button type="button" data-save="${escapeHtmlText(src)}" data-name="${name}">保存图片</button></div></figure>`;
+    })
+    .join("");
+  const meta = [
+    item.model,
+    item.size,
+    item.outputFormat ? item.outputFormat.toUpperCase() : "",
+    formatShareTimestamp(item.createdAt),
+  ].filter((text): text is string => Boolean(text)).map((text) => `<span>${escapeHtmlText(text)}</span>`).join("");
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<meta name="referrer" content="no-referrer" />
+<title>图片分享 · AI Zero Token</title>
+<style>${SHARE_PAGE_STYLE}</style>
+</head>
+<body>
+<main>
+  <header><h1>图片分享</h1><span class="hint">免登录查看</span></header>
+  <section class="card">
+    <p class="prompt">${escapeHtmlText(item.prompt)}</p>
+    <div class="images">${images}</div>
+    <p class="note" id="share-note" hidden></p>
+    <p class="meta">${meta}</p>
+  </section>
+</main>
+<script>
+(function () {
+  var note = document.getElementById("share-note");
+  var timer = 0;
+  function showNote(text) {
+    if (!note) return;
+    note.textContent = text;
+    note.hidden = false;
+    window.clearTimeout(timer);
+    timer = window.setTimeout(function () { note.hidden = true; }, 4000);
+  }
+  var isWechat = /MicroMessenger|wxwork/i.test(navigator.userAgent);
+  document.addEventListener("click", function (event) {
+    var target = event.target;
+    var button = target && target.closest ? target.closest("[data-save]") : null;
+    if (!button) return;
+    event.preventDefault();
+    var src = button.getAttribute("data-save");
+    var name = button.getAttribute("data-name") || "ai-image.png";
+    if (!src) return;
+    fetch(src, { credentials: "same-origin" }).then(function (response) {
+      if (!response.ok) throw new Error("image request failed");
+      return response.blob();
+    }).then(function (blob) {
+      var file = new File([blob], name, { type: blob.type || "image/png" });
+      if (navigator.canShare && navigator.share && navigator.canShare({ files: [file] })) {
+        return navigator.share({ files: [file], title: name });
+      }
+      if (isWechat) { showNote("微信内请长按图片保存到相册"); return null; }
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+      showNote("图片已开始下载");
+      return null;
+    }).catch(function () {
+      showNote(isWechat ? "微信内请长按图片保存到相册" : "保存失败，请长按图片保存");
+    });
+  });
+})();
+</script>
+</body>
+</html>`;
+}
+
+function renderImageShareMissingPage(): string {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>分享链接不可用</title>
+<style>${SHARE_PAGE_STYLE}</style>
+</head>
+<body>
+<main><section class="card"><p class="prompt">这个分享链接不存在或已失效。</p></section></main>
+</body>
+</html>`;
 }
 
 function generationImageAccelRedirect(filePath: string): string | null {
@@ -2277,6 +2427,8 @@ async function notifyBackgroundImageResult(params: {
   imageCount?: number;
   durationMs?: number;
   error?: string;
+  /** 成功时优先用免登录分享链接，拿不到再回退到生图页。 */
+  shareUrl?: string;
 }): Promise<void> {
   if (!params.background) {
     return;
@@ -2290,7 +2442,7 @@ async function notifyBackgroundImageResult(params: {
     imageCount: params.imageCount,
     durationMs: params.durationMs,
     error: params.error,
-    historyUrl: `${resolveOrigin(params.request)}/#/generate`,
+    historyUrl: params.shareUrl || `${resolveOrigin(params.request)}/#/generate`,
   });
 }
 
@@ -3042,6 +3194,24 @@ export function createApp(params?: {
       return apiOwner;
     }
     return requestOwnerFromSession(await getSessionFromRequest(request));
+  }
+
+  /** 生图完成后生成免登录分享链接；失败只记录日志，不影响生图流程。 */
+  async function createImageShareUrl(
+    request: FastifyRequest,
+    owner: string | undefined,
+    generationId: string,
+  ): Promise<string | undefined> {
+    try {
+      const link = await ctx.gatewayDatabaseService.createImageShareLink({ generationId, owner });
+      return `${resolveOrigin(request)}/s/${link.token}`;
+    } catch (error) {
+      console.warn("[gateway:share] failed to create image share link", {
+        generationId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
   }
 
   function resolveDataOwnerFilter(session: AdminSession | null, requestedOwner?: string): string | undefined {
@@ -4312,6 +4482,65 @@ export function createApp(params?: {
       }
       const data = await fs.readFile(file.filePath);
       reply.header("Content-Type", getContentType(file.filePath));
+      reply.header("Content-Length", String(data.byteLength));
+      reply.header("Cache-Control", "private, max-age=3600");
+      return reply.send(data);
+    } catch {
+      reply.code(404);
+      return { error: { type: "not_found", message: "图片不存在。" } };
+    }
+  });
+
+  app.get("/s/:token", async (request, reply) => {
+    const token = String((request.params as { token?: string }).token ?? "").trim();
+    const link = token ? await ctx.gatewayDatabaseService.getImageShareLink(token).catch(() => null) : null;
+    if (!link) {
+      reply.code(404).header("Cache-Control", "no-store").header("X-Robots-Tag", "noindex, nofollow").type("text/html; charset=utf-8");
+      return renderImageShareMissingPage();
+    }
+    const item = await ctx.gatewayDatabaseService
+      .getGenerationHistoryItem(link.generationId, link.owner ?? undefined)
+      .catch(() => null);
+    if (!item || item.status !== "success" || item.images.length === 0) {
+      reply.code(404).header("Cache-Control", "no-store").header("X-Robots-Tag", "noindex, nofollow").type("text/html; charset=utf-8");
+      return renderImageShareMissingPage();
+    }
+    reply.header("Cache-Control", "no-store").header("X-Robots-Tag", "noindex, nofollow").type("text/html; charset=utf-8");
+    return renderImageSharePage({ item, token: link.token });
+  });
+
+  app.get("/s/:token/image/:index", async (request, reply) => {
+    const params = request.params as { token?: string; index?: string };
+    const token = String(params.token ?? "").trim();
+    const index = Number.parseInt(String(params.index ?? ""), 10);
+    const link = token ? await ctx.gatewayDatabaseService.getImageShareLink(token).catch(() => null) : null;
+    if (!link || !Number.isInteger(index) || index < 0) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "图片不存在。" } };
+    }
+    const item = await ctx.gatewayDatabaseService
+      .getGenerationHistoryItem(link.generationId, link.owner ?? undefined)
+      .catch(() => null);
+    const image = item?.images[index];
+    if (!item || item.status !== "success" || !image) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "图片不存在。" } };
+    }
+    const file = resolveGenerationImageFile(`${item.id}/${image.filename}`);
+    if (!file || file.generationId !== item.id) {
+      reply.code(404);
+      return { error: { type: "not_found", message: "图片不存在。" } };
+    }
+    try {
+      const accelRedirect = generationImageAccelRedirect(file.filePath);
+      if (accelRedirect) {
+        reply.header("Content-Type", image.mimeType || getContentType(file.filePath));
+        reply.header("Cache-Control", "private, max-age=3600");
+        reply.header("X-Accel-Redirect", accelRedirect);
+        return reply.send();
+      }
+      const data = await fs.readFile(file.filePath);
+      reply.header("Content-Type", image.mimeType || getContentType(file.filePath));
       reply.header("Content-Length", String(data.byteLength));
       reply.header("Cache-Control", "private, max-age=3600");
       return reply.send(data);
@@ -6724,6 +6953,9 @@ export function createApp(params?: {
           images: gatewayImages,
         });
       }
+      const shareUrl = parsed.data._gateway_background && settings.wecom.notifyImageResult
+        ? await createImageShareUrl(request, requestOwner, generationId)
+        : undefined;
       await notifyBackgroundImageResult({
         settings,
         request,
@@ -6734,6 +6966,7 @@ export function createApp(params?: {
         prompt: parsed.data.prompt,
         imageCount: publicResponse.data.length,
         durationMs,
+        shareUrl,
       });
       return finalResponse;
     };
@@ -7215,6 +7448,9 @@ export function createApp(params?: {
         return null;
       });
 
+      const shareUrl = parsed.data._gateway_background && settings.wecom.notifyImageResult
+        ? await createImageShareUrl(request, requestOwner, generationId)
+        : undefined;
       await notifyBackgroundImageResult({
         settings,
         request,
@@ -7225,6 +7461,7 @@ export function createApp(params?: {
         prompt: parsed.data.prompt,
         imageCount: publicResponse.data.length,
         durationMs,
+        shareUrl,
       });
       return savedGeneration ? { ...publicResponse, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : publicResponse;
     };
