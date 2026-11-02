@@ -936,7 +936,8 @@ function imageModelSlug(model?: string): string {
   if (!value) {
     return "auto";
   }
-  if (value === "gpt-image-2") {
+  // GPT Image 2/2.5 走同一套 ChatGPT 网页图片链路，网页会话模型沿用 gpt-5-3。
+  if (value === "gpt-image-2" || value === "gpt-image-2.5-flare" || value === "gpt-image-2.5-sunburst") {
     return "gpt-5-3";
   }
   if (value === CODEX_IMAGE_MODEL) {

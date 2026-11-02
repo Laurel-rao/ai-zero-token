@@ -76,6 +76,7 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     wecomCorpId: config.settings.wecom?.corpId || "",
     wecomAgentId: config.settings.wecom?.agentId || "",
     wecomSecret: config.settings.wecom?.secret || "",
+    wecomNotifyImageResult: config.settings.wecom?.notifyImageResult ?? true,
   };
 }
 
@@ -176,6 +177,7 @@ export function SettingsPage(props: {
     wecomCorpId: "",
     wecomAgentId: "",
     wecomSecret: "",
+    wecomNotifyImageResult: true,
   });
   const [settingsDirtyFields, setSettingsDirtyFields] = useState<Set<keyof SettingDraft>>(() => new Set());
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
@@ -560,7 +562,7 @@ export function SettingsPage(props: {
           }>;
         };
       };
-      wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
+      wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
     } = {};
 
     if (hasDirtyField("defaultModel")) {
@@ -655,12 +657,13 @@ export function SettingsPage(props: {
         };
       }
     }
-    if (hasDirtyField("wecomEnabled", "wecomCorpId", "wecomAgentId", "wecomSecret")) {
+    if (hasDirtyField("wecomEnabled", "wecomCorpId", "wecomAgentId", "wecomSecret", "wecomNotifyImageResult")) {
       payload.wecom = {
         enabled: settingsDraft.wecomEnabled,
         ...(hasDirtyField("wecomCorpId") ? { corpId: settingsDraft.wecomCorpId } : {}),
         ...(hasDirtyField("wecomAgentId") ? { agentId: settingsDraft.wecomAgentId } : {}),
         ...(hasDirtyField("wecomSecret") ? { secret: settingsDraft.wecomSecret } : {}),
+        ...(hasDirtyField("wecomNotifyImageResult") ? { notifyImageResult: settingsDraft.wecomNotifyImageResult } : {}),
       };
     }
     const busyAction: BusyAction = options?.restart ? "restart" : "settings";
@@ -937,7 +940,7 @@ export function SettingsPage(props: {
                 <div className="settings-info-box">
                   <span>当前状态</span>
                   <strong>{apiKeyConfigured ? "已配置个人 Key" : "未配置个人 Key"}</strong>
-                  <p>保存后可通过 Authorization: Bearer 调用 /v1/images/generations、/v1/chat/completions 等兼容接口；请求日志和生图历史会归入当前用户。</p>
+                  <p>保存后可通过 Authorization: Bearer 调用 /v1/responses、/v1/images/generations 等接口；请求日志和生图历史会归入当前用户。</p>
                 </div>
               </div>
             </div>
@@ -969,6 +972,13 @@ export function SettingsPage(props: {
                   <input className="input" type="password" value={settingsDraft.wecomSecret} onChange={(event) => markSettingsDirty({ wecomSecret: event.target.value })} placeholder="企业微信应用 Secret" />
                 </label>
               </div>
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={settingsDraft.wecomNotifyImageResult} onChange={(event) => markSettingsDirty({ wecomNotifyImageResult: event.target.checked })} />
+                <span>
+                  <strong>生图完成/失败时推送企业微信消息</strong>
+                  <em>后台生图任务结束（成功或异常）后，给提交人推送一条企业微信应用消息，附带提示词、用时和生图页入口；仅对 wxwork: 开头的企业微信账号生效。</em>
+                </span>
+              </label>
             </div>
           ) : null}
         </section> : null}

@@ -169,13 +169,7 @@ async function generateText(input) {
 
   const data = await res.json();
 
-  return (
-    data.output_text ||
-    data.text ||
-    data.content ||
-    data.choices?.[0]?.message?.content ||
-    JSON.stringify(data, null, 2)
-  );
+  return data.output_text || JSON.stringify(data, null, 2);
 }
 ```
 
@@ -183,46 +177,20 @@ When building a frontend app, show loading state while the request is pending an
 
 ---
 
-### 3. Chat Completions Compatibility
+### 3. Chat Completions Is Retired
 
-Use this endpoint when the user asks for an OpenAI-compatible chat app or when a template already uses `/v1/chat/completions`.
+`POST /v1/chat/completions` was removed. It now returns HTTP 410 with:
 
-```http
-POST http://127.0.0.1:8787/v1/chat/completions
+```json
+{"error":{"type":"endpoint_retired","message":"chat.completions 接口已下线，请改用 /v1/responses（Codex 透传：/codex/v1/responses）。"}}
 ```
 
-Example request:
+Do not generate chat-completions client code (`messages`, `n`, `max_tokens`, chat streaming chunks) and do not promise that an OpenAI-chat-compatible template or SDK will work against this gateway. Use:
 
-```js
-async function chat(messages) {
-  const res = await fetch("http://127.0.0.1:8787/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer local"
-    },
-    body: JSON.stringify({
-      model: "gpt-5.5",
-      messages
-    })
-  });
+- `POST /v1/responses` for text, reasoning, and coding generation (section 2)
+- `POST /v1/images/generations` and `POST /v1/images/edits` for images (sections 4 and 5)
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Chat completion failed: ${res.status} ${errText}`);
-  }
-
-  const data = await res.json();
-
-  return (
-    data.choices?.[0]?.message?.content ||
-    data.output_text ||
-    JSON.stringify(data, null, 2)
-  );
-}
-```
-
-Use this for chat UI components, OpenAI-compatible templates, or existing chat SDK style code.
+If the user's template only speaks `chat.completions`, tell them the endpoint no longer exists and that the gateway is Responses-only. Streaming is not implemented on `/v1/responses` (it returns HTTP 501); streamed Responses traffic only works through the Codex custom provider passthrough at `http://127.0.0.1:8787/codex/v1` (`POST /codex/v1/responses`).
 
 ---
 
@@ -249,7 +217,7 @@ Use this endpoint for:
 Default recommended image model:
 
 ```text
-gpt-image-2
+gpt-image-2.5-sunburst
 ```
 
 Example request:
@@ -263,7 +231,7 @@ async function generateImage(prompt, size = "1024x1024") {
       "Authorization": "Bearer local"
     },
     body: JSON.stringify({
-      model: "gpt-image-2",
+      model: "gpt-image-2.5-sunburst",
       prompt,
       size,
       n: 1
@@ -332,7 +300,7 @@ async function editImage(prompt, imageUrlOrBase64, size = "1024x1024") {
       "Authorization": "Bearer local"
     },
     body: JSON.stringify({
-      model: "gpt-image-2",
+      model: "gpt-image-2.5-sunburst",
       prompt,
       images: [
         {
@@ -382,7 +350,7 @@ When generating a web app that uses AI-Zero-Token:
    - image model name
    - prompt / input
 5. Use `gpt-5.5` as the default text model.
-6. Use `gpt-image-2` as the default image model.
+6. Use `gpt-image-2.5-sunburst` as the default image model.
 7. Add loading states.
 8. Add error display.
 9. Add a clear result area.
@@ -431,7 +399,7 @@ Use these defaults unless the user says otherwise:
 
 ```text
 Text model: gpt-5.5
-Image model: gpt-image-2
+Image model: gpt-image-2.5-sunburst
 ```
 
 If a model call fails, suggest:
@@ -458,7 +426,7 @@ API Key: local
 Features:
 1. A text input area for user requirements.
 2. A "Generate Text" button that calls POST /v1/responses with model gpt-5.5.
-3. A "Generate Image" button that calls POST /v1/images/generations with model gpt-image-2.
+3. A "Generate Image" button that calls POST /v1/images/generations with model gpt-image-2.5-sunburst.
 4. If the tool needs image editing, call POST /v1/images/edits with images[].image_url.
 5. Show loading states.
 6. Show text output in a result panel.
@@ -565,7 +533,7 @@ They can give this file to a Vibe Coding LLM and say:
 要求：
 1. 输入一句图片需求；
 2. 点击按钮调用本地 AI-Zero-Token；
-3. 使用 gpt-image-2 生成图片；
+3. 使用 gpt-image-2.5-sunburst 生成图片；
 4. 图片生成后展示在页面中；
 5. 页面要好看，适合设计师使用。
 ```

@@ -59,7 +59,7 @@ Version `2.0.4` adds the macOS menu-bar account panel and OpenClaw compatibility
 - Menu-bar quick account panel for switching gateway/Codex accounts.
 - Menu actions for quota refresh, Base URL copy, console open, gateway restart, and quit.
 - Desktop Codex restart hook after applying an account to local Codex.
-- OpenClaw-compatible `chat.completions` streaming and tool-call fields.
+- OpenClaw-compatible `chat.completions` streaming and tool-call fields (later retired: `POST /v1/chat/completions` now returns HTTP 410 `endpoint_retired`, and callers should use `/v1/responses`).
 - Real gateway request log entries for recent API traffic.
 
 ## 2.0.0 Release Notes

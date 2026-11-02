@@ -5,6 +5,7 @@ import type { BusyAction, PreviewImage, ResultTab } from "@/shared/lib/app-types
 import { buildExample, copyText, createClientId, errorMessage, extractPreviewImages, insertEditImageIntoBody, readFileAsDataUrl, summarizeJson } from "@/shared/lib/app-utils";
 import { endpointOrder, endpointSort } from "@/shared/lib/endpoints";
 import { formatDuration, formatFileSize, formatJson } from "@/shared/lib/format";
+import { DEFAULT_IMAGE_MODEL } from "@/shared/lib/image-models";
 import { profileLabel } from "@/shared/lib/profiles";
 import { TesterPanel } from "./components/TesterPanel";
 import type { ModalImage } from "@/hooks/useAdminWorkspace";
@@ -174,13 +175,13 @@ export function TesterPage(props: {
             dataUrl,
           }),
         });
-        setRequestBody(insertEditImageIntoBody(requestBody, uploaded.url, props.config?.settings.defaultModel || "gpt-image-2"));
+        setRequestBody(insertEditImageIntoBody(requestBody, uploaded.url, props.config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL));
         props.setStatus(`已上传到图床并写入公网链接（${file.name}，${formatFileSize(file.size)}）。`);
         return;
       }
 
       const dataUrl = await readFileAsDataUrl(file);
-      setRequestBody(insertEditImageIntoBody(requestBody, dataUrl, props.config?.settings.defaultModel || "gpt-image-2"));
+      setRequestBody(insertEditImageIntoBody(requestBody, dataUrl, props.config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL));
       props.setStatus(`已将 ${file.name} 转成 base64 data URL，并写入请求体 images[0].image_url（${formatFileSize(file.size)}）。`);
     } catch (error) {
       props.setStatus(`图片写入失败: ${errorMessage(error)}`);

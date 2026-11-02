@@ -6,7 +6,7 @@ import type { AdminConfig } from "@/shared/types";
 import { skillMarkdown } from "@/content/skill-doc";
 import "./docs.css";
 
-type DocsTab = "quick-start" | "openclaw" | "skill" | "examples";
+type DocsTab = "quick-start" | "codex" | "skill" | "examples";
 
 function SnippetCard({
   title,
@@ -65,15 +65,16 @@ export function DocsPage({
     { label: "用途", value: "本地网关接入说明" },
     { label: "接入参数", value: `baseURL + apiKey = ${baseUrl} / ${apiKey}` },
     { label: "启动命令", value: "azt start / npx ai-zero-token start" },
-    { label: "常用接口", value: "/v1/models · /v1/responses · /v1/chat/completions · /v1/images/generations" },
+    { label: "常用接口", value: "/v1/models · /v1/responses · /v1/images/generations · /v1/images/edits" },
   ];
 
   const quickStartSnippet = `baseURL = "${baseUrl}"\napiKey = "${apiKey}"`;
-  const openAIExample = `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  apiKey: "${apiKey}",\n  baseURL: "${baseUrl}",\n});`;
-  const curlExample = `curl ${baseUrl}/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "${config?.settings.defaultModel || "gpt-5.4"}",\n    "messages": [{ "role": "user", "content": "Reply with OK only." }]\n  }'`;
-  const openClawSettings = `Provider: OpenAI compatible\nBase URL: ${baseUrl}\nAPI Key: ${apiKey}\nModel: ${config?.settings.defaultModel || "gpt-5.4"}\nChat endpoint: /chat/completions\nStreaming: enabled\nTools / function calling: enabled`;
-  const openClawToolExample = `curl ${baseUrl}/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "${config?.settings.defaultModel || "gpt-5.4"}",\n    "stream": true,\n    "messages": [{ "role": "user", "content": "Call the weather tool for Shanghai." }],\n    "tools": [{\n      "type": "function",\n      "function": {\n        "name": "get_weather",\n        "description": "Get weather for a city.",\n        "parameters": {\n          "type": "object",\n          "properties": { "city": { "type": "string" } },\n          "required": ["city"]\n        }\n      }\n    }],\n    "tool_choice": "auto"\n  }'`;
-  const responsesExample = `curl ${baseUrl}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "${config?.settings.defaultModel || "gpt-5.4"}",\n    "input": "Reply with OK only."\n  }'`;
+  const defaultModel = config?.settings.defaultModel || "gpt-5.4";
+  const codexBaseUrl = config?.codexBaseUrl || baseUrl.replace(/\/v1\/?$/, "/codex/v1");
+  const openAIExample = `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  apiKey: "${apiKey}",\n  baseURL: "${baseUrl}",\n});\n\nconst response = await client.responses.create({\n  model: "${defaultModel}",\n  input: "Reply with OK only.",\n});\n\nconsole.log(response.output_text);`;
+  const codexPassthroughSettings = `Provider: Responses (Codex passthrough)\nBase URL: ${codexBaseUrl}\nEndpoint: /responses\nAPI Key: ${apiKey}\nModel: ${defaultModel}\nStreaming: SSE passthrough`;
+  const responsesToolExample = `curl ${baseUrl}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "${defaultModel}",\n    "input": "Call the weather tool for Shanghai.",\n    "tools": [{\n      "type": "function",\n      "name": "get_weather",\n      "description": "Get weather for a city.",\n      "parameters": {\n        "type": "object",\n        "properties": { "city": { "type": "string" } },\n        "required": ["city"]\n      }\n    }],\n    "tool_choice": "auto"\n  }'`;
+  const responsesExample = `curl ${baseUrl}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "model": "${defaultModel}",\n    "input": "Reply with OK only."\n  }'`;
 
   async function copyDoc() {
     const ok = await copyText(skillMarkdown);
@@ -129,8 +130,8 @@ export function DocsPage({
             <button className={activeTab === "quick-start" ? "is-active" : ""} type="button" onClick={() => setActiveTab("quick-start")}>
               快速接入
             </button>
-            <button className={activeTab === "openclaw" ? "is-active" : ""} type="button" onClick={() => setActiveTab("openclaw")}>
-              OpenClaw
+            <button className={activeTab === "codex" ? "is-active" : ""} type="button" onClick={() => setActiveTab("codex")}>
+              Codex 透传
             </button>
             <button className={activeTab === "skill" ? "is-active" : ""} type="button" onClick={() => setActiveTab("skill")}>
               Skill.md
@@ -197,7 +198,7 @@ export function DocsPage({
                   </div>
                 </div>
                 <div className="docs-endpoint-grid">
-                  {["/v1/models", "/v1/chat/completions", "/v1/responses", "/v1/images/generations"].map((path) => (
+                  {["/v1/models", "/v1/responses", "/v1/images/generations", "/v1/images/edits"].map((path) => (
                     <div className="docs-endpoint" key={path}>
                       <span>{path}</span>
                       <ArrowRight size={14} />
@@ -208,28 +209,28 @@ export function DocsPage({
             </div>
           ) : null}
 
-          {activeTab === "openclaw" ? (
+          {activeTab === "codex" ? (
             <div className="docs-example-grid">
               <SnippetCard
-                title="OpenClaw 接入参数"
-                description="在 OpenClaw 里选择 OpenAI-compatible provider。"
-                code={openClawSettings}
-                onCopy={() => void copyText(openClawSettings).then((ok) => setStatus(ok ? "OpenClaw 接入参数已复制。" : "复制失败。"))}
+                title="Codex 透传接入参数"
+                description="把 Codex custom provider 的 base URL 指向网关。"
+                code={codexPassthroughSettings}
+                onCopy={() => void copyText(codexPassthroughSettings).then((ok) => setStatus(ok ? "Codex 透传接入参数已复制。" : "复制失败。"))}
               />
               <SnippetCard
-                title="流式工具调用自测"
-                description="验证 stream=true、tools 和 tool_choice 是否能被客户端识别。"
-                code={openClawToolExample}
-                onCopy={() => void copyText(openClawToolExample).then((ok) => setStatus(ok ? "OpenClaw 工具调用示例已复制。" : "复制失败。"))}
+                title="Responses 工具调用自测"
+                description="验证 tools 和 tool_choice 是否被上游识别。"
+                code={responsesToolExample}
+                onCopy={() => void copyText(responsesToolExample).then((ok) => setStatus(ok ? "工具调用示例已复制。" : "复制失败。"))}
               />
               <section className="docs-panel docs-note-panel">
                 <h3>兼容范围</h3>
                 <ul>
-                  <li>支持 <code>stream=true</code>，返回 OpenAI 风格 SSE chunk。</li>
-                  <li>支持 <code>tools</code>、<code>tool_choice</code>、<code>parallel_tool_calls</code> 和 <code>reasoning_effort</code>。</li>
-                  <li>支持 assistant <code>tool_calls</code> 和 tool role 结果消息回传。</li>
-                  <li>请求日志会识别 OpenClaw user agent，并展示安全摘要。</li>
-                  <li><code>/v1/responses</code> 暂不支持流式，<code>n &gt; 1</code> 暂不支持。</li>
+                  <li><code>POST /v1/responses</code> 支持 <code>instructions</code>、<code>input</code>、<code>tools</code>、<code>tool_choice</code>、<code>parallel_tool_calls</code>、<code>text</code> 和 <code>reasoning</code>。</li>
+                  <li><code>/v1/responses</code> 暂不支持流式：请求 <code>stream=true</code> 会返回 501。</li>
+                  <li>需要 SSE 流式时使用 Codex 透传：<code>POST /codex/v1/responses</code> 与 <code>POST /codex/v1/responses/compact</code>。</li>
+                  <li><code>/v1/chat/completions</code> 已下线，请求会返回 HTTP 410 <code>endpoint_retired</code>。</li>
+                  <li>请求日志会识别 Codex user agent，并展示安全摘要。</li>
                 </ul>
               </section>
             </div>
@@ -272,16 +273,10 @@ export function DocsPage({
                 onCopy={() => void copyText(openAIExample).then((ok) => setStatus(ok ? "OpenAI SDK 示例已复制。" : "复制失败。"))}
               />
               <SnippetCard
-                title="curl Chat Completions"
+                title="curl Responses API"
                 description="最直接的接口自测方式。"
-                code={curlExample}
-                onCopy={() => void copyText(curlExample).then((ok) => setStatus(ok ? "Chat Completions 示例已复制。" : "复制失败。"))}
-              />
-              <SnippetCard
-                title="Responses API"
-                description="适用于新式文本生成调用。"
                 code={responsesExample}
-                onCopy={() => void copyText(responsesExample).then((ok) => setStatus(ok ? "Responses API 示例已复制。" : "复制失败。"))}
+                onCopy={() => void copyText(responsesExample).then((ok) => setStatus(ok ? "Responses 示例已复制。" : "复制失败。"))}
               />
               <section className="docs-panel docs-note-panel">
                 <h3>用户如何使用</h3>

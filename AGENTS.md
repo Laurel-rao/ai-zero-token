@@ -203,7 +203,7 @@ Check Codex-specific paths when relevant:
 
 - `/codex/v1/responses`
 - `/codex/v1/responses/compact`
-- `/v1/chat/completions`
+- `/v1/responses` (the retired `/v1/chat/completions` must answer HTTP 410 `endpoint_retired`)
 - model refresh and account rotation settings in the desktop UI
 
 ## Communication

@@ -37,6 +37,12 @@ export type CodexStreamResponse = {
   status: number;
 };
 
+export type CodexInBandFailure = {
+  message: string;
+  code?: string;
+  type?: string;
+};
+
 const URL_KEY_RE = /(url|uri|href|download|preview|thumbnail|image|asset|file)/i;
 const REFERENCE_KEY_RE = /(image|asset|file|media|blob|artifact|download|preview|thumbnail)/i;
 const REFERENCE_VALUE_RE = /^(file|asset|image|img|media|blob)-[\w-]+$/i;
@@ -574,6 +580,51 @@ export function extractCodexTextDeltaFromSsePayload(payload: unknown): string {
   return "";
 }
 
+// The Codex backend reports failures inside an HTTP 200 SSE stream
+// (`{"type":"error"}`, `response.failed`). Without this check those streams look
+// like a successful empty reply.
+export function extractCodexInBandFailure(payload: unknown): CodexInBandFailure | undefined {
+  const event = asRecord(payload);
+  if (!event) {
+    return undefined;
+  }
+
+  if (event.type === "error") {
+    const error = asRecord(event.error);
+    const message = optionalString(error?.message) ?? optionalString(event.message);
+    if (!message) {
+      return undefined;
+    }
+    return { message, code: optionalString(error?.code), type: optionalString(error?.type) };
+  }
+
+  const response = asRecord(event.response) ?? (event.status === "failed" ? event : undefined);
+  if (!response || response.status !== "failed") {
+    return undefined;
+  }
+
+  const error = asRecord(response.error);
+  return {
+    message: optionalString(error?.message) ?? "上游返回失败的回复。",
+    code: optionalString(error?.code),
+    type: optionalString(error?.type),
+  };
+}
+
+export function createCodexInBandFailureError(failure: CodexInBandFailure): Error & {
+  upstreamErrorMessage?: string;
+  upstreamErrorCode?: string;
+} {
+  const detail = failure.code ? `${failure.message}（${failure.code}）` : failure.message;
+  const error = new Error(`调用 Responses API 失败: HTTP 200 上游返回错误 ${detail}`) as Error & {
+    upstreamErrorMessage?: string;
+    upstreamErrorCode?: string;
+  };
+  error.upstreamErrorMessage = failure.message;
+  error.upstreamErrorCode = failure.code;
+  return error;
+}
+
 function pushArtifactCandidate(
   items: ArtifactCandidate[],
   dedupe: Set<string>,
@@ -683,10 +734,12 @@ function extractCodexText(body: string, requestBody: Record<string, unknown>): {
   toolCalls: ChatToolCall[];
   raw: unknown;
   artifacts: ArtifactCandidate[];
+  failure?: CodexInBandFailure;
 } {
   const events = parseSseEvents(body);
   let responsePayload: unknown;
   let accumulated = "";
+  let failure: CodexInBandFailure | undefined;
 
   for (const event of events) {
     if (typeof event.response !== "undefined") {
@@ -705,6 +758,8 @@ function extractCodexText(body: string, requestBody: Record<string, unknown>): {
     if (typeof event.delta === "string" && event.delta) {
       accumulated += event.delta;
     }
+
+    failure = extractCodexInBandFailure(event) ?? failure;
   }
 
   const completedText = extractOutputText(responsePayload);
@@ -724,6 +779,7 @@ function extractCodexText(body: string, requestBody: Record<string, unknown>): {
         events,
       },
       artifacts,
+      failure: failure ?? extractCodexInBandFailure(responsePayload),
     };
   }
 
@@ -736,6 +792,7 @@ function extractCodexText(body: string, requestBody: Record<string, unknown>): {
       events,
     },
     artifacts,
+    failure: failure ?? extractCodexInBandFailure(responsePayload),
   };
 }
 
@@ -745,7 +802,7 @@ export async function askOpenAICodex(params: {
   model?: string;
   system?: string;
   bodyOverride?: Record<string, unknown>;
-}): Promise<{ text: string; toolCalls: ChatToolCall[]; raw: unknown; artifacts: ArtifactCandidate[]; quota?: CodexQuotaSnapshot }> {
+}): Promise<{ text: string; toolCalls: ChatToolCall[]; raw: unknown; artifacts: ArtifactCandidate[]; failure?: CodexInBandFailure; quota?: CodexQuotaSnapshot }> {
   const requestBody = withCompatPromptCacheKey({
     ...buildDefaultRequestBody(params),
     ...(params.bodyOverride ?? {}),

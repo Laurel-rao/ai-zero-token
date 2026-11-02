@@ -198,3 +198,35 @@ td code {
   min-height: 220px;
   max-height: 320px;
 }
+
+.log-detail-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.log-response-head {
+  color: var(--text-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.log-response {
+  display: grid;
+  gap: 14px;
+}
+
+.log-response h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.log-response-pre {
+  min-height: 120px;
+  max-height: 360px;
+}
+
+.log-response-pre.is-error {
+  color: #fecdd3;
+}

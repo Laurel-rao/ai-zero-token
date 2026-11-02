@@ -1,5 +1,6 @@
 import type { AdminConfig, RequestLog } from "@/shared/types";
 import { endpointOrder } from "./endpoints";
+import { DEFAULT_IMAGE_MODEL } from "./image-models";
 import { profileLabel, primaryUsage } from "./profiles";
 
 export function buildSeedRequests(config: AdminConfig, showEmails: boolean): RequestLog[] {
@@ -17,7 +18,7 @@ export function buildSeedRequests(config: AdminConfig, showEmails: boolean): Req
       method: meta.method,
       endpoint,
       account: profileLabel(profile, showEmails),
-      model: endpoint.startsWith("/v1/images/") ? "gpt-image-2" : config.settings.defaultModel,
+      model: endpoint.startsWith("/v1/images/") ? DEFAULT_IMAGE_MODEL : config.settings.defaultModel,
       statusCode: 200,
       durationMs: 860 + index * 230 + primaryUsage(profile) * 8,
       source: index % 2 === 0 ? "管理页" : "CLI",

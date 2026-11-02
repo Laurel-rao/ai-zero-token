@@ -13,18 +13,17 @@ AI Zero Token provides a local CLI, web console, and HTTP gateway that expose sa
 - OpenAI-compatible local API:
   - `GET /v1/models`
   - `POST /v1/responses`
-  - `POST /v1/chat/completions`
   - `POST /v1/images/generations`
   - `POST /v1/images/edits`
 - ChatGPT/Codex OAuth login with local token refresh.
 - Multi-account management in the web console.
 - Account JSON import/export, including ZIP batch import, selected batch export, and export audit indicators.
 - Apply a saved account to local Codex by backing up and updating `~/.codex/auth.json`.
-- `gpt-image-2` image generation and JSON image editing. Paid plans use the Codex Responses image tool; Free plans can optionally use the ChatGPT web image path from Settings.
+- `gpt-image-2.5-sunburst` (default) and `gpt-image-2.5-flare` (both GPT Image 2.5) image generation and JSON image editing, alongside `gpt-image-2`, `gpt-image-1.5`, and the earlier GPT Image models. Paid plans use the Codex Responses image tool; Free plans can optionally use the ChatGPT web image path from Settings.
 - Optional quota-exhaustion auto switch to the next saved API account, including accounts whose quota has not been synced yet, plus configurable quota refresh concurrency.
 - Optional upstream proxy configuration for OAuth, model refresh, and gateway forwarding.
 - Local model discovery from the Codex model cache, with manual network sync from the Codex backend.
-- OpenClaw-oriented chat compatibility for streaming, tool calls, tool result messages, and request-log diagnostics.
+- Responses-style tool/function calling on `/v1/responses`, plus streamed Codex Responses passthrough at `/codex/v1/responses` with request-log diagnostics.
 - Persistent local usage statistics for known token usage, images, success/failure counts, latency, and account/model/endpoint breakdowns.
 
 ## Architecture
@@ -96,7 +95,7 @@ The web console is the recommended entry point:
 - Configure the default text model and upstream proxy.
 - Enable automatic account switching when the active API account has exhausted its recorded quota.
 - Tune global quota refresh concurrency for larger account pools.
-- Test `models`, `responses`, `chat.completions`, `images.generations`, and `images.edits`.
+- Test `models`, `responses`, `images.generations`, and `images.edits`.
 - Review local usage statistics for today, the current gateway process, and lifetime totals.
 - See a global update banner when a newer version is available, with separate GitHub desktop release and npm update paths.
 
@@ -118,34 +117,23 @@ curl http://127.0.0.1:8787/v1/responses \
   -d '{"model":"gpt-5.4","input":"Reply with OK only."}'
 ```
 
-### Chat Completions
+The response body is Responses-shaped: `output_text` plus `output[]` messages. `stream: true` is not implemented on this route and returns HTTP 501; streamed Responses traffic goes through the Codex passthrough routes below.
+
+### Chat Completions (retired)
+
+`POST /v1/chat/completions` was removed. The route is kept as a tombstone that returns HTTP 410 `endpoint_retired`:
 
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
+curl -i http://127.0.0.1:8787/v1/chat/completions \
   -H "content-type: application/json" \
-  -d '{
-    "model": "gpt-5.4",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Reply with OK only."
-      }
-    ]
-  }'
+  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Reply with OK only."}]}'
 ```
 
-For OpenClaw or other OpenAI-compatible coding clients, configure:
-
-```text
-Provider: OpenAI compatible
-Base URL: http://127.0.0.1:8787/v1
-API Key: local
-Model: gpt-5.4
-Streaming: enabled
-Tools / function calling: enabled
+```json
+{"error":{"type":"endpoint_retired","message":"chat.completions 接口已下线，请改用 /v1/responses（Codex 透传：/codex/v1/responses）。"}}
 ```
 
-`/v1/chat/completions` accepts `stream=true`, `tools`, `tool_choice`, `parallel_tool_calls`, assistant `tool_calls`, tool-role result messages, and `reasoning_effort`. OpenClaw requests also appear in the management console request log with safe summaries.
+Use `POST /v1/responses` for text and `POST /v1/images/generations` / `POST /v1/images/edits` for images. Clients that only speak the OpenAI chat-completions API, including OpenClaw's OpenAI-compatible provider mode, can no longer call this gateway; for coding clients the supported path is the Codex custom Responses provider below.
 
 Codex CLI/Desktop can also use the gateway as a custom Responses provider:
 
@@ -169,7 +157,7 @@ When a Codex request includes the `image_generation` tool, Plus, Team, Pro, and 
 curl http://127.0.0.1:8787/v1/images/generations \
   -H "content-type: application/json" \
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "A clean product photo of a red apple on a white background.",
     "size": "1024x1024",
     "quality": "low",
@@ -189,7 +177,7 @@ The gateway returns an OpenAI-style response with `data[].b64_json`.
 curl http://127.0.0.1:8787/v1/images/edits \
   -H "content-type: application/json" \
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "Use this reference image and create a cleaner product advertisement version.",
     "images": [
       {
@@ -281,15 +269,16 @@ AZT_BODY_LIMIT_MB=256 azt start
 
 ChatGPT Images availability and limits are controlled by the upstream account. Plus, Team, Pro, and other paid plans use the Codex Responses `image_generation` tool. Free accounts only use the ChatGPT web image path when `Free account image generation` is enabled in Settings; otherwise they keep the original Codex image-tool path. Free limits are stricter than paid plans and are not published as fixed public numbers; if the web image path is also exhausted, the gateway surfaces the upstream response.
 
-Paid-plan image requests use `gpt-5.4-mini` as the internal orchestration model and pass the requested image model, such as `gpt-image-2`, to the `image_generation` tool. Free-plan web image requests convert the same input to a ChatGPT web image task.
+Paid-plan image requests use `gpt-5.4-mini` as the internal orchestration model and pass the requested image model, such as `gpt-image-2.5-sunburst`, to the `image_generation` tool. Free-plan web image requests convert the same input to a ChatGPT web image task.
 
 For JSON image editing, base64 payloads are about 33% larger than the original image. With the default `128 MiB` body limit, a raw image around `96 MiB` is the practical upper bound before JSON overhead. For larger images or batch workflows, prefer a reachable image URL.
 
 ## Limitations
 
 - This project is intended for local single-user use.
-- `/v1/chat/completions` supports OpenAI-style SSE for `stream=true`; Codex custom providers use the dedicated `/codex/v1/responses` and `/codex/v1/responses/compact` routes for upstream Responses SSE passthrough.
-- `/v1/chat/completions` supports common tool/function-calling fields, but `n > 1` is not supported.
+- `POST /v1/chat/completions` was removed and now returns HTTP 410 `endpoint_retired`; use `POST /v1/responses` for text or the image endpoints for images.
+- `POST /v1/responses` returns HTTP 501 when `stream: true` is requested; Codex custom providers use the dedicated `/codex/v1/responses` and `/codex/v1/responses/compact` routes for upstream Responses SSE passthrough.
+- `/v1/responses` tool/function calling uses the flat Responses tool shape; exact upstream behavior depends on the active Codex model and account.
 - `/v1/images/generations` currently returns `b64_json`; hosted image URLs are not supported.
 - `/v1/images/generations` and `/v1/images/edits` support `n` up to `10`; the gateway runs multiple upstream image jobs when needed and merges the result.
 - `/v1/images/edits` currently supports JSON only. `multipart/form-data`, `mask`, and `file_id` are not yet supported.

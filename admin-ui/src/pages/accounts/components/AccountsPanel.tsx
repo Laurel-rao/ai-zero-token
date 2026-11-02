@@ -20,6 +20,11 @@ import {
 import type { AccountStatItem, BusyAction, ProfileFilter } from "@/shared/lib/app-types";
 import { InfoRow } from "@/shared/components/InfoRow";
 import { formatFullTime } from "@/shared/lib/format";
+import { DEFAULT_IMAGE_MODEL } from "@/shared/lib/image-models";
+
+function imageModelLabel(config: AdminConfig | null): string {
+  return config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL;
+}
 
 type ProfileAction = "activate" | "apply-codex" | "sync-quota" | "remove" | "export";
 
@@ -208,7 +213,7 @@ export function AccountsPanel(props: {
                       </div>
                     </td>
                     <td>
-                      <span className={`badge ${row.imageAbility.ok ? "green" : "orange"}`}>gpt-image-2</span>
+                      <span className={`badge ${row.imageAbility.ok ? "green" : "orange"}`}>{imageModelLabel(props.config)}</span>
                     </td>
                     <td className="action-col" onClick={(event) => event.stopPropagation()}>
                       <button aria-label="刷新额度" className="account-icon-btn" disabled={row.isBusy} onClick={() => props.onAction("sync-quota", profile)} title="刷新额度" type="button">
@@ -255,7 +260,7 @@ function AccountDetailPanel({ profile, props, codexAccountId }: { profile: Profi
         <div className="table-badge-stack is-inline">
           <span className="badge brand">{getPlanType(profile)}</span>
           <span className={`badge ${row.health.tone}`}>{row.health.label}</span>
-          <span className={`badge ${row.imageAbility.ok ? "green" : "orange"}`}>gpt-image-2</span>
+          <span className={`badge ${row.imageAbility.ok ? "green" : "orange"}`}>{imageModelLabel(props.config)}</span>
           <span className={`badge ${exportAudit?.exported ? "orange" : "muted"}`}>{exportAuditLabel}</span>
         </div>
       </div>
@@ -286,7 +291,7 @@ function AccountDetailPanel({ profile, props, codexAccountId }: { profile: Profi
         <InfoRow label="Codex 应用" value={row.codexApplyUnsupported ? row.codexApplyReason : "可应用到本机 Codex"} />
         <InfoRow label="Profile ID" value={profile.profileId} code />
         <InfoRow label="认证状态" value={authStatusText(profile)} />
-        <InfoRow label="生图能力" value={row.imageAbility.ok ? "gpt-image-2 可用" : row.imageAbility.detail} />
+        <InfoRow label="生图能力" value={row.imageAbility.ok ? `${imageModelLabel(props.config)} 可用` : row.imageAbility.detail} />
         <InfoRow label="导出记录" value={formatExportAudit(exportAudit)} />
         <InfoRow label="5 小时重置" value={resetTime(profile, "primary")} />
         <InfoRow label="7 天重置" value={resetTime(profile, "secondary")} />

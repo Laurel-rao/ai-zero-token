@@ -1,5 +1,5 @@
 import type { ChatRequest, ChatResult } from "../types.js";
-import { askOpenAICodex } from "../providers/openai-codex/chat.js";
+import { askOpenAICodex, createCodexInBandFailureError } from "../providers/openai-codex/chat.js";
 import { AuthService } from "./auth-service.js";
 import { ModelService } from "./model-service.js";
 import { RequestThrottleService } from "./request-throttle-service.js";
@@ -35,6 +35,9 @@ export class ChatService {
       ),
     );
     const result = rotation.result;
+    if (result.failure) {
+      throw createCodexInBandFailureError(result.failure);
+    }
 
     return {
       provider,

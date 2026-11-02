@@ -30,34 +30,35 @@ local
 
 ## Vibe Coding Settings
 
-Use these values in an OpenAI-compatible provider setup:
+Use these values for the Responses endpoint and the image endpoints. The gateway no longer serves chat completions:
 
 ```text
 API Base URL: http://127.0.0.1:8787/v1
 API Key: local
 Text model: gpt-5.4
-Image model: gpt-image-2
+Image model: gpt-image-2.5-sunburst
 ```
 
 Use `GET /v1/models` to see the models available through the current local Codex cache.
 
 ## OpenClaw Settings
 
-Use the OpenAI-compatible provider mode in OpenClaw:
+OpenClaw's OpenAI-compatible provider mode posts to `/chat/completions`, which this gateway no longer serves: `POST /v1/chat/completions` returns HTTP 410 `endpoint_retired`. There is no chat-completions provider mode that works against the current gateway.
+
+Connect through the Responses surface instead:
 
 ```text
-Provider: OpenAI compatible
-Base URL: http://127.0.0.1:8787/v1
+Responses API base URL: http://127.0.0.1:8787/v1
+Responses endpoint: POST /v1/responses
+Codex Responses passthrough base URL: http://127.0.0.1:8787/codex/v1
 API Key: local
 Model: gpt-5.4
-Chat endpoint: /chat/completions
-Streaming: enabled
-Tools / function calling: enabled
+Streaming: only on the Codex passthrough routes
 ```
 
-The gateway accepts OpenClaw-style `chat.completions` requests with `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`, assistant `tool_calls`, and tool-role result messages. It translates those fields to the upstream Codex Responses shape and returns OpenAI-style chat responses.
+`POST /v1/responses` accepts `model`, `input` (string or Responses-style input array), `instructions`, `tools` (flat Responses tool objects such as `{ "type": "function", "name": "get_weather", "description": "...", "parameters": { ... } }`), `tool_choice`, `text`, `store`, `parallel_tool_calls`, `include`, `reasoning`, and `experimental_codex`. It returns `output_text` plus the `output[]` message array, and `stream: true` on this route returns HTTP 501.
 
-OpenClaw requests are visible in the management console request log when the client sends an OpenClaw user agent. The log keeps safe summaries only; it does not store full access tokens.
+Requests from clients that send an OpenClaw user agent still appear in the management console request log when they hit a served route. The log keeps safe summaries only; it does not store full access tokens.
 
 ## Codex Custom Provider
 
@@ -127,56 +128,50 @@ curl http://127.0.0.1:8787/v1/responses \
   }'
 ```
 
-## Chat Completions API
+## Chat Completions API (retired)
+
+`POST /v1/chat/completions` was removed. The route is kept as a tombstone so former chat.completions clients get a clear pointer instead of a bare 404:
 
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
+curl -i http://127.0.0.1:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-5.4",
-    "messages": [
-      { "role": "user", "content": "Reply with OK only." }
-    ]
-}'
+  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Reply with OK only."}]}'
 ```
 
-Streaming chat completions:
-
-```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-5.4",
-    "stream": true,
-    "messages": [
-      { "role": "user", "content": "Reply with OK only." }
-    ]
-  }'
+```json
+{"error":{"type":"endpoint_retired","message":"chat.completions 接口已下线，请改用 /v1/responses（Codex 透传：/codex/v1/responses）。"}}
 ```
 
-Tool-call compatible request:
+Use `POST /v1/responses` for text and `POST /v1/images/generations` / `POST /v1/images/edits` for images. The `messages`, `n`, `max_tokens`, and chat streaming fields are not part of the current API.
+
+`stream: true` on `POST /v1/responses` returns HTTP 501 (streaming is not implemented on that route). Streamed Responses traffic is only served by the Codex passthrough routes:
 
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
+curl -N http://127.0.0.1:8787/codex/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"model":"gpt-5.4","input":"Reply with OK only.","stream":true}'
+```
+
+Tool calls on `POST /v1/responses` use the flat Responses tool shape:
+
+```bash
+curl http://127.0.0.1:8787/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.4",
-    "messages": [
-      { "role": "user", "content": "What is the weather tool argument for Shanghai?" }
-    ],
+    "input": "What is the weather tool argument for Shanghai?",
     "tools": [
       {
         "type": "function",
-        "function": {
-          "name": "get_weather",
-          "description": "Get weather for a city.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "city": { "type": "string" }
-            },
-            "required": ["city"]
-          }
+        "name": "get_weather",
+        "description": "Get weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": { "type": "string" }
+          },
+          "required": ["city"]
         }
       }
     ],
@@ -188,11 +183,13 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 Image requests are also routed by account plan. Plus, Team, Pro, and other paid plans use the Codex Responses `image_generation` tool. Free accounts use the ChatGPT web image path only when `Free account image generation` is enabled in Settings; otherwise they keep the original Codex image-tool path.
 
+Supported image models: `gpt-image-1`, `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`, `gpt-image-2.5-sunburst` (default), `gpt-image-2.5-flare`. The optional `quality` field accepts `low`, `medium`, `high`, `xhigh`, `max`, or `auto`; the Codex image channel may report a different effective quality than the one requested.
+
 ```bash
 curl http://127.0.0.1:8787/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "A clean product poster on a white desk with a laptop and glass cup.",
     "size": "1024x1024",
     "quality": "low",
@@ -206,7 +203,7 @@ JSON image edit with a reference image URL or base64 data URL:
 curl http://127.0.0.1:8787/v1/images/edits \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "Use this reference image and make it look like a clean product advertisement.",
     "images": [
       {
@@ -229,21 +226,19 @@ const client = new OpenAI({
   baseURL: "http://127.0.0.1:8787/v1",
 });
 
-const response = await client.chat.completions.create({
+const response = await client.responses.create({
   model: "gpt-5.4",
-  messages: [
-    { role: "user", content: "Reply with OK only." },
-  ],
+  input: "Reply with OK only.",
 });
 
-console.log(response.choices[0]?.message?.content);
+console.log(response.output_text);
 ```
 
 ## Notes
 
 - Login first through the management page or `azt login`.
 - A model appearing in `/v1/models` means the local Codex cache lists it. Final availability still depends on the active account.
-- `stream=true` is supported for `/v1/chat/completions` through OpenAI-style SSE chunks. Codex passthrough streaming is isolated under `/codex/v1/responses`.
-- `n > 1` is not supported for `/v1/chat/completions`.
-- Tool/function calling is supported for common OpenAI-compatible clients, including OpenClaw, but exact upstream behavior still depends on the active Codex model and account.
+- `POST /v1/chat/completions` was removed and now returns HTTP 410 `endpoint_retired`; use `POST /v1/responses` for text or the image endpoints for images.
+- `stream: true` is not supported on `/v1/responses` and returns HTTP 501. Codex passthrough streaming lives under `/codex/v1/responses` and `/codex/v1/responses/compact`.
+- Tool/function calling is supported on `POST /v1/responses` with the flat Responses tool shape, but exact upstream behavior still depends on the active Codex model and account.
 - The default listener is `0.0.0.0:8787`, so local-network clients can call the gateway by using the machine IP.

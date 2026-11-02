@@ -6,6 +6,7 @@ import type { AdminConfig, RequestLog } from "@/shared/types";
 import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, createClientId, errorMessage, readFileAsDataUrl } from "@/shared/lib/app-utils";
 import { formatDuration, formatFullTime, formatJson } from "@/shared/lib/format";
+import { DEFAULT_IMAGE_MODEL } from "@/shared/lib/image-models";
 import { profileLabel } from "@/shared/lib/profiles";
 import { userDisplayName } from "@/shared/lib/users";
 import type { UserRole } from "@/routes/routes";
@@ -36,19 +37,15 @@ import type {
 
 type GenerateTab = "create" | "history" | "report";
 type ImageRatio = "1:1" | "16:9" | "9:16" | "4:3";
-type ReferenceImageState = { id: string; src: string; previewSrc: string; name: string; size: number };
+type ReferenceImageState = { id: string; src: string; uploadSrc?: string; previewSrc: string; name: string; size: number };
 type PromptSuggestion = {
   title: string;
   prompt: string;
   source: "upstream-policy" | "parse-failure";
 };
 
-type ChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string | null;
-    };
-  }>;
+type ResponsesApiResult = {
+  output_text?: string;
 };
 
 type PendingGenerationJob = {
@@ -458,6 +455,68 @@ async function createReferencePreview(src: string, originalSize: number): Promis
       quality = Math.max(0.32, quality - 0.08);
     }
     return preview;
+  } catch {
+    return src;
+  }
+}
+
+const MAX_REFERENCE_UPLOAD_EDGE = 1568;
+const REFERENCE_UPLOAD_TARGET_BYTES = 360 * 1024;
+
+function dataUrlBytes(value: string): number {
+  return Math.floor((value.length * 3) / 4);
+}
+
+function canvasHasTransparency(context: CanvasRenderingContext2D, width: number, height: number): boolean {
+  try {
+    const { data } = context.getImageData(0, 0, width, height);
+    for (let index = 3; index < data.length; index += 4) {
+      if (data[index] < 255) return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+// Reference images are base64'd into the JSON body, so raw originals dominate
+// the "正在加入队列" wait on slow uplinks. Downscale + re-encode for upload only;
+// `src` stays the untouched original for previews and galleries.
+async function createUploadReferenceImage(file: File, src: string): Promise<string> {
+  if (file.size <= 160 * 1024 || src.startsWith("data:image/svg")) {
+    return src;
+  }
+
+  try {
+    const image = await loadImage(src);
+    const longestSide = Math.max(image.naturalWidth, image.naturalHeight);
+    if (!longestSide) return src;
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return src;
+
+    const mightHaveAlpha = /png|webp|gif/i.test(file.type);
+    let scale = Math.min(1, MAX_REFERENCE_UPLOAD_EDGE / longestSide);
+    let quality = 0.86;
+    let encoded = src;
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      // PNG keeps transparency but compresses poorly; JPEG is far smaller for photos/screenshots.
+      const keepAlpha = mightHaveAlpha && canvasHasTransparency(context, canvas.width, canvas.height);
+      encoded = canvas.toDataURL(keepAlpha ? "image/png" : "image/jpeg", quality);
+      if (dataUrlBytes(encoded) <= REFERENCE_UPLOAD_TARGET_BYTES || scale <= 0.25) {
+        break;
+      }
+      scale *= 0.8;
+      quality = Math.max(0.6, quality - 0.08);
+    }
+
+    return dataUrlBytes(encoded) < file.size ? encoded : src;
   } catch {
     return src;
   }
@@ -1430,6 +1489,7 @@ export function GeneratePage(props: {
         return {
           id: createClientId("reference"),
           src,
+          uploadSrc: await createUploadReferenceImage(file, src),
           previewSrc: await createReferencePreview(src, file.size),
           name: file.name || `粘贴图片-${archiveTimestamp()}-${index + 1}.png`,
           size: file.size,
@@ -1551,28 +1611,21 @@ export function GeneratePage(props: {
     props.setStatus("正在优化提示词...");
     try {
       const optimizerSystemPrompt = props.config?.settings.image?.promptOptimizerSystemPrompt?.trim() || DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT;
-      const result = await fetchJson<ChatCompletionResponse>("/v1/chat/completions", {
+      const result = await fetchJson<ResponsesApiResult>("/v1/responses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: formatJson({
           model: props.config?.settings.modelRouting?.promptOptimizerModel || props.config?.settings.defaultModel || "gpt-5.4",
-          messages: [
-            { role: "system", content: optimizerSystemPrompt },
-            {
-              role: "user",
-              content: [
-                `原始提示词：${originalPrompt}`,
-                `目标比例：${ratio}`,
-                `目标尺寸：${selectedSize}`,
-                referenceImages.length > 0 ? `用户会携带 ${referenceImages.length} 张参考图，请强调参考图主体、风格和关键元素的一致性。` : "无参考图，请补足画面细节。",
-              ].join("\n"),
-            },
-          ],
-          temperature: 0.4,
-          max_tokens: 700,
+          instructions: optimizerSystemPrompt,
+          input: [
+            `原始提示词：${originalPrompt}`,
+            `目标比例：${ratio}`,
+            `目标尺寸：${selectedSize}`,
+            referenceImages.length > 0 ? `用户会携带 ${referenceImages.length} 张参考图，请强调参考图主体、风格和关键元素的一致性。` : "无参考图，请补足画面细节。",
+          ].join("\n"),
         }),
       });
-      const optimized = result.choices?.[0]?.message?.content?.trim();
+      const optimized = result.output_text?.trim();
       if (!optimized) {
         props.setStatus("优化失败：模型没有返回提示词。");
         return;
@@ -1604,9 +1657,9 @@ export function GeneratePage(props: {
     try {
       const body = referenceImages.length > 0
         ? {
-            model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
+            model: props.config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL,
             prompt: prompt.trim(),
-            images: referenceImages.map((image) => ({ image_url: image.src })),
+            images: referenceImages.map((image) => ({ image_url: image.uploadSrc ?? image.src })),
             n: imageCount,
             size: selectedSize,
             output_format: outputFormat,
@@ -1614,7 +1667,7 @@ export function GeneratePage(props: {
             _gateway_background: true,
           }
         : {
-            model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
+            model: props.config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL,
             prompt: prompt.trim(),
             n: imageCount,
             size: selectedSize,
@@ -1651,7 +1704,7 @@ export function GeneratePage(props: {
           method: "POST",
           endpoint,
           account: profileLabel(props.config?.profile, props.showEmails),
-          model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
+          model: props.config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL,
           statusCode: 202,
           durationMs: 0,
           source: "生图工作台",

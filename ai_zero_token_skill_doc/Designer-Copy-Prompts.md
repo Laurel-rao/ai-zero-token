@@ -14,7 +14,7 @@
 3. API Key 默认填写 `local`。
 4. 页面包含一个图片需求输入框。
 5. 点击“生成图片”按钮后，调用 `POST /v1/images/generations`。
-6. 生图模型使用 `gpt-image-2`。
+6. 生图模型使用 `gpt-image-2.5-sunburst`。
 7. 生成成功后，在页面中展示图片。
 8. 如果接口失败，需要显示清晰错误提示。
 9. 页面风格要简洁、现代，适合设计师做原型验证。
@@ -47,7 +47,7 @@
 1. 用户输入海报主题、风格、尺寸、文案关键词。
 2. 页面自动拼接成适合 GPT-Image-2 的 prompt。
 3. 点击“生成海报”后调用 `POST /v1/images/generations`。
-4. 模型使用 `gpt-image-2`。
+4. 模型使用 `gpt-image-2.5-sunburst`。
 5. 生成结果展示在页面中。
 6. 支持重新生成、下载图片、复制 prompt。
 7. 网页默认连接本地 AI-Zero-Token 网关：

@@ -127,7 +127,7 @@
       <text class="sf t12 w800 muted" x="48" y="512">最近请求</text>
       <rect x="138" y="494" width="54" height="26" rx="13" fill="#DCFCE7"/>
       <text class="sf t12 w800" x="155" y="511" fill="#15803D">200</text>
-      <text class="sf t13 w700 softText" x="212" y="512">POST /v1/chat/completions · 868ms</text>
+      <text class="sf t13 w700 softText" x="212" y="512">POST /v1/responses · 868ms</text>
     </g>
   </g>
 

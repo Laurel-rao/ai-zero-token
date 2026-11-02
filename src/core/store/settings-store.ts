@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { DEFAULT_IMAGE_MODEL, VERSION_DEFAULT_IMAGE_MODELS } from "../models/image-models.js";
 import type { GatewaySettings } from "../types.js";
 import { getGatewaySqlDatabase } from "./gateway-sql-database.js";
 import {
@@ -18,15 +19,17 @@ const DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
 
 let settingsDbReady = false;
 
+export const CURRENT_SETTINGS_VERSION = 3;
+
 export function createDefaultSettings(): GatewaySettings {
   return {
-    version: 1,
+    version: CURRENT_SETTINGS_VERSION,
     defaultProvider: "openai-codex",
     defaultModel: "gpt-5.4",
     modelRouting: {
       chatModel: "gpt-5.4",
       imageClassifierModel: "gpt-5.6-terra",
-      imageGenerationModel: "gpt-image-2",
+      imageGenerationModel: DEFAULT_IMAGE_MODEL,
       imageOrchestratorModel: "gpt-5.6-terra",
       promptOptimizerModel: "gpt-5.4",
     },
@@ -75,6 +78,7 @@ export function createDefaultSettings(): GatewaySettings {
       corpId: "",
       agentId: "",
       secret: "",
+      notifyImageResult: true,
     },
     server: {
       host: "0.0.0.0",
@@ -86,13 +90,13 @@ export function createDefaultSettings(): GatewaySettings {
 function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
   const defaults = createDefaultSettings();
   return {
-    version: 1,
+    version: CURRENT_SETTINGS_VERSION,
     defaultProvider: parsed.defaultProvider ?? defaults.defaultProvider,
     defaultModel: parsed.defaultModel ?? defaults.defaultModel,
     modelRouting: {
       chatModel: normalizeTrimmedString(parsed.modelRouting?.chatModel, parsed.defaultModel ?? defaults.modelRouting.chatModel, 120),
       imageClassifierModel: normalizeTrimmedString(parsed.modelRouting?.imageClassifierModel, defaults.modelRouting.imageClassifierModel, 120) || defaults.modelRouting.imageClassifierModel,
-      imageGenerationModel: normalizeTrimmedString(parsed.modelRouting?.imageGenerationModel, defaults.modelRouting.imageGenerationModel, 120),
+      imageGenerationModel: normalizeImageGenerationModel(parsed.modelRouting?.imageGenerationModel, defaults.modelRouting.imageGenerationModel, parsed.version),
       imageOrchestratorModel: normalizeTrimmedString(parsed.modelRouting?.imageOrchestratorModel, defaults.modelRouting.imageOrchestratorModel, 120) || defaults.modelRouting.imageOrchestratorModel,
       promptOptimizerModel: normalizeTrimmedString(parsed.modelRouting?.promptOptimizerModel, parsed.defaultModel ?? defaults.modelRouting.promptOptimizerModel, 120),
     },
@@ -131,6 +135,7 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
       corpId: parsed.wecom?.corpId ?? defaults.wecom.corpId,
       agentId: parsed.wecom?.agentId ?? defaults.wecom.agentId,
       secret: parsed.wecom?.secret ?? defaults.wecom.secret,
+      notifyImageResult: parsed.wecom?.notifyImageResult ?? defaults.wecom.notifyImageResult,
     },
     server: {
       host: parsed.server?.host ?? defaults.server.host,
@@ -145,11 +150,15 @@ export async function loadSettings(): Promise<GatewaySettings> {
     const row = await getGatewaySqlDatabase().get<{ valueJson?: unknown }>("SELECT value_json AS valueJson FROM gateway_settings WHERE id = ?", SETTINGS_ROW_ID);
     if (typeof row?.valueJson === "string" && row.valueJson) {
       const parsed = JSON.parse(row.valueJson) as Partial<GatewaySettings>;
-      return normalizeSettings(parsed);
+      const normalized = normalizeSettings(parsed);
+      await persistSettingsVersionUpgrade(parsed.version, normalized);
+      return normalized;
     }
     if (row?.valueJson && typeof row.valueJson === "object" && !Array.isArray(row.valueJson)) {
       const parsed = row.valueJson as Partial<GatewaySettings>;
-      return normalizeSettings(parsed);
+      const normalized = normalizeSettings(parsed);
+      await persistSettingsVersionUpgrade(parsed.version, normalized);
+      return normalized;
     }
 
     const imported = await importLegacySettings();
@@ -216,6 +225,19 @@ function normalizeTrimmedString(value: unknown, fallback: string, maxLength: num
     return fallback;
   }
   return value.trim().slice(0, maxLength);
+}
+
+/**
+ * 生图服务模型迁移：记录里的值只要仍等于它所属结构版本的默认值，就视为管理员没有显式选择过，
+ * 自动升级到当前默认生图模型。结构版本已是当前版本时不再改写，管理员显式选过的模型一律保留。
+ */
+function normalizeImageGenerationModel(value: unknown, fallback: string, storedVersion: unknown): string {
+  const model = normalizeTrimmedString(value, fallback, 120);
+  const version = typeof storedVersion === "number" && Number.isFinite(storedVersion) ? Math.trunc(storedVersion) : 1;
+  if (version < CURRENT_SETTINGS_VERSION && model === VERSION_DEFAULT_IMAGE_MODELS[version]) {
+    return fallback;
+  }
+  return model;
 }
 
 function normalizeImageLimitOverride(value: unknown): ImageLimitsSettings["userOverrides"][number] | null {
@@ -298,6 +320,22 @@ async function ensureSettingsDatabase(): Promise<void> {
     );
   `);
   settingsDbReady = true;
+}
+
+/**
+ * 旧版本设置升级时把结构版本写回，避免每次读取都重新触发默认值迁移，
+ * 也让管理员后续可以再次显式选择旧默认模型。
+ */
+async function persistSettingsVersionUpgrade(storedVersion: unknown, normalized: GatewaySettings): Promise<void> {
+  const version = typeof storedVersion === "number" && Number.isFinite(storedVersion) ? storedVersion : 1;
+  if (version >= normalized.version) {
+    return;
+  }
+  try {
+    await writeSettingsToDatabase(normalized);
+  } catch {
+    // 写回失败不影响本次读取，下次读取会再次尝试迁移。
+  }
 }
 
 async function importLegacySettings(): Promise<GatewaySettings> {

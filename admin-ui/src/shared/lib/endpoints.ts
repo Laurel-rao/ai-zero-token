@@ -1,8 +1,8 @@
 import type { SupportedEndpoint } from "@/shared/types";
 import { formatJson } from "./format";
+import { DEFAULT_IMAGE_MODEL } from "./image-models";
 
 export const endpointOrder = [
-  "/v1/chat/completions",
   "/v1/images/generations",
   "/v1/images/edits",
   "/v1/responses",
@@ -10,7 +10,6 @@ export const endpointOrder = [
 ];
 
 export const tabLabels: Record<string, string> = {
-  "/v1/chat/completions": "Chat",
   "/v1/images/generations": "Images",
   "/v1/images/edits": "Edits",
   "/v1/responses": "Responses",
@@ -28,12 +27,9 @@ export function buildExample(endpoint: string, model: string): string {
   if (endpoint === "/v1/responses") {
     return formatJson({ model, input: "请只回复 OK" });
   }
-  if (endpoint === "/v1/chat/completions") {
-    return formatJson({ model, messages: [{ role: "user", content: "请只回复 OK" }] });
-  }
   if (endpoint === "/v1/images/generations") {
     return formatJson({
-      model: "gpt-image-2",
+      model: DEFAULT_IMAGE_MODEL,
       prompt: "生成一张白底红苹果商品图，构图简洁，光线干净。",
       size: "1024x576",
       quality: "high",
@@ -42,7 +38,7 @@ export function buildExample(endpoint: string, model: string): string {
   }
   if (endpoint === "/v1/images/edits") {
     return formatJson({
-      model: "gpt-image-2",
+      model: DEFAULT_IMAGE_MODEL,
       prompt: "参考这张图，生成一张更适合科技产品广告的版本。",
       images: [{ image_url: "data:image/png;base64,REPLACE_WITH_IMAGE_BASE64" }],
       size: "1024x576",

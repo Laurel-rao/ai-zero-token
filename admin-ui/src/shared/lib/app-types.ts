@@ -103,6 +103,7 @@ export type SettingDraft = {
   wecomCorpId: string;
   wecomAgentId: string;
   wecomSecret: string;
+  wecomNotifyImageResult: boolean;
 };
 
 export type SelectOption<T extends string | number> = {

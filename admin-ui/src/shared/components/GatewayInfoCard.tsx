@@ -1,4 +1,5 @@
 import type { AdminConfig } from "@/shared/types";
+import { DEFAULT_IMAGE_MODEL } from "@/shared/lib/image-models";
 import { InfoRow } from "./InfoRow";
 
 export function GatewayInfoCard(props: { config: AdminConfig | null }) {
@@ -14,7 +15,7 @@ export function GatewayInfoCard(props: { config: AdminConfig | null }) {
         <InfoRow label="管理页" value={props.config?.adminUrl || "-"} code />
         <InfoRow label="Base URL" value={props.config?.baseUrl || "-"} code />
         <InfoRow label="默认模型" value={props.config?.settings.defaultModel || "-"} />
-        <InfoRow label="生图模型" value="gpt-image-2" />
+        <InfoRow label="生图模型" value={props.config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL} />
         <InfoRow label="兼容接口" value={props.config?.supportedEndpoints.map((item) => item.path).join("，") || "-"} />
         <InfoRow label="令牌预览" value={props.config?.profile?.accessTokenPreview || "未登录"} code />
         <InfoRow label="模型来源" value={props.config?.modelCatalog.source || "-"} />

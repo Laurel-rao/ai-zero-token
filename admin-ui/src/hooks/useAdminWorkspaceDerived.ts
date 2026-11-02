@@ -43,7 +43,7 @@ export function useAdminWorkspaceDerived(state: DerivedSource): WorkspaceDerived
     chat: "类 ChatGPT 的对话工作台，支持流式回复和服务端历史。",
     generate: "面向图片生成的专用工作台，支持参考图、比例预设和本地生图历史。",
     usage: "查看今日、本次启动和历史累计的请求、token、图片、账号、模型和错误统计。",
-    tester: "独立接口测试工作区，支持 Chat、Responses、Models 和 gpt-image-2 图片接口。",
+    tester: "独立接口测试工作区，支持 Chat、Responses、Models 和生图模型网关的图片接口。",
     "image-bed": "本地图片上传工作台，使用单个 GitHub token 维护个人图床并返回公网链接。",
     docs: "查看 AI-Zero-Token Skill.md，复制 Base URL、下载文档，并按步骤接入本地网关。",
     network: "单页总览 IPv4、IPv6、DNS、WebRTC、常用平台和版本状态。",

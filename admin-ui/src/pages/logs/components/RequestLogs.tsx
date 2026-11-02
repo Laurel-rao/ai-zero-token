@@ -1,11 +1,38 @@
 import { useEffect, useMemo, useState } from "react";
-import { Copy, Filter, Search } from "lucide-react";
+import { Copy, Eye, Filter, Search } from "lucide-react";
 import type { AdminConfig, RequestLog } from "@/shared/types";
 import { copyText } from "@/shared/lib/app-utils";
 import { formatDuration, formatTime } from "@/shared/lib/format";
 import { formatJson } from "@/shared/lib/format";
 import { userDisplayName, userOptionLabel } from "@/shared/lib/users";
+import { Modal } from "@/shared/components/Modal";
 import type { UserRole } from "@/routes/routes";
+
+function logResponseBody(log: RequestLog): string {
+  const response = log.details?.response;
+  if (!response || typeof response !== "object") {
+    return "";
+  }
+  const record = response as Record<string, unknown>;
+  if (typeof record.textPreview === "string" && record.textPreview) {
+    return record.textPreview;
+  }
+  return formatJson(response);
+}
+
+function logErrorMessage(log: RequestLog): string {
+  const error = log.details?.error;
+  if (!error || typeof error !== "object") {
+    return "";
+  }
+  const record = error as Record<string, unknown>;
+  const message = typeof record.message === "string" ? record.message : "";
+  const code = typeof record.upstreamErrorCode === "string" ? record.upstreamErrorCode : "";
+  if (!message) {
+    return "";
+  }
+  return code && !message.includes(code) ? `${message}（${code}）` : message;
+}
 
 export function RequestLogs(props: {
   logs: RequestLog[];
@@ -21,6 +48,7 @@ export function RequestLogs(props: {
   const [statusFilter, setStatusFilter] = useState("all");
   const [customOwner, setCustomOwner] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [responseLogId, setResponseLogId] = useState<string | null>(null);
 
   useEffect(() => {
     if (props.logs.length === 0) {
@@ -65,6 +93,7 @@ export function RequestLogs(props: {
   }, [methodFilter, props.config, props.logs, query, sourceFilter, statusFilter]);
 
   const selectedLog = filteredLogs.find((item) => item.id === selectedId) || filteredLogs[0] || null;
+  const responseLog = responseLogId ? props.logs.find((item) => item.id === responseLogId) || null : null;
 
   function copySelectedLog() {
     if (!selectedLog) return;
@@ -226,10 +255,16 @@ export function RequestLogs(props: {
               <h3>日志详情</h3>
               <p>{formatTime(selectedLog.time)} · {selectedLog.method} {selectedLog.endpoint}</p>
             </div>
-            <button className="btn-secondary" type="button" onClick={copySelectedLog}>
-              <Copy size={16} />
-              复制详情
-            </button>
+            <div className="log-detail-head-actions">
+              <button className="btn-secondary" type="button" onClick={() => setResponseLogId(selectedLog.id)}>
+                <Eye size={16} />
+                查看响应内容
+              </button>
+              <button className="btn-secondary" type="button" onClick={copySelectedLog}>
+                <Copy size={16} />
+                复制详情
+              </button>
+            </div>
           </div>
           <div className="log-detail-grid">
             <div className="log-detail-meta">
@@ -246,6 +281,31 @@ export function RequestLogs(props: {
           </div>
         </div>
       )}
+      {responseLog ? (
+        <Modal
+          title="响应内容"
+          wide
+          onClose={() => setResponseLogId(null)}
+          headerContent={
+            <span className="log-response-head">
+              {formatTime(responseLog.time)} · {responseLog.method} {responseLog.endpoint} · {responseLog.statusCode}
+            </span>
+          }
+        >
+          <div className="log-response">
+            <section>
+              <h4>响应体</h4>
+              <pre className="pre log-response-pre">{logResponseBody(responseLog) || "（该请求未记录响应体）"}</pre>
+            </section>
+            {logErrorMessage(responseLog) ? (
+              <section>
+                <h4>错误信息</h4>
+                <pre className="pre log-response-pre is-error">{logErrorMessage(responseLog)}</pre>
+              </section>
+            ) : null}
+          </div>
+        </Modal>
+      ) : null}
     </section>
   );
 }

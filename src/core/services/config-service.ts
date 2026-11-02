@@ -1,5 +1,5 @@
 import type { GatewaySettings, ProviderId } from "../types.js";
-import { isSupportedImageModel } from "../models/image-models.js";
+import { DEFAULT_IMAGE_MODEL, isSupportedImageModel } from "../models/image-models.js";
 import { getPreferredCodexModel, hasCodexModel } from "../models/openai-codex-models.js";
 import {
   createDefaultSettings,
@@ -147,7 +147,7 @@ export class ConfigService {
 
   async getImageGenerationModel(): Promise<string> {
     const model = (await this.getSettings()).modelRouting.imageGenerationModel;
-    return isSupportedImageModel(model) ? model : "gpt-image-2";
+    return isSupportedImageModel(model) ? model : DEFAULT_IMAGE_MODEL;
   }
 
   async setDefaultModel(model: string, provider: ProviderId = "openai-codex"): Promise<GatewaySettings> {
@@ -257,7 +257,7 @@ export class ConfigService {
       promptOptimizerSystemPrompt?: string;
       limits?: Partial<GatewaySettings["image"]["limits"]>;
     };
-    wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string };
+    wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
     server?: { port: number };
   }): Promise<GatewaySettings> {
     const settings = await this.getSettings();
@@ -392,6 +392,7 @@ export class ConfigService {
       const corpId = params.wecom.corpId?.trim() ?? next.wecom.corpId;
       const agentId = params.wecom.agentId?.trim() ?? next.wecom.agentId;
       const secret = params.wecom.secret?.trim() ?? next.wecom.secret;
+      const notifyImageResult = params.wecom.notifyImageResult ?? next.wecom.notifyImageResult;
       if (enabled && (!corpId || !agentId || !secret)) {
         throw new Error("启用企业微信扫码登录时必须填写企业 ID、AgentID 和 Secret。");
       }
@@ -402,6 +403,7 @@ export class ConfigService {
           corpId,
           agentId,
           secret,
+          notifyImageResult,
         },
       };
     }

@@ -10,6 +10,7 @@ import { fetchJson } from "@/shared/api";
 import type { AdminConfig } from "@/shared/types";
 import type { BusyAction, ModalImage, ModalImageItem, PreviewImage } from "@/shared/lib/app-types";
 import { copyText, errorMessage } from "@/shared/lib/app-utils";
+import { DEFAULT_IMAGE_MODEL } from "@/shared/lib/image-models";
 import { formatFileSize, formatFullTime } from "@/shared/lib/format";
 import { Modal } from "@/shared/components/Modal";
 
@@ -120,7 +121,7 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   attachments?: ChatAttachment[];
-  status: "success" | "running" | "failed";
+  status: "success" | "running" | "failed" | "interrupted";
   model?: string;
   error?: string;
   createdAt: number;
@@ -183,14 +184,6 @@ type ChatImageGenerationMetadata = {
 
 type ChatImagePromptCandidate = ChatImageDecision & {
   score: number;
-};
-
-type ChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string | null;
-    };
-  }>;
 };
 
 type ChatImageJobResponse = {
@@ -2398,7 +2391,7 @@ export function ChatPage(props: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: props.config?.settings.modelRouting?.imageGenerationModel || "gpt-image-2",
+          model: props.config?.settings.modelRouting?.imageGenerationModel || DEFAULT_IMAGE_MODEL,
           prompt,
           n: 1,
           size: CHAT_IMAGE_GENERATION_SIZE,
@@ -2664,7 +2657,7 @@ export function ChatPage(props: {
 
   async function retryMessage(message: ChatMessage) {
     const targetId = activeId;
-    if (!targetId || message.status !== "failed" || message.role !== "assistant" || streamControllersRef.current.has(targetId)) {
+    if (!targetId || (message.status !== "failed" && message.status !== "interrupted") || message.role !== "assistant" || streamControllersRef.current.has(targetId)) {
       return;
     }
     shouldStickToBottomRef.current = true;
@@ -3143,6 +3136,7 @@ export function ChatPage(props: {
                     <time className="chat-message-time is-compact" dateTime={new Date(message.createdAt).toISOString()} title={formatFullTime(message.createdAt)}>{formatHourMinute(message.createdAt)}</time>
                     {message.status === "running" ? <em>生成中</em> : null}
                     {message.status === "failed" ? <em className="is-error">失败</em> : null}
+                    {message.status === "interrupted" ? <em className="is-error">已中断</em> : null}
                     <button
                       className="chat-message-copy"
                       type="button"
@@ -3154,7 +3148,7 @@ export function ChatPage(props: {
                       {copiedMessageId === message.id ? <Check size={14} /> : <Copy size={14} />}
                       <span className="chat-action-label">{copiedMessageId === message.id ? "已复制" : "复制"}</span>
                     </button>
-                    {message.role === "assistant" && message.status === "failed" ? (
+                    {message.role === "assistant" && (message.status === "failed" || message.status === "interrupted") ? (
                       <button className="chat-retry-btn" type="button" onClick={() => void retryMessage(message)} disabled={activeConversationSending} title="重新生成" aria-label="重新生成">
                         <RefreshCw size={14} />
                         <span className="chat-action-label">重发</span>

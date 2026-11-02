@@ -119,7 +119,7 @@ export type GenerationReport = {
 };
 
 export type ChatMessageRole = "user" | "assistant";
-export type ChatMessageStatus = "success" | "running" | "failed";
+export type ChatMessageStatus = "success" | "running" | "failed" | "interrupted";
 
 export type ChatAttachmentKind = "image" | "text" | "file";
 
@@ -943,12 +943,11 @@ export class GatewayDatabaseService {
     return result.changes > 0;
   }
 
-  async listRequestLogs(limit = 100, owner?: string, options?: { includeDetails?: boolean }): Promise<PersistedRequestLog[]> {
+  async listRequestLogs(limit = 100, owner?: string): Promise<PersistedRequestLog[]> {
     await this.init();
-    const includeDetails = Boolean(options?.includeDetails);
     const rows = await this.database.all(`
         SELECT id, owner, time, method, endpoint, account, model, status_code AS statusCode,
-               duration_ms AS durationMs, source${includeDetails ? ", details_json AS detailsJson" : ""}
+               duration_ms AS durationMs, source, details_json AS detailsJson
         FROM request_logs
         WHERE (? IS NULL OR owner = ?)
         ORDER BY time DESC
@@ -966,7 +965,7 @@ export class GatewayDatabaseService {
       statusCode: Number(row.statusCode),
       durationMs: Number(row.durationMs),
       source: String(row.source),
-      details: includeDetails ? parseJsonObject(row.detailsJson) : undefined,
+      details: parseJsonObject(row.detailsJson),
     }));
   }
 
@@ -1035,6 +1034,18 @@ export class GatewayDatabaseService {
             updated_at = ?,
             error = ?
         WHERE status = 'running'
+      `, Date.now(), reason);
+    return result.changes;
+  }
+
+  async interruptRunningChatMessages(reason = "服务重启，回复已中断。"): Promise<number> {
+    await this.init();
+    const result = await this.database.run(`
+        UPDATE chat_messages
+        SET status = 'interrupted',
+            updated_at = ?,
+            error = ?
+        WHERE status = 'running' AND role = 'assistant'
       `, Date.now(), reason);
     return result.changes;
   }
@@ -1787,7 +1798,7 @@ export class GatewayDatabaseService {
 
   private mapChatMessage(row: Record<string, unknown>): ChatMessage {
     const role = row.role === "assistant" ? "assistant" : "user";
-    const status = row.status === "running" || row.status === "failed" ? row.status : "success";
+    const status = row.status === "running" || row.status === "failed" || row.status === "interrupted" ? row.status : "success";
     const metadata = parseJsonObject(row.metadataJson);
     return {
       id: String(row.id),

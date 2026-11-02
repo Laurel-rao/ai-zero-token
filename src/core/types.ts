@@ -152,7 +152,8 @@ export type GatewayStatus = {
 };
 
 export type GatewaySettings = {
-  version: 1;
+  /** 设置结构版本；版本 2 默认生图模型为 gpt-image-2.5-flare，版本 3 起为 gpt-image-2.5-sunburst。 */
+  version: 1 | 2 | 3;
   defaultProvider: ProviderId;
   defaultModel: string;
   modelRouting: {
@@ -212,6 +213,7 @@ export type GatewaySettings = {
     corpId: string;
     agentId: string;
     secret: string;
+    notifyImageResult: boolean;
   };
   server: {
     host: string;

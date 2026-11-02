@@ -187,7 +187,7 @@ function accountCard(x, y, email, plan, health, used, tone = "green", active = f
 
 function table(x, y, w, h) {
   const rows = [
-    ["03:55", "POST", "/v1/chat/completions", "gpt-5.4", "200", "868ms"],
+    ["03:55", "POST", "/v1/responses", "gpt-5.4", "200", "868ms"],
     ["03:40", "POST", "/v1/images/generations", "gpt-image-2", "200", "1.10s"],
     ["03:25", "POST", "/v1/images/edits", "gpt-image-2", "200", "1.33s"],
     ["03:10", "POST", "/v1/responses", "gpt-5.4", "200", "2.35s"],
@@ -305,7 +305,7 @@ const pages = {
     `${testerPanel(296, 110, 700, 760)}
       ${rect(1024, 110, 314, 760, 18, colors.panel, colors.line)}
       ${text(1048, 148, "接口说明", 20, colors.text, 850)}
-      ${text(1048, 184, "当前 Endpoint", 12, colors.muted, 700)}${text(1048, 210, "POST /v1/chat/completions", 14, colors.text, 800)}
+      ${text(1048, 184, "当前 Endpoint", 12, colors.muted, 700)}${text(1048, 210, "POST /v1/responses", 14, colors.text, 800)}
       ${text(1048, 258, "默认模型", 12, colors.muted, 700)}${text(1048, 284, "gpt-5.4", 14, colors.text, 800)}
       ${text(1048, 332, "图片能力", 12, colors.muted, 700)}${pill(1048, 350, "gpt-image-2 可用", "green", 126)}
       ${rect(1048, 414, 242, 180, 16, "#F8FAFC", colors.line)}

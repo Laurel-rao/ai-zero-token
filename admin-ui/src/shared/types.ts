@@ -114,6 +114,7 @@ export type GatewaySettings = {
     corpId: string;
     agentId: string;
     secret: string;
+    notifyImageResult: boolean;
   };
   server: {
     host: string;

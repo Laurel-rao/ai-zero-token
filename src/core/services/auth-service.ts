@@ -21,7 +21,7 @@ import {
   loginOpenAICodex,
   refreshOpenAICodexToken,
 } from "../providers/openai-codex/oauth.js";
-import { askOpenAICodex } from "../providers/openai-codex/chat.js";
+import { askOpenAICodex, createCodexInBandFailureError } from "../providers/openai-codex/chat.js";
 import { isTransientHttpError } from "../providers/http-client.js";
 import { ConfigService } from "./config-service.js";
 import {
@@ -1019,6 +1019,10 @@ export class AuthService {
           text: { verbosity: "low" },
         },
       });
+      // A 200 stream can still carry an upstream failure; never report it as a healthy ping.
+      if (result.failure) {
+        throw createCodexInBandFailureError(result.failure);
+      }
       await this.recordProfileRequestSuccess(usableProfile.profileId, result.quota, provider, {
         skipAutoSwitch: options?.skipAutoSwitch,
       });

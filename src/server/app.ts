@@ -18,15 +18,23 @@ import cors from "@fastify/cors";
 import { Zip, ZipPassThrough } from "fflate";
 import { z } from "zod";
 import { createGatewayContext } from "../core/context.js";
+import { DEFAULT_IMAGE_MODEL } from "../core/models/image-models.js";
 import type { ChatResult, GatewaySettings, OAuthProfile, ProfileSummary } from "../core/types.js";
 import { isTransientHttpError, requestText } from "../core/providers/http-client.js";
-import { extractCodexTextDeltaFromSsePayload, streamOpenAICodex } from "../core/providers/openai-codex/chat.js";
+import {
+  createCodexInBandFailureError,
+  extractCodexInBandFailure,
+  extractCodexTextDeltaFromSsePayload,
+  streamOpenAICodex,
+  type CodexInBandFailure,
+} from "../core/providers/openai-codex/chat.js";
 import { generateChatGPTWebImage, type ChatGPTWebImageResult } from "../core/providers/openai-codex/chatgpt-web-image.js";
 import {
   startOpenAICodexRemoteLogin,
   type OpenAICodexRemoteLoginSession,
 } from "../core/providers/openai-codex/oauth.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
+import { notifyWecomImageResult } from "../core/services/wecom-message-service.js";
 import type { ChatAttachment, ChatConversationDetail, ChatMessage, GatewayUserRole } from "../core/services/gateway-database-service.js";
 import { getBrandingAssetsDir, getChatAttachmentAssetsDir, getGenerationAssetsDir } from "../core/store/state-paths.js";
 
@@ -37,6 +45,10 @@ const BYTES_PER_MIB = 1024 * 1024;
 const MAX_GATEWAY_REQUEST_LOGS = 100;
 const MAX_PERSISTED_REQUEST_LOGS = 200;
 const MAX_CODEX_RESPONSE_PROFILE_BINDINGS = 5000;
+const CHAT_COMPLETIONS_RETIRED_MESSAGE = "chat.completions 接口已下线，请改用 /v1/responses（Codex 透传：/codex/v1/responses）。";
+// Workbench replies are user-facing prose, so their request-log preview keeps
+// more text than the 300-character default used for API response summaries.
+const CHAT_LOG_TEXT_PREVIEW_CHARS = 2000;
 const CODEX_STREAM_DRAIN_AFTER_CLIENT_CLOSE_MS = 30_000;
 const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_ROUTE_BODY_LIMIT_BYTES = 128 * BYTES_PER_MIB;
@@ -1011,55 +1023,6 @@ const responsesBodySchema = z.object({
     .optional(),
 }).passthrough();
 
-const chatCompletionContentPartSchema = z
-  .object({
-    type: z.string().optional(),
-    text: z.string().optional(),
-    image_url: z
-      .union([
-        z.string(),
-        z
-          .object({
-            url: z.string().optional(),
-          })
-          .passthrough(),
-      ])
-      .optional(),
-  })
-  .passthrough();
-
-const chatCompletionMessageSchema = z
-  .object({
-    role: z.string().optional(),
-    content: z.union([z.string(), z.array(chatCompletionContentPartSchema)]).optional(),
-    name: z.string().optional(),
-    tool_call_id: z.string().optional(),
-  })
-  .passthrough();
-
-const chatCompletionsBodySchema = z
-  .object({
-    model: z.string().optional(),
-    messages: z.array(chatCompletionMessageSchema).min(1),
-    n: z.number().int().positive().optional(),
-    stream: z.boolean().optional(),
-    tools: z.array(z.unknown()).optional(),
-    tool_choice: z.unknown().optional(),
-    response_format: z.unknown().optional(),
-    parallel_tool_calls: z.boolean().optional(),
-    store: z.boolean().optional(),
-    temperature: z.number().optional(),
-    top_p: z.number().optional(),
-    max_tokens: z.number().optional(),
-    max_completion_tokens: z.number().optional(),
-    presence_penalty: z.number().optional(),
-    frequency_penalty: z.number().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-    stop: z.union([z.string(), z.array(z.string())]).optional(),
-    user: z.string().optional(),
-  })
-  .passthrough();
-
 const adminLoginSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1),
@@ -1229,6 +1192,7 @@ const settingsUpdateSchema = z.object({
       corpId: z.string().optional(),
       agentId: z.string().optional(),
       secret: z.string().optional(),
+      notifyImageResult: z.boolean().optional(),
     })
     .optional(),
   server: z
@@ -1461,7 +1425,6 @@ const chatMessageImageGenerationBodySchema = z.object({
 const requestLogsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   owner: z.string().min(1).max(120).optional(),
-  details: booleanQueryParam,
 });
 
 const gatewayUsersQuerySchema = z.object({
@@ -1474,7 +1437,7 @@ const imageGenerationsBodySchema = z
     prompt: z.string().min(1),
     model: z.string().optional(),
     n: z.number().int().positive().max(10).optional(),
-    quality: z.enum(["low", "medium", "high", "auto"]).optional(),
+    quality: z.enum(["low", "medium", "high", "xhigh", "max", "auto"]).optional(),
     size: z.string().min(1).optional(),
     background: z.enum(["transparent", "opaque", "auto"]).optional(),
     output_format: z.enum(["png", "webp", "jpeg"]).optional(),
@@ -1505,7 +1468,7 @@ const imageEditsBodySchema = z
     mask: imageReferenceSchema.optional(),
     model: z.string().optional(),
     n: z.number().int().positive().max(10).optional(),
-    quality: z.enum(["low", "medium", "high", "auto"]).optional(),
+    quality: z.enum(["low", "medium", "high", "xhigh", "max", "auto"]).optional(),
     size: z.string().min(1).optional(),
     background: z.enum(["transparent", "opaque", "auto"]).optional(),
     output_format: z.enum(["png", "webp", "jpeg"]).optional(),
@@ -1646,24 +1609,6 @@ function buildResponsesUsagePayload(usage: UsageTokenUsage | null): Record<strin
   };
 }
 
-function buildChatCompletionsUsagePayload(usage: UsageTokenUsage | null): Record<string, unknown> | undefined {
-  if (!usage) {
-    return undefined;
-  }
-  const promptTokens = tokenNumber(usage.inputTokens) ?? 0;
-  const completionTokens = tokenNumber(usage.outputTokens) ?? 0;
-  const totalTokens = tokenNumber(usage.totalTokens) ?? promptTokens + completionTokens;
-  const cacheReadTokens = tokenNumber(usage.cacheReadTokens);
-  const cacheCreationTokens = tokenNumber(usage.cacheCreationTokens);
-  return {
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-    total_tokens: totalTokens,
-    ...(cacheReadTokens !== null ? { prompt_tokens_details: { cached_tokens: cacheReadTokens } } : {}),
-    ...(cacheCreationTokens !== null ? { cache_creation_input_tokens: cacheCreationTokens } : {}),
-  };
-}
-
 function extractUsageErrorType(details: Record<string, unknown> | undefined, statusCode: number): string | undefined {
   const error = isObjectRecord(details?.error) ? details.error : null;
   const upstreamErrorCode = error?.upstreamErrorCode;
@@ -1793,186 +1738,6 @@ function normalizeResponseInput(input: unknown): unknown {
   return input;
 }
 
-function normalizeChatRole(role?: string): string {
-  if (role === "developer") {
-    return "system";
-  }
-
-  return role ?? "user";
-}
-
-function safeJsonStringify(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (typeof value === "undefined" || value === null) {
-    return "";
-  }
-
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function normalizeChatContentPart(
-  part: z.infer<typeof chatCompletionContentPartSchema>,
-  textType: "input_text" | "output_text",
-): Record<string, unknown> {
-  if (part.type === "image_url") {
-    const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
-    if (!url) {
-      throw new Error("chat.completions 消息里的 image_url 缺少 url。");
-    }
-
-    return {
-      type: "input_image",
-      image_url: url,
-    };
-  }
-
-  if (part.type === "input_image") {
-    return part;
-  }
-
-  const text = typeof part.text === "string" ? part.text : "";
-  return {
-    type: textType,
-    text,
-  };
-}
-
-function normalizeChatContent(
-  content: z.infer<typeof chatCompletionMessageSchema>["content"],
-  role?: string,
-): Array<Record<string, unknown>> {
-  const textType = role === "assistant" ? "output_text" : "input_text";
-
-  if (typeof content === "string") {
-    return [{ type: textType, text: content }];
-  }
-
-  if (!Array.isArray(content) || content.length === 0) {
-    return [{ type: textType, text: "" }];
-  }
-
-  return content.map((part) => normalizeChatContentPart(part, textType));
-}
-
-function normalizeChatMessages(
-  messages: z.infer<typeof chatCompletionsBodySchema>["messages"],
-): Array<Record<string, unknown>> {
-  const normalized: Array<Record<string, unknown>> = [];
-
-  for (const message of messages) {
-    const record = message as Record<string, unknown>;
-
-    if (message.role === "tool") {
-      normalized.push({
-        type: "function_call_output",
-        call_id: message.tool_call_id,
-        output: typeof message.content === "string" ? message.content : safeJsonStringify(message.content),
-      });
-      continue;
-    }
-
-    normalized.push({
-      role: normalizeChatRole(message.role),
-      content: normalizeChatContent(message.content, message.role),
-      ...(message.name ? { name: message.name } : {}),
-      ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
-    });
-
-    const toolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : [];
-    for (const toolCall of toolCalls) {
-      const call = toolCall && typeof toolCall === "object" ? (toolCall as Record<string, unknown>) : {};
-      const fn = call.function && typeof call.function === "object" ? (call.function as Record<string, unknown>) : {};
-      const name = typeof fn.name === "string" ? fn.name : undefined;
-      if (!name) {
-        continue;
-      }
-
-      normalized.push({
-        type: "function_call",
-        call_id: typeof call.id === "string" ? call.id : `call_${normalized.length}`,
-        name,
-        arguments: safeJsonStringify(fn.arguments),
-      });
-    }
-  }
-
-  return normalized;
-}
-
-function normalizeChatTools(tools: unknown[] | undefined): unknown[] | undefined {
-  if (!tools) {
-    return undefined;
-  }
-
-  return tools.map((tool) => {
-    if (!tool || typeof tool !== "object") {
-      return tool;
-    }
-
-    const record = tool as Record<string, unknown>;
-    const fn = record.function && typeof record.function === "object" ? (record.function as Record<string, unknown>) : null;
-    if (record.type !== "function" || !fn) {
-      return tool;
-    }
-
-    return {
-      type: "function",
-      name: fn.name,
-      description: fn.description,
-      parameters: fn.parameters,
-    };
-  });
-}
-
-function normalizeChatToolChoice(toolChoice: unknown): unknown {
-  if (!toolChoice || typeof toolChoice !== "object") {
-    return toolChoice;
-  }
-
-  const record = toolChoice as Record<string, unknown>;
-  const fn = record.function && typeof record.function === "object" ? (record.function as Record<string, unknown>) : null;
-  if (record.type === "function" && fn && typeof fn.name === "string") {
-    return {
-      type: "function",
-      name: fn.name,
-    };
-  }
-
-  return toolChoice;
-}
-
-function normalizeReasoningEffort(value: unknown): string | undefined {
-  if (value === "low" || value === "medium" || value === "high") {
-    return value;
-  }
-  if (value === "minimal") {
-    return "low";
-  }
-  if (value === "xhigh") {
-    return "high";
-  }
-
-  return undefined;
-}
-
-function normalizeChatReasoning(data: z.infer<typeof chatCompletionsBodySchema>): Record<string, unknown> | undefined {
-  const record = data as Record<string, unknown>;
-  const existing = record.reasoning;
-  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
-    return existing as Record<string, unknown>;
-  }
-
-  const effort = normalizeReasoningEffort(record.reasoning_effort);
-  return effort ? { effort } : undefined;
-}
-
 function truncateForLog(value: string, maxLength = 300): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxLength) {
@@ -1980,40 +1745,6 @@ function truncateForLog(value: string, maxLength = 300): string {
   }
 
   return `${normalized.slice(0, maxLength)}...`;
-}
-
-function extractChatMessageText(message: z.infer<typeof chatCompletionMessageSchema>): string {
-  if (typeof message.content === "string") {
-    return message.content;
-  }
-
-  if (!Array.isArray(message.content)) {
-    return "";
-  }
-
-  return message.content
-    .map((part) => (typeof part.text === "string" ? part.text : part.image_url ? "[image]" : ""))
-    .filter(Boolean)
-    .join("\n");
-}
-
-function countRoles(messages: z.infer<typeof chatCompletionsBodySchema>["messages"]): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const message of messages) {
-    const role = message.role ?? "user";
-    counts[role] = (counts[role] ?? 0) + 1;
-  }
-  return counts;
-}
-
-function summarizeRecentMessages(
-  messages: z.infer<typeof chatCompletionsBodySchema>["messages"],
-): Array<Record<string, unknown>> {
-  return messages.slice(-8).map((message) => ({
-    role: message.role ?? "user",
-    textPreview: truncateForLog(extractChatMessageText(message), 180),
-    toolCallId: message.tool_call_id,
-  }));
 }
 
 function summarizeToolNames(tools: unknown[] | undefined): string[] {
@@ -2135,7 +1866,7 @@ function extractCodexImageGenerationRequest(body: Record<string, unknown>): Code
   return {
     prompt: extractTextInput(body.input),
     inputImages: extractImageInputs(body.input),
-    imageModel: typeof imageTool?.model === "string" && imageTool.model.trim() ? imageTool.model.trim() : "gpt-image-2",
+    imageModel: typeof imageTool?.model === "string" && imageTool.model.trim() ? imageTool.model.trim() : DEFAULT_IMAGE_MODEL,
     size: typeof imageTool?.size === "string" && imageTool.size.trim() ? imageTool.size.trim() : undefined,
     outputFormat: normalizeImageOutputFormat(imageTool?.output_format),
   };
@@ -2234,27 +1965,6 @@ async function sendSyntheticCodexImageSse(params: {
   };
 }
 
-function summarizeChatCompletionsRequest(data: z.infer<typeof chatCompletionsBodySchema>): Record<string, unknown> {
-  const lastUserMessage = [...data.messages].reverse().find((message) => (message.role ?? "user") === "user");
-  const toolNames = summarizeToolNames(data.tools);
-  return {
-    endpoint: "/v1/chat/completions",
-    model: data.model ?? "default",
-    stream: data.stream ?? false,
-    messageCount: data.messages.length,
-    roleCounts: countRoles(data.messages),
-    recentMessages: summarizeRecentMessages(data.messages),
-    lastUserTextPreview: lastUserMessage ? truncateForLog(extractChatMessageText(lastUserMessage)) : "",
-    toolCount: data.tools?.length ?? 0,
-    toolNames: toolNames.slice(0, 50),
-    toolNamesTruncated: toolNames.length > 50,
-    toolChoice: typeof data.tool_choice === "undefined" ? "default" : typeof data.tool_choice,
-    parallelToolCalls: data.parallel_tool_calls,
-    hasReasoning: Boolean((data as Record<string, unknown>).reasoning || (data as Record<string, unknown>).reasoning_effort),
-    maxTokens: data.max_completion_tokens ?? data.max_tokens,
-  };
-}
-
 function summarizeCodexChatBody(body: Record<string, unknown>): Record<string, unknown> {
   const toolNames = summarizeToolNames(Array.isArray(body.tools) ? body.tools : undefined);
   return {
@@ -2328,34 +2038,6 @@ function requestSourceFromUserAgent(userAgent: unknown): string {
     return "OpenClaw";
   }
   return "API";
-}
-
-function createChatCompletionsCodexBody(
-  data: z.infer<typeof chatCompletionsBodySchema>,
-): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    store: false,
-    stream: true,
-    input: normalizeChatMessages(data.messages),
-  };
-
-  if (data.model) {
-    body.model = data.model;
-  }
-  if (typeof data.parallel_tool_calls === "boolean") {
-    body.parallel_tool_calls = data.parallel_tool_calls;
-  }
-  if (data.tools) {
-    body.tools = normalizeChatTools(data.tools);
-  }
-  if (typeof data.tool_choice !== "undefined") {
-    body.tool_choice = normalizeChatToolChoice(data.tool_choice);
-  }
-  const reasoning = normalizeChatReasoning(data);
-  if (reasoning) {
-    body.reasoning = reasoning;
-  }
-  return body;
 }
 
 function buildGatewayChatText(message: ChatMessage): string {
@@ -2461,8 +2143,12 @@ function writeGatewayChatSse(reply: FastifyReply, event: string, payload: Record
   reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
-function extractGatewayChatDeltasFromBufferedText(bufferedText: string, flush = false): { deltas: string[]; rest: string } {
+function extractGatewayChatDeltasFromBufferedText(
+  bufferedText: string,
+  flush = false,
+): { deltas: string[]; rest: string; failure?: CodexInBandFailure } {
   const deltas: string[] = [];
+  let failure: CodexInBandFailure | undefined;
   // Upstream SSE may use CRLF separators; normalize before splitting so
   // complete events are not left buffered until the stream ends.
   const normalizedText = bufferedText.replace(/\r\n/g, "\n");
@@ -2484,6 +2170,7 @@ function extractGatewayChatDeltasFromBufferedText(bufferedText: string, flush = 
       if (flush) {
         console.info("[gateway:chat:sse-final]", JSON.stringify(parsed).slice(0, 20000));
       }
+      failure = extractCodexInBandFailure(parsed) ?? failure;
       const delta = extractCodexTextDeltaFromSsePayload(parsed);
       if (delta) {
         deltas.push(delta);
@@ -2492,7 +2179,7 @@ function extractGatewayChatDeltasFromBufferedText(bufferedText: string, flush = 
       // Ignore partial or malformed SSE blocks; the next chunk may contain a complete event.
     }
   }
-  return { deltas, rest };
+  return { deltas, rest, failure };
 }
 
 function summarizeImageRequestForLog(body: z.infer<typeof imageGenerationsBodySchema>): Record<string, unknown> {
@@ -2552,6 +2239,38 @@ async function postImageGenerationWebhook(params: {
       message: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+/**
+ * 背景生图任务结束后给提交人推送企业微信消息。
+ * 同步请求由调用方直接拿到结果，不做额外推送。
+ */
+async function notifyBackgroundImageResult(params: {
+  settings: GatewaySettings;
+  request: FastifyRequest;
+  background: boolean;
+  owner?: string;
+  generationId: string;
+  status: "success" | "failed";
+  prompt?: string;
+  imageCount?: number;
+  durationMs?: number;
+  error?: string;
+}): Promise<void> {
+  if (!params.background) {
+    return;
+  }
+  await notifyWecomImageResult({
+    settings: params.settings,
+    owner: params.owner,
+    generationId: params.generationId,
+    status: params.status,
+    prompt: params.prompt,
+    imageCount: params.imageCount,
+    durationMs: params.durationMs,
+    error: params.error,
+    historyUrl: `${resolveOrigin(params.request)}/#/generate`,
+  });
 }
 
 function getImageEditReferences(data: z.infer<typeof imageEditsBodySchema>): Array<z.infer<typeof imageReferenceSchema>> {
@@ -2778,131 +2497,6 @@ function buildResponseApiBody(result: ChatResult, includeRaw?: boolean): Record<
   }
 
   return responseBody;
-}
-
-function buildChatCompletionsBody(result: ChatResult): Record<string, unknown> {
-  const hasToolCalls = result.toolCalls.length > 0;
-  const usage = buildChatCompletionsUsagePayload(extractTokenUsage(result.raw));
-  const body: Record<string, unknown> = {
-    id: `chatcmpl_${randomUUID().replace(/-/g, "")}`,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: result.model,
-    ...(usage ? { usage } : {}),
-    choices: [
-      {
-        index: 0,
-        finish_reason: hasToolCalls ? "tool_calls" : "stop",
-        message: {
-          role: "assistant",
-          content: hasToolCalls ? result.text || null : result.text,
-          ...(hasToolCalls ? { tool_calls: result.toolCalls } : {}),
-        },
-      },
-    ],
-  };
-
-  if (result.artifacts.length > 0) {
-    body.artifacts = result.artifacts;
-  }
-
-  return body;
-}
-
-function writeChatCompletionsSseEvent(reply: FastifyReply, data: unknown): void {
-  reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-}
-
-function buildChatCompletionChunk(params: {
-  id: string;
-  created: number;
-  model: string;
-  delta: Record<string, unknown>;
-  finishReason?: "stop" | "tool_calls";
-}): Record<string, unknown> {
-  return {
-    id: params.id,
-    object: "chat.completion.chunk",
-    created: params.created,
-    model: params.model,
-    choices: [
-      {
-        index: 0,
-        delta: params.delta,
-        finish_reason: params.finishReason ?? null,
-      },
-    ],
-  };
-}
-
-function sendChatCompletionsStream(reply: FastifyReply, result: ChatResult, includeUsage = false): void {
-  const id = `chatcmpl_${randomUUID().replace(/-/g, "")}`;
-  const created = Math.floor(Date.now() / 1000);
-
-  reply.raw.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
-
-  writeChatCompletionsSseEvent(reply, buildChatCompletionChunk({
-    id,
-    created,
-    model: result.model,
-    delta: { role: "assistant" },
-  }));
-
-  if (result.text) {
-    writeChatCompletionsSseEvent(reply, buildChatCompletionChunk({
-      id,
-      created,
-      model: result.model,
-      delta: { content: result.text },
-    }));
-  }
-
-  result.toolCalls.forEach((toolCall, index) => {
-    writeChatCompletionsSseEvent(reply, buildChatCompletionChunk({
-      id,
-      created,
-      model: result.model,
-      delta: {
-        tool_calls: [
-          {
-            index,
-            id: toolCall.id,
-            type: toolCall.type,
-            function: {
-              name: toolCall.function.name,
-              arguments: toolCall.function.arguments,
-            },
-          },
-        ],
-      },
-    }));
-  });
-
-  writeChatCompletionsSseEvent(reply, buildChatCompletionChunk({
-    id,
-    created,
-    model: result.model,
-    delta: {},
-    finishReason: result.toolCalls.length > 0 ? "tool_calls" : "stop",
-  }));
-  const usage = includeUsage ? buildChatCompletionsUsagePayload(extractTokenUsage(result.raw)) : undefined;
-  if (usage) {
-    writeChatCompletionsSseEvent(reply, {
-      id,
-      object: "chat.completion.chunk",
-      created,
-      model: result.model,
-      choices: [],
-      usage,
-    });
-  }
-  reply.raw.write("data: [DONE]\n\n");
-  reply.raw.end();
 }
 
 function validateImageRequest(data: z.infer<typeof imageGenerationsBodySchema>): string | null {
@@ -3908,6 +3502,29 @@ export function createApp(params?: {
       return;
     }
 
+    // Retired endpoint: answer every caller (authenticated or not) with the
+    // retirement notice instead of an auth error that suggests it still works.
+    if (request.url.split("?")[0] === "/v1/chat/completions") {
+      const message = CHAT_COMPLETIONS_RETIRED_MESSAGE;
+      pushGatewayRequestLog({
+        method: request.method,
+        endpoint: request.url,
+        account: "-",
+        model: "-",
+        statusCode: 410,
+        durationMs: 0,
+        source: requestSourceFromUserAgent(request.headers["user-agent"]),
+        details: {
+          requestId: request.id,
+          remoteAddress: request.ip,
+          userAgent: request.headers["user-agent"],
+          error: { type: "endpoint_retired", message },
+        },
+      });
+      reply.code(410);
+      return reply.send({ error: { type: "endpoint_retired", message } });
+    }
+
     if (!ensureSecurityConfigured()) {
       reply.code(403);
       return reply.send({
@@ -3927,7 +3544,7 @@ export function createApp(params?: {
         (session && (
           pathOnly === "/v1/images/generations" ||
           pathOnly === "/v1/images/edits" ||
-          pathOnly === "/v1/chat/completions"
+          pathOnly === "/v1/responses"
         ))
       ) {
         return;
@@ -3989,6 +3606,10 @@ export function createApp(params?: {
     if (interruptedCount > 0) {
       console.warn(`[generation] marked ${interruptedCount} running task(s) as interrupted after restart.`);
     }
+    const interruptedChatCount = await ctx.gatewayDatabaseService.interruptRunningChatMessages();
+    if (interruptedChatCount > 0) {
+      console.warn(`[gateway:chat] marked ${interruptedChatCount} running reply(ies) as interrupted after restart.`);
+    }
     ctx.modelService.startAutoRefresh();
   });
 
@@ -4029,8 +3650,7 @@ export function createApp(params?: {
     const limit = parsed.success ? parsed.data.limit ?? MAX_PERSISTED_REQUEST_LOGS : MAX_PERSISTED_REQUEST_LOGS;
     const session = await getSessionFromRequest(request);
     const owner = resolveDataOwnerFilter(session, parsed.success ? parsed.data.owner : undefined);
-    const includeDetails = parsed.success ? Boolean(parsed.data.details) : false;
-    const persisted = await ctx.gatewayDatabaseService.listRequestLogs(limit, owner, { includeDetails });
+    const persisted = await ctx.gatewayDatabaseService.listRequestLogs(limit, owner);
     return {
       data: persisted.length > 0
         ? persisted
@@ -4143,6 +3763,7 @@ export function createApp(params?: {
     let profile: OAuthProfile | null = null;
     let accumulated = "";
     let sseBuffer = "";
+    let inBandFailure: CodexInBandFailure | undefined;
 
     params.reply.raw.on("close", () => {
       abortController.abort();
@@ -4180,6 +3801,7 @@ export function createApp(params?: {
         sseBuffer += text;
         const parsedChunk = extractGatewayChatDeltasFromBufferedText(sseBuffer);
         sseBuffer = parsedChunk.rest;
+        inBandFailure = parsedChunk.failure ?? inBandFailure;
         for (const delta of parsedChunk.deltas) {
           accumulated += delta;
           writeGatewayChatSse(params.reply, "message_delta", {
@@ -4189,9 +3811,18 @@ export function createApp(params?: {
         }
       }
       const finalParsed = extractGatewayChatDeltasFromBufferedText(sseBuffer, true);
+      inBandFailure = finalParsed.failure ?? inBandFailure;
       for (const delta of finalParsed.deltas) {
         accumulated += delta;
         writeGatewayChatSse(params.reply, "message_delta", { id: params.assistantMessage.id, delta });
+      }
+      // The upstream answers 200 and reports failures inside the stream. Surface
+      // them as a failed message instead of persisting an empty successful reply.
+      if (inBandFailure) {
+        throw createCodexInBandFailureError(inBandFailure);
+      }
+      if (!accumulated.trim()) {
+        throw new Error(`调用 Responses API 失败: HTTP ${upstream.status} 上游没有返回任何内容（model=${params.model}）`);
       }
       const finalMessage = await ctx.gatewayDatabaseService.updateChatMessage(params.assistantMessage.id, params.owner, {
         content: accumulated.trim(),
@@ -4226,6 +3857,7 @@ export function createApp(params?: {
           },
           response: {
             assistantMessageId: params.assistantMessage.id,
+            textPreview: truncateForLog(accumulated, CHAT_LOG_TEXT_PREVIEW_CHARS),
             textLength: accumulated.length,
           },
         },
@@ -4274,10 +3906,17 @@ export function createApp(params?: {
             attachmentCount: params.contextMessages.reduce((sum, message) => sum + message.attachments.length, 0),
             contextMessageCount: params.contextMessages.length,
           },
+          response: {
+            assistantMessageId: params.assistantMessage.id,
+            textPreview: truncateForLog(accumulated, CHAT_LOG_TEXT_PREVIEW_CHARS),
+            textLength: accumulated.length,
+          },
           error: {
             message: normalized.message,
             upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
             upstreamRequestId: (normalized as Error & { requestId?: unknown }).requestId,
+            upstreamErrorCode: (normalized as Error & { upstreamErrorCode?: unknown }).upstreamErrorCode,
+            upstreamErrorMessage: (normalized as Error & { upstreamErrorMessage?: unknown }).upstreamErrorMessage,
           },
         },
         usage: {
@@ -4417,7 +4056,7 @@ export function createApp(params?: {
       reply.code(404);
       return { error: { type: "not_found", message: "要重试的回复不存在。" } };
     }
-    if (existing.status !== "failed") {
+    if (existing.status !== "failed" && existing.status !== "interrupted") {
       reply.code(400);
       return { error: { type: "validation_error", message: "只能重试失败的回复。" } };
     }
@@ -4783,11 +4422,6 @@ export function createApp(params?: {
           method: "POST",
           path: "/codex/v1/responses/compact",
           description: "Codex custom provider 专用 Responses compact SSE 透传接口。",
-        },
-        {
-          method: "POST",
-          path: "/v1/chat/completions",
-          description: "OpenAI chat.completions 兼容接口。",
         },
         {
           method: "POST",
@@ -6675,190 +6309,6 @@ export function createApp(params?: {
     return buildResponseApiBody(result, parsed.data.experimental_codex?.include_raw);
   });
 
-  app.post("/v1/chat/completions", async (request, reply) => {
-    const startedAt = performance.now();
-    const requestOwner = await getRequestOwner(request);
-    const parsed = chatCompletionsBodySchema.safeParse(request.body);
-    if (!parsed.success) {
-      pushGatewayRequestLog({
-        id: request.id,
-        owner: requestOwner,
-        method: request.method,
-        endpoint: request.url,
-        account: "-",
-        model: "-",
-        statusCode: 400,
-        durationMs: performance.now() - startedAt,
-        source: "API",
-        details: {
-          requestId: request.id,
-          remoteAddress: request.ip,
-          userAgent: request.headers["user-agent"],
-          error: {
-            type: "validation_error",
-            message: parsed.error.issues[0]?.message ?? "请求体格式错误",
-          },
-        },
-      });
-      reply.code(400);
-      return {
-        error: {
-          type: "validation_error",
-          message: parsed.error.issues[0]?.message ?? "请求体格式错误",
-        },
-      };
-    }
-
-    if (typeof parsed.data.n === "number" && parsed.data.n > 1) {
-      pushGatewayRequestLog({
-        owner: requestOwner,
-        method: request.method,
-        endpoint: request.url,
-        account: "-",
-        model: parsed.data.model ?? "default",
-        statusCode: 501,
-        durationMs: performance.now() - startedAt,
-        source: "API",
-        details: {
-          requestId: request.id,
-          request: summarizeChatCompletionsRequest(parsed.data),
-          error: {
-            type: "not_supported",
-            message: "当前网关暂不支持一次返回多个 choices（n > 1）",
-          },
-        },
-      });
-      reply.code(501);
-      return {
-        error: {
-          type: "not_supported",
-          message: "当前网关暂不支持一次返回多个 choices（n > 1）",
-        },
-      };
-    }
-
-    const codexBody = createChatCompletionsCodexBody(parsed.data);
-    console.info("[gateway:chat:request]", {
-      requestId: request.id,
-      remoteAddress: request.ip,
-      userAgent: request.headers["user-agent"],
-      ...summarizeChatCompletionsRequest(parsed.data),
-      codex: summarizeCodexChatBody(codexBody),
-    });
-    const fallbackInput = parsed.data.messages
-      .map((message) =>
-        typeof message.content === "string"
-          ? message.content
-          : (message.content ?? [])
-              .map((part) => (typeof part.text === "string" ? part.text : ""))
-              .filter(Boolean)
-              .join("\n"),
-      )
-      .filter(Boolean)
-      .join("\n")
-      .trim();
-
-    let result: ChatResult;
-    try {
-      result = await ctx.chatService.chat({
-        model: parsed.data.model,
-        input: fallbackInput || undefined,
-        experimental: {
-          codexBody,
-        },
-      });
-    } catch (error) {
-      const normalized = normalizeError(error);
-      const statusCode = getErrorStatusCode(normalized);
-      const activeProfile = await ctx.authService.getActiveProfile();
-      pushGatewayRequestLog({
-        owner: requestOwner,
-        method: request.method,
-        endpoint: request.url,
-        account: profileLogLabel(activeProfile),
-        model: parsed.data.model ?? "default",
-        statusCode,
-        durationMs: performance.now() - startedAt,
-        source: requestSourceFromUserAgent(request.headers["user-agent"]),
-        details: {
-          requestId: request.id,
-          remoteAddress: request.ip,
-          userAgent: request.headers["user-agent"],
-          request: summarizeChatCompletionsRequest(parsed.data),
-          codex: summarizeCodexChatBody(codexBody),
-          error: {
-            message: normalized.message,
-            upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
-            upstreamErrorCode: (normalized as Error & { upstreamErrorCode?: unknown }).upstreamErrorCode,
-            upstreamErrorMessage: (normalized as Error & { upstreamErrorMessage?: unknown }).upstreamErrorMessage,
-          },
-        },
-        usage: {
-          profile: activeProfile,
-        },
-      });
-      throw error;
-    }
-
-    const activeProfile = result.profile ?? await ctx.authService.getActiveProfile();
-    pushGatewayRequestLog({
-      id: request.id,
-      owner: requestOwner,
-      method: request.method,
-      endpoint: request.url,
-      account: profileLogLabel(activeProfile),
-      model: result.model,
-      statusCode: 200,
-      durationMs: performance.now() - startedAt,
-      source: requestSourceFromUserAgent(request.headers["user-agent"]),
-      details: {
-        requestId: request.id,
-        remoteAddress: request.ip,
-        userAgent: request.headers["user-agent"],
-        request: summarizeChatCompletionsRequest(parsed.data),
-        codex: summarizeCodexChatBody(codexBody),
-        response: {
-          textPreview: truncateForLog(result.text),
-          textLength: result.text.length,
-          toolCallCount: result.toolCalls.length,
-          toolCalls: result.toolCalls.map((toolCall) => ({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            argumentsPreview: truncateForLog(toolCall.function.arguments),
-          })),
-          artifactCount: result.artifacts.length,
-          stream: parsed.data.stream ?? false,
-          retryCount: result.retryCount ?? 0,
-        },
-      },
-      usage: {
-        profile: activeProfile,
-        tokenUsage: extractTokenUsage(result.raw),
-      },
-    });
-    console.info("[gateway:chat:response]", {
-      requestId: request.id,
-      model: result.model,
-      stream: parsed.data.stream ?? false,
-      durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
-      textLength: result.text.length,
-      toolCallCount: result.toolCalls.length,
-      artifactCount: result.artifacts.length,
-      rawPreview: result.text ? undefined : JSON.stringify(result.raw).slice(0, 20000),
-    });
-
-    if (parsed.data.stream) {
-      const rawStreamOptions = (parsed.data as Record<string, unknown>).stream_options;
-      const streamOptions = isObjectRecord(rawStreamOptions)
-        ? rawStreamOptions
-        : null;
-      sendChatCompletionsStream(reply, result, streamOptions?.include_usage === true);
-      return reply;
-    }
-
-    return buildChatCompletionsBody(result);
-  });
-
   app.post("/v1/images/generations", async (request, reply) => {
     const startedAt = performance.now();
     const requestOwner = await getRequestOwner(request);
@@ -6912,7 +6362,7 @@ export function createApp(params?: {
         method: request.method,
         endpoint: request.url,
         account: "-",
-        model: parsed.data.model ?? "gpt-image-2",
+        model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         statusCode: 400,
         durationMs: performance.now() - startedAt,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -6953,7 +6403,7 @@ export function createApp(params?: {
         owner: requestOwner,
         method: request.method,
         endpoint: request.url,
-        model: parsed.data.model ?? "gpt-image-2",
+        model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         startedAt,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
         requestId: request.id,
@@ -6971,7 +6421,7 @@ export function createApp(params?: {
       method: request.method,
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
-      model: parsed.data.model ?? "gpt-image-2",
+      model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       statusCode: 102,
       durationMs: 0,
       source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -6990,7 +6440,7 @@ export function createApp(params?: {
       status: "queued",
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
-      model: parsed.data.model ?? "gpt-image-2",
+      model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       prompt: parsed.data.prompt,
       ratio: ratioFromImageSize(parsed.data.size),
       size: parsed.data.size,
@@ -7032,7 +6482,7 @@ export function createApp(params?: {
                 status: "queued",
                 endpoint: request.url,
                 account: profileLogLabel(activeProfile),
-                model: parsed.data.model ?? "gpt-image-2",
+                model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
                 prompt: parsed.data.prompt,
                 ratio: ratioFromImageSize(parsed.data.size),
                 size: parsed.data.size,
@@ -7056,7 +6506,7 @@ export function createApp(params?: {
                 status: "running",
                 endpoint: request.url,
                 account: profileLogLabel(profile),
-                model: parsed.data.model ?? "gpt-image-2",
+                model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
                 prompt: parsed.data.prompt,
                 ratio: ratioFromImageSize(parsed.data.size),
                 size: parsed.data.size,
@@ -7088,7 +6538,7 @@ export function createApp(params?: {
           status: "failed",
           endpoint: request.url,
           account: profileLogLabel(failedProfile),
-          model: parsed.data.model ?? "gpt-image-2",
+          model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
           prompt: parsed.data.prompt,
           ratio: ratioFromImageSize(parsed.data.size),
           size: parsed.data.size,
@@ -7118,7 +6568,7 @@ export function createApp(params?: {
           method: request.method,
           endpoint: request.url,
           account: profileLogLabel(failedProfile),
-          model: parsed.data.model ?? "gpt-image-2",
+          model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
           statusCode,
           durationMs,
           source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -7150,6 +6600,17 @@ export function createApp(params?: {
             error: normalized.message,
           });
         }
+        await notifyBackgroundImageResult({
+          settings,
+          request,
+          background: Boolean(parsed.data._gateway_background),
+          owner: requestOwner,
+          generationId,
+          status: "failed",
+          prompt: parsed.data.prompt,
+          durationMs,
+          error: normalized.message,
+        });
         throw error;
       }
 
@@ -7172,7 +6633,7 @@ export function createApp(params?: {
       method: request.method,
       endpoint: request.url,
       account: profileLogLabel(responseProfile),
-      model: parsed.data.model ?? "gpt-image-2",
+      model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       statusCode: 200,
       durationMs,
       source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -7203,7 +6664,7 @@ export function createApp(params?: {
       status: "success",
       endpoint: request.url,
       account: profileLogLabel(responseProfile),
-      model: parsed.data.model ?? "gpt-image-2",
+      model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       prompt: parsed.data.prompt,
       ratio: ratioFromImageSize(publicResponse.size ?? parsed.data.size),
       size: publicResponse.size ?? parsed.data.size,
@@ -7234,6 +6695,17 @@ export function createApp(params?: {
           images: gatewayImages,
         });
       }
+      await notifyBackgroundImageResult({
+        settings,
+        request,
+        background: Boolean(parsed.data._gateway_background),
+        owner: requestOwner,
+        generationId,
+        status: "success",
+        prompt: parsed.data.prompt,
+        imageCount: publicResponse.data.length,
+        durationMs,
+      });
       return finalResponse;
     };
 
@@ -7342,7 +6814,7 @@ export function createApp(params?: {
         method: request.method,
         endpoint: request.url,
         account: "-",
-        model: parsed.data.model ?? "gpt-image-2",
+        model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         statusCode: 400,
         durationMs: performance.now() - startedAt,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -7394,7 +6866,7 @@ export function createApp(params?: {
         method: request.method,
         endpoint: request.url,
         account: "-",
-        model: parsed.data.model ?? "gpt-image-2",
+        model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         statusCode: 400,
         durationMs: performance.now() - startedAt,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -7434,7 +6906,7 @@ export function createApp(params?: {
         owner: requestOwner,
         method: request.method,
         endpoint: request.url,
-        model: parsed.data.model ?? "gpt-image-2",
+        model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         startedAt,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
         requestId: request.id,
@@ -7452,7 +6924,7 @@ export function createApp(params?: {
       method: request.method,
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
-      model: parsed.data.model ?? "gpt-image-2",
+      model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       statusCode: 102,
       durationMs: 0,
       source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -7471,7 +6943,7 @@ export function createApp(params?: {
       status: "queued",
       endpoint: request.url,
       account: profileLogLabel(activeProfile),
-      model: parsed.data.model ?? "gpt-image-2",
+      model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
       prompt: parsed.data.prompt,
       ratio: ratioFromImageSize(parsed.data.size),
       size: parsed.data.size,
@@ -7515,7 +6987,7 @@ export function createApp(params?: {
                 status: "queued",
                 endpoint: request.url,
                 account: profileLogLabel(activeProfile),
-                model: parsed.data.model ?? "gpt-image-2",
+                model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
                 prompt: parsed.data.prompt,
                 ratio: ratioFromImageSize(parsed.data.size),
                 size: parsed.data.size,
@@ -7540,7 +7012,7 @@ export function createApp(params?: {
                 status: "running",
                 endpoint: request.url,
                 account: profileLogLabel(profile),
-                model: parsed.data.model ?? "gpt-image-2",
+                model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
                 prompt: parsed.data.prompt,
                 ratio: ratioFromImageSize(parsed.data.size),
                 size: parsed.data.size,
@@ -7573,7 +7045,7 @@ export function createApp(params?: {
           status: "failed",
           endpoint: request.url,
           account: profileLogLabel(failedProfile),
-          model: parsed.data.model ?? "gpt-image-2",
+          model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
           prompt: parsed.data.prompt,
           ratio: ratioFromImageSize(parsed.data.size),
           size: parsed.data.size,
@@ -7604,7 +7076,7 @@ export function createApp(params?: {
           method: request.method,
           endpoint: request.url,
           account: profileLogLabel(failedProfile),
-          model: parsed.data.model ?? "gpt-image-2",
+          model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
           statusCode,
           durationMs,
           source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -7628,6 +7100,17 @@ export function createApp(params?: {
             imageRoute: failedImageRoute,
           },
         });
+        await notifyBackgroundImageResult({
+          settings,
+          request,
+          background: Boolean(parsed.data._gateway_background),
+          owner: requestOwner,
+          generationId,
+          status: "failed",
+          prompt: parsed.data.prompt,
+          durationMs,
+          error: normalized.message,
+        });
         throw error;
       }
 
@@ -7650,7 +7133,7 @@ export function createApp(params?: {
         method: request.method,
         endpoint: request.url,
         account: profileLogLabel(responseProfile),
-        model: parsed.data.model ?? "gpt-image-2",
+        model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         statusCode: 200,
         durationMs,
         source: requestSourceFromUserAgent(request.headers["user-agent"]),
@@ -7681,7 +7164,7 @@ export function createApp(params?: {
         status: "success",
         endpoint: request.url,
         account: profileLogLabel(responseProfile),
-        model: parsed.data.model ?? "gpt-image-2",
+        model: parsed.data.model ?? DEFAULT_IMAGE_MODEL,
         prompt: parsed.data.prompt,
         ratio: ratioFromImageSize(publicResponse.size ?? parsed.data.size),
         size: publicResponse.size ?? parsed.data.size,
@@ -7702,6 +7185,17 @@ export function createApp(params?: {
         return null;
       });
 
+      await notifyBackgroundImageResult({
+        settings,
+        request,
+        background: Boolean(parsed.data._gateway_background),
+        owner: requestOwner,
+        generationId,
+        status: "success",
+        prompt: parsed.data.prompt,
+        imageCount: publicResponse.data.length,
+        durationMs,
+      });
       return savedGeneration ? { ...publicResponse, _gateway_images: toGatewayImageAssets(savedGeneration.images) } : publicResponse;
     };
 

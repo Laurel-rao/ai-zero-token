@@ -1,4 +1,4 @@
-export type ImageQuality = "low" | "medium" | "high" | "auto";
+export type ImageQuality = "low" | "medium" | "high" | "xhigh" | "max" | "auto";
 export type OutputFormat = "png" | "webp" | "jpeg";
 export type HistoryViewMode = "grid" | "list";
 export type GenerationHistoryStatus = "queued" | "running" | "success" | "failed" | "interrupted";

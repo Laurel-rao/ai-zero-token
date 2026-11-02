@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Pushed a WeCom app message to the requester when a background image generation finishes or fails (`wecom.notifyImageResult`, on by default, toggled in 系统设置 → 企业微信), carrying the prompt, image count/duration or failure reason, and a link to the generate page; only `wxwork:` accounts receive it and delivery failures stay in the log without affecting generation.
+- Added `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` (GPT Image 2.5) to the supported image models and made `gpt-image-2.5-sunburst` the default image generation model for new installs.
+- Migrated stored settings whose image model still equalled that schema version's default (`gpt-image-2` at version 1, `gpt-image-2.5-flare` at version 2) to the new default, while keeping any model an admin chose explicitly.
+- Routed `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` through the same ChatGPT web image path as `gpt-image-2` for Free-plan accounts.
+- Accepted `quality=xhigh` and `quality=max` on the image endpoints and passed them through to the upstream `image_generation` tool.
+- Replaced hardcoded `gpt-image-2` fallbacks in the server and admin UI with the shared default, and made the account and gateway info cards show the configured image model.
+- Retired `POST /v1/chat/completions`: the route now returns HTTP 410 `endpoint_retired` and points callers to `/v1/responses` (Codex passthrough: `/codex/v1/responses`), and the public docs now describe the Responses-only interface.
+- Treated Codex in-band failures inside HTTP 200 SSE streams (for example `server_is_overloaded`) as failures in the workbench, `/v1/responses` and the quota ping, so those requests persist a failure reason instead of an empty successful reply.
+- Recorded the chat workbench reply text in the request log detail (`response.textPreview`), including the partial text of failed turns.
+- Returned request-log `details` to the admin console again (the console never sent the `details` flag the API required, so the log detail panel showed no request, response or error details) and added a "查看响应内容" dialog that shows the recorded response body and error reason for one request.
+- Marked assistant replies left running when the process stops as `已中断` with a retry action instead of leaving them stuck on `生成中`, and accepted those replies in the retry endpoint.
+
 ## 2.0.11 - 2026-06-10
 
 - Accepted sub2api-style Codex account JSON imports that do not include a real `chatgpt_account_id`, using user id, JWT subject, email, or token hash as gateway-only identities.

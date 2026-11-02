@@ -1,7 +1,7 @@
 {
   "name": "ai-zero-token",
   "version": "2.0.11",
-  "description": "Local-first OpenAI-compatible AI CLI and gateway with Codex OAuth, multi-account management, and gpt-image-2 image generation/editing.",
+  "description": "Local-first OpenAI-compatible AI CLI and gateway with Codex OAuth, multi-account management, and gpt-image-2.5 image generation/editing.",
   "license": "MIT",
   "author": "AI Zero Token Contributors",
   "type": "module",
@@ -27,7 +27,7 @@
     "codex",
     "openai-compatible",
     "chatgpt",
-    "gpt-image-2",
+    "gpt-image-2.5",
     "image-generation",
     "images-generations",
     "local-gateway",

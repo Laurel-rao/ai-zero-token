@@ -2,7 +2,7 @@ import { AuthService } from "./auth-service.js";
 import { ConfigService } from "./config-service.js";
 import { askOpenAICodex } from "../providers/openai-codex/chat.js";
 import { generateChatGPTWebImage } from "../providers/openai-codex/chatgpt-web-image.js";
-import { isSupportedImageModel, SUPPORTED_IMAGE_MODELS } from "../models/image-models.js";
+import { DEFAULT_IMAGE_MODEL, isSupportedImageModel, SUPPORTED_IMAGE_MODELS } from "../models/image-models.js";
 import type { OAuthProfile } from "../types.js";
 import { RequestThrottleService } from "./request-throttle-service.js";
 type ImageRequest = {
@@ -13,7 +13,7 @@ type ImageRequest = {
     imageUrl: string;
   }>;
   size?: string;
-  quality?: "low" | "medium" | "high" | "auto";
+  quality?: "low" | "medium" | "high" | "xhigh" | "max" | "auto";
   background?: "transparent" | "opaque" | "auto";
   outputFormat?: "png" | "webp" | "jpeg";
   outputCompression?: number;
@@ -35,7 +35,7 @@ type ImageResult = {
   }>;
   background?: "transparent" | "opaque";
   output_format?: "png" | "webp" | "jpeg";
-  quality?: "low" | "medium" | "high";
+  quality?: "low" | "medium" | "high" | "xhigh" | "max";
   size?: string;
   usage?: {
     input_tokens: number;
@@ -87,6 +87,8 @@ const SUPPORTED_IMAGE_QUALITIES = new Set([
   "low",
   "medium",
   "high",
+  "xhigh",
+  "max",
 ]);
 
 const SUPPORTED_IMAGE_FORMATS = new Set([
@@ -739,7 +741,7 @@ export class ImageService {
 
   private resolveRequestedImageModel(model?: string): string {
     if (!model) {
-      return "gpt-image-2";
+      return DEFAULT_IMAGE_MODEL;
     }
 
     if (!isSupportedImageModel(model)) {
