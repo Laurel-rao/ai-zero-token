@@ -205,11 +205,11 @@ export function ImagePreviewModal(props: { image: ModalImage; onClose: () => voi
       return;
     }
     if (!window.isSecureContext) {
-      showCopyFeedback("error", "当前页面不是安全环境，请使用 HTTPS 后复制");
+      showCopyFeedback("error", "当前页面不是 HTTPS，浏览器禁止了剪贴板；请用 https:// 地址打开后再复制");
       return;
     }
     if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
-      showCopyFeedback("error", "当前浏览器不支持复制图片");
+      showCopyFeedback("error", "当前浏览器不支持复制图片，请长按或右键图片保存");
       return;
     }
 

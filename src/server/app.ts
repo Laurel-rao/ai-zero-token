@@ -2840,6 +2840,46 @@ function resolveOrigin(request: FastifyRequest): string {
   return "http://127.0.0.1:8787";
 }
 
+/** 只对 IP 字面量做特殊处理：IP 直连时没有匹配的证书，升级到 https 会撞证书告警。 */
+function isIpHost(host: string): boolean {
+  const hostname = host.replace(/^\[([^\]]+)\](?::\d+)?$/, "$1").replace(/:\d+$/, "");
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname) || hostname.includes(":");
+}
+
+/**
+ * 是否为浏览器页面导航请求（而不是 API 调用或静态资源请求）。
+ * 优先看 `Sec-Fetch-Mode`，老内核没有该头时退回 `Accept` 判断。
+ */
+function isDocumentNavigation(request: FastifyRequest): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return false;
+  }
+  if (request.headers["sec-fetch-mode"] === "navigate") {
+    return true;
+  }
+  const accept = request.headers.accept;
+  return typeof accept === "string" && accept.toLowerCase().includes("text/html");
+}
+
+/**
+ * 企业微信 / 微信内置浏览器只在安全上下文（https、localhost）里暴露剪贴板 API，
+ * 用 http 打开的页面点「复制图片」必然失败。反向代理会通过 X-Forwarded-Proto
+ * 告诉我们客户端实际用的是 http，这里把这类页面导航 301 到 https，
+ * 让内置浏览器始终拿到安全上下文；API 客户端（Accept 不含 text/html）不受影响。
+ */
+function buildHttpsUpgradeUrl(request: FastifyRequest): string | null {
+  const rawProtocol = request.headers["x-forwarded-proto"];
+  const protocol = (Array.isArray(rawProtocol) ? rawProtocol[0] : rawProtocol)?.split(",")[0]?.trim().toLowerCase();
+  if (protocol !== "http" || !isDocumentNavigation(request)) {
+    return null;
+  }
+  const host = request.headers.host;
+  if (!host || isIpHost(host)) {
+    return null;
+  }
+  return `https://${host}${request.url}`;
+}
+
 function sanitizeGatewayUsername(value: string, prefix = ""): string {
   const normalized = value.trim().replace(/[^\w.@:-]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
   return `${prefix}${normalized || "user"}`.slice(0, 80);
@@ -3703,6 +3743,16 @@ export function createApp(params?: {
     origin: params?.corsOrigin ?? true,
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  });
+
+  app.addHook("onRequest", async (request, reply) => {
+    // 放在鉴权之前：http 页面先升级到 https，避免内置浏览器在非安全上下文里
+    // 失去剪贴板能力后连登录重定向都失败。
+    const httpsUrl = buildHttpsUpgradeUrl(request);
+    if (!httpsUrl) {
+      return;
+    }
+    return reply.redirect(httpsUrl, 301);
   });
 
   app.addHook("onSend", async (request, reply, payload) => {
