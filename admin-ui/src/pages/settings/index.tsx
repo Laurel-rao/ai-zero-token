@@ -105,7 +105,7 @@ const MODEL_SETTING_FIELDS: Array<{ key: ModelSettingField; label: string; hint:
   { key: "defaultModel", label: "聊天模型", hint: "新聊天及未指定模型的文本接口使用；已有会话保留原模型。", output: "text" },
   { key: "imageClassifierModel", label: "生图检查模型", hint: "判断聊天回复是否包含可用于生图的提示词，不负责生成图片。", output: "text" },
   { key: "imageGenerationModel", label: "生图服务模型", hint: "实际输出图片，供生图工作台和聊天生图使用。", output: "image" },
-  { key: "imageOrchestratorModel", label: "生图编排模型", hint: "服务端调用图片生成工具的文本模型，与图片输出模型不同。", output: "text", allowLlmApi: false },
+  { key: "imageOrchestratorModel", label: "生图编排模型", hint: "服务端调用图片生成工具的文本模型，与图片输出模型不同。选择大模型 API 渠道模型时，Codex 图片链路会自动改用 Codex 默认编排模型，生图 API 渠道出图不受影响。", output: "text" },
   { key: "promptOptimizerModel", label: "提示词优化模型", hint: "生图工作台“优化提示词”按钮使用的文本模型。", output: "text" },
 ];
 
@@ -218,6 +218,7 @@ export function SettingsPage(props: {
     state: "idle",
     message: "",
   });
+  const [llmModelCustomInput, setLlmModelCustomInput] = useState(false);
   const settingsDirty = settingsDirtyFields.size > 0;
 
   const loadModelDirectory = useCallback(async (signal?: AbortSignal) => {
@@ -245,6 +246,7 @@ export function SettingsPage(props: {
       return;
     }
     setSettingsDraft(createSettingsDraft(props.config));
+    setLlmModelCustomInput(false);
   }, [props.config, settingsDirty]);
 
   useEffect(() => {
@@ -291,6 +293,17 @@ export function SettingsPage(props: {
   const autoSwitchBlockedCount = Math.max(0, autoSwitchTotalCount - autoSwitchExcludedCount - autoSwitchRuntimeReadyCount);
   const textModels = modelDirectory?.data.filter((model) => model.output?.includes("text")) ?? [];
   const imageModels = modelDirectory?.data.filter((model) => model.output?.includes("image")) ?? [];
+  // 渠道模型下拉：已同步模型 + 当前自定义值；同步后可直接在这里选，不必手输。
+  const llmChannelModelValue = settingsDraft.llmApiChannelModel.trim();
+  const llmChannelModelOptions = Array.from(new Set([
+    ...(llmChannelModelValue && !settingsDraft.llmApiChannelModels.includes(llmChannelModelValue) ? [llmChannelModelValue] : []),
+    ...settingsDraft.llmApiChannelModels,
+  ]));
+  const llmChannelModelIsSynced = settingsDraft.llmApiChannelModels.includes(llmChannelModelValue);
+  const llmChannelModelCustom =
+    settingsDraft.llmApiChannelModels.length === 0 ||
+    llmModelCustomInput ||
+    Boolean(llmChannelModelValue) && !llmChannelModelIsSynced;
   const modelCount = textModels.length;
   const imageModelCount = imageModels.length;
   const llmApiModelCount = textModels.filter((model) => model.source === "llm-api").length;
@@ -865,10 +878,18 @@ export function SettingsPage(props: {
         }),
       });
       const models = Array.from(new Set((result.models || []).map((item) => item.trim()).filter(Boolean)));
-      markSettingsDirty({ llmApiChannelModels: models });
+      const currentModel = settingsDraft.llmApiChannelModel.trim();
+      const autoModel = currentModel || models[0] || "";
+      markSettingsDirty({
+        llmApiChannelModels: models,
+        ...(autoModel && !currentModel ? { llmApiChannelModel: autoModel } : {}),
+      });
+      setLlmModelCustomInput(false);
       setLlmModelsSync({
         state: "success",
-        message: `已从上游同步 ${result.count || models.length} 个模型，保存后可在模型配置中选择`,
+        message: autoModel && !currentModel
+          ? `已从上游同步 ${result.count || models.length} 个模型，已自动选择 ${autoModel} 作为渠道模型，保存后可在模型配置中选择`
+          : `已从上游同步 ${result.count || models.length} 个模型，保存后可在模型配置中选择`,
       });
     } catch (error) {
       setLlmModelsSync({ state: "error", message: errorMessage(error) });
@@ -1342,7 +1363,30 @@ export function SettingsPage(props: {
                 </label>
                 <label className="field">
                   <span>渠道模型</span>
-                  <input className="input" value={settingsDraft.llmApiChannelModel} onChange={(event) => markSettingsDirty({ llmApiChannelModel: event.target.value })} placeholder="gpt-4o-mini" />
+                  {settingsDraft.llmApiChannelModels.length > 0 ? (
+                    <select
+                      className="control"
+                      value={llmChannelModelCustom ? "__custom__" : llmChannelModelIsSynced ? llmChannelModelValue : ""}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (value === "__custom__") {
+                          setLlmModelCustomInput(true);
+                          return;
+                        }
+                        setLlmModelCustomInput(false);
+                        markSettingsDirty({ llmApiChannelModel: value });
+                      }}
+                    >
+                      <option value="">请选择渠道模型…</option>
+                      {llmChannelModelOptions.map((model) => (
+                        <option key={model} value={model}>{model}</option>
+                      ))}
+                      <option value="__custom__">自定义输入…</option>
+                    </select>
+                  ) : null}
+                  {llmChannelModelCustom ? (
+                    <input className="input" value={settingsDraft.llmApiChannelModel} onChange={(event) => markSettingsDirty({ llmApiChannelModel: event.target.value })} placeholder="gpt-4o-mini" />
+                  ) : null}
                   <small className="field-hint">保存后该渠道模型会出现在「模型配置」下拉，可分别用作聊天模型 / 生图检查模型 / 提示词优化模型（生图编排模型不可选渠道模型）。</small>
                 </label>
               </div>
@@ -1362,7 +1406,7 @@ export function SettingsPage(props: {
                   className="btn-secondary"
                   type="button"
                   onClick={() => void testLlmApiChannel()}
-                  disabled={Boolean(props.busy) || llmChannelTest.state === "testing" || !settingsDraft.llmApiChannelBaseUrl.trim() || !settingsDraft.llmApiChannelModel.trim()}
+                  disabled={Boolean(props.busy) || llmChannelTest.state === "testing" || !settingsDraft.llmApiChannelBaseUrl.trim()}
                 >
                   {llmChannelTest.state === "testing" ? <Loader2 className="spin" size={16} /> : <Network size={16} />}
                   测试连接

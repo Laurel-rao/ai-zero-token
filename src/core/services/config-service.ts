@@ -366,12 +366,6 @@ export class ConfigService {
         // Codex 目录优先；命中渠道模型目录时也允许，外部文本 API 可以直接调用。
         const codexModel = await hasCodexModel(normalizedModel);
         const channelModel = channelModelIds.has(normalizedModel);
-        // 生图编排需要 Codex 的 image_generation 工具，外部文本 API 无法执行。
-        if (key === "imageOrchestratorModel" && channelModel && !codexModel) {
-          throw Object.assign(new Error("生图编排模型需要 Codex 的 image_generation 工具，不能使用大模型 API 渠道模型。"), {
-            statusCode: 400,
-          });
-        }
         if (!codexModel && !channelModel) {
           throw Object.assign(new Error(`${label}未找到可用文本模型: ${model}，请同步模型目录后重新选择。`), { statusCode: 400 });
         }

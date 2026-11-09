@@ -3,6 +3,7 @@ import { ConfigService } from "./config-service.js";
 import { askOpenAICodex } from "../providers/openai-codex/chat.js";
 import { generateChatGPTWebImage } from "../providers/openai-codex/chatgpt-web-image.js";
 import { DEFAULT_IMAGE_MODEL, isSupportedImageModel, SUPPORTED_IMAGE_MODELS } from "../models/image-models.js";
+import { getPreferredCodexModel } from "../models/openai-codex-models.js";
 import type { GatewaySettings, OAuthProfile } from "../types.js";
 import { RequestThrottleService } from "./request-throttle-service.js";
 import {
@@ -10,6 +11,7 @@ import {
   resolveImageApiChannel,
   type ImageApiChannelConfig,
 } from "./image-api-channel-service.js";
+import { isLlmApiChannelModel, resolveLlmApiChannel } from "./llm-api-channel-service.js";
 type ImageRequest = {
   prompt: string;
   model?: string;
@@ -849,7 +851,15 @@ export class ImageService {
     settings: GatewaySettings,
   ): Promise<ImageResult> {
     const profile = await this.deps.authService.requireUsableProfile("openai-codex");
-    const orchestratorModel = await this.deps.configService.getImageOrchestratorModel();
+    const configuredOrchestratorModel = await this.deps.configService.getImageOrchestratorModel();
+    // 外部大模型 API 渠道模型无法执行 Codex 的 image_generation 工具；走 Codex 图片链路时
+    // 自动退回 Codex 默认编排模型，避免生图 API 渠道之外的兜底链路直接失败。
+    const orchestratorModel = isLlmApiChannelModel(
+      resolveLlmApiChannel(settings.llm?.apiChannel),
+      configuredOrchestratorModel,
+    )
+      ? await getPreferredCodexModel()
+      : configuredOrchestratorModel;
     const requestedImageModel = this.resolveRequestedImageModel(request.model || settings.modelRouting.imageGenerationModel);
     const requestSummary = {
       requestedImageModel,

@@ -6139,17 +6139,24 @@ export function createApp(params?: {
     }
     const settings = await ctx.configService.getSettings();
     const saved = settings.llm.apiChannel;
+    // 表单里没手动填模型时，回退到已保存的模型或已同步模型列表里的第一个，
+    // 这样只填 Base URL + API Key 也能直接测试连接。
+    const fallbackModel = saved.model?.trim() || (saved.models ?? []).map((item) => item.trim()).find(Boolean) || "";
     const channel: LlmApiChannelConfig = {
       enabled: true,
       mode: "primary",
       baseUrl: parsed.data.baseUrl?.trim() || saved.baseUrl,
       apiKey: parsed.data.apiKey?.trim() || saved.apiKey,
-      model: parsed.data.model?.trim() || saved.model,
+      model: parsed.data.model?.trim() || fallbackModel,
       models: saved.models ?? [],
     };
-    if (!channel.baseUrl || !channel.apiKey || !channel.model) {
+    if (!channel.baseUrl || !channel.apiKey) {
       reply.code(400);
-      return { error: { type: "validation_error", message: "请先填写 Base URL、API Key 和模型。" } };
+      return { error: { type: "validation_error", message: "请先填写 Base URL 和 API Key。" } };
+    }
+    if (!channel.model) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: "请先选择渠道模型，或先点「同步模型列表」后再测试。" } };
     }
     const startedAt = performance.now();
     const result = await requestLlmChatCompletion({
