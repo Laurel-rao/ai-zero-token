@@ -2,7 +2,15 @@ import type { GatewaySettings } from "../types.js";
 
 export type LlmApiChannelConfig = GatewaySettings["llm"]["apiChannel"];
 
-export type LlmChatMessage = { role: "system" | "user" | "assistant"; content: string };
+export type LlmChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type LlmChatMessage = {
+  role: "system" | "user" | "assistant";
+  /** 纯文本或 OpenAI 兼容的多模态 content parts（文本 + image_url data URL）。 */
+  content: string | LlmChatContentPart[];
+};
 
 export type LlmChatCompletionRequest = {
   channel: LlmApiChannelConfig;

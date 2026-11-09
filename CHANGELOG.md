@@ -4,6 +4,7 @@
 
 - Fixed the 大模型 API 渠道 settings form: 渠道模型 is now a dropdown fed by the synced upstream model list (with a 自定义输入 fallback), 同步模型列表 auto-selects the first model when none is chosen, and 测试连接 is clickable with just Base URL + API Key (the backend falls back to the saved model or the first synced model).
 - The 生图编排模型 dropdown now also lists 大模型 API 渠道 models; when one is selected, the Codex image-generation path automatically falls back to the Codex default orchestrator model, so 生图 API 渠道 output is unaffected and the Codex fallback path keeps working.
+- Chat image attachments now reach the 大模型 API 渠道: user images are sent as OpenAI-compatible `image_url` base64 data-URL content parts (so vision-capable models can read them), text attachments are flattened into the prompt, and other file attachments remain local.
 ## 2.0.12 - 2026-11-09
 
 - Added a 大模型 API 渠道 (系统设置 → 大模型 API 渠道): an OpenAI-compatible text LLM endpoint (Base URL / API Key / model, primary or Codex-fallback mode) so chat replies, the chat image classifier and prompt optimization keep working when Codex accounts are unavailable, with a connection test in settings; image orchestration and image generation remain on Codex or the 生图 API 渠道 because they need the image-generation tool.

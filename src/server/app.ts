@@ -40,6 +40,7 @@ import {
   resolveLlmApiChannel,
   streamLlmChatCompletion,
   type LlmApiChannelConfig,
+  type LlmChatContentPart,
   type LlmChatMessage,
 } from "../core/services/llm-api-channel-service.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
@@ -2457,19 +2458,44 @@ async function createGatewayChatCodexBody(params: {
   };
 }
 
-function buildLlmChatMessages(messages: ChatMessage[]): LlmChatMessage[] {
+async function buildLlmChatMessages(messages: ChatMessage[]): Promise<LlmChatMessage[]> {
   const result: LlmChatMessage[] = [];
   for (const message of messages) {
     if (message.role !== "user" && message.role !== "assistant") {
       continue;
     }
-    // 外部 OpenAI 兼容渠道只接收纯文本：聊天气泡里的文本附件会被展开，
-    // 图片/文件附件不会发送（渠道能力差异见设置页说明）。
-    const content = (message.role === "user" ? buildGatewayChatText(message) : message.content).trim();
-    if (!content) {
+    if (message.role === "assistant") {
+      const content = message.content.trim();
+      if (content) {
+        result.push({ role: "assistant", content });
+      }
       continue;
     }
-    result.push({ role: message.role, content });
+
+    // 用户消息：文本附件展开成文本，图片附件以 OpenAI 兼容的 image_url
+    // （base64 data URL）发送；其他文件附件外部渠道无法接收，跳过。
+    const text = buildGatewayChatText(message).trim();
+    const imageAttachments = message.attachments.filter(
+      (attachment) => attachment.kind === "image" && (attachment.dataUrl || attachment.path),
+    );
+    const parts: LlmChatContentPart[] = [];
+    if (text) {
+      parts.push({ type: "text", text });
+    }
+    for (const attachment of imageAttachments) {
+      const dataUrl = await chatAttachmentDataUrl(attachment);
+      if (!dataUrl) {
+        continue;
+      }
+      parts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    if (parts.length === 0) {
+      continue;
+    }
+    if (!parts.some((part) => part.type === "text")) {
+      parts.unshift({ type: "text", text: "请根据附件图片回复。" });
+    }
+    result.push({ role: "user", content: parts });
   }
   return result;
 }
@@ -4311,7 +4337,7 @@ export function createApp(params?: {
       for await (const event of streamLlmChatCompletion({
         channel: activeChannel,
         model: requestModel,
-        messages: buildLlmChatMessages(params.contextMessages),
+        messages: await buildLlmChatMessages(params.contextMessages),
         signal: abortController.signal,
         timeoutMs: 5 * 60 * 1000,
       })) {

@@ -1440,7 +1440,7 @@ export function SettingsPage(props: {
                 ))}
                 {settingsDraft.llmApiChannelModels.length > 8 ? <span className="settings-metric">等 {settingsDraft.llmApiChannelModels.length} 个</span> : null}
               </div>
-              <p className="settings-status-note">Base URL 可不带 /v1（自动补全）；启用后文本调用统一使用这里的渠道模型；聊天页附件等非文本内容当前不会发给外部渠道。同步的模型列表会随保存写入配置，保存后可在「模型配置」下拉选择。</p>
+              <p className="settings-status-note">Base URL 可不带 /v1（自动补全）；启用后文本调用统一使用这里的渠道模型；聊天页的图片附件会以 image_url 形式发给外部渠道（需模型支持视觉），文本附件会展开为文本，其他文件附件不会发送。同步的模型列表会随保存写入配置，保存后可在「模型配置」下拉选择。</p>
             </div>
           ) : null}
         </section> : null}
