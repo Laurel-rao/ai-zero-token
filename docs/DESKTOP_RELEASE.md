@@ -2,6 +2,15 @@
 
 This project ships the desktop app with Electron. The desktop main process starts the existing local Fastify gateway and loads the React management UI served by that gateway.
 
+## 2.0.12 Release Notes
+
+Version `2.0.12` adds an external LLM API channel and merges its models into the model catalog:
+
+- 系统设置 → 大模型 API 渠道: connect any OpenAI-compatible text LLM endpoint (Base URL, API Key, model) in primary or Codex-fallback mode, with a connection test. Chat replies, the chat image classifier and prompt optimization keep working when Codex accounts are unavailable; image generation and image orchestration stay on Codex or the 生图 API 渠道 because they need the image-generation tool.
+- Sync the upstream `/v1/models` list from the channel; those model ids then appear in the 聊天模型 / 生图检查模型 / 提示词优化模型 dropdowns (marked 「大模型 API」) on both the settings page and the chat page, and `/v1/models`, `/v1/responses` route those ids straight to the channel. 生图编排模型 stays Codex-only.
+- Image share page redesign: images render above the prompt, long prompts fold to 20 lines with an expand/collapse toggle and a copy-prompt button, with a clipboard fallback for insecure and WeChat/WeCom contexts.
+- HTTP page navigations now upgrade to HTTPS behind the reverse proxy so WeCom/WeChat webviews keep the clipboard API available.
+
 ## 2.0.11 Release Notes
 
 Version `2.0.11` improves Codex account import compatibility and native Codex traffic stability:
