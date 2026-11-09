@@ -80,6 +80,16 @@ export function createDefaultSettings(): GatewaySettings {
         model: DEFAULT_IMAGE_MODEL,
       },
     },
+    llm: {
+      apiChannel: {
+        enabled: false,
+        mode: "primary",
+        baseUrl: "",
+        apiKey: "",
+        model: "",
+        models: [],
+      },
+    },
     wecom: {
       enabled: false,
       corpId: "",
@@ -137,6 +147,9 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
       promptOptimizerSystemPrompt: normalizeTrimmedString(parsed.image?.promptOptimizerSystemPrompt, defaults.image.promptOptimizerSystemPrompt, 8000),
       limits: normalizeImageLimits(parsed.image?.limits, defaults.image.limits),
       apiChannel: normalizeImageApiChannel(parsed.image?.apiChannel, defaults.image.apiChannel),
+    },
+    llm: {
+      apiChannel: normalizeLlmApiChannel(parsed.llm?.apiChannel, defaults.llm.apiChannel),
     },
     wecom: {
       enabled: parsed.wecom?.enabled ?? defaults.wecom.enabled,
@@ -215,6 +228,7 @@ export function normalizeCountLimit(value: unknown, fallback = 0, max = 100_000)
 
 type ImageLimitsSettings = GatewaySettings["image"]["limits"];
 type ImageApiChannelSettings = GatewaySettings["image"]["apiChannel"];
+type LlmApiChannelSettings = GatewaySettings["llm"]["apiChannel"];
 type BrandingSettings = GatewaySettings["branding"];
 
 function normalizeBranding(value: unknown, fallback: BrandingSettings): BrandingSettings {
@@ -310,6 +324,48 @@ function normalizeImageApiChannel(value: unknown, fallback: ImageApiChannelSetti
     apiKey: normalizeTrimmedString(record.apiKey, fallback.apiKey, 500),
     model: normalizeTrimmedString(record.model, fallback.model, 120) || fallback.model,
   };
+}
+
+function normalizeLlmApiChannel(value: unknown, fallback: LlmApiChannelSettings): LlmApiChannelSettings {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return fallback;
+  }
+  const record = value as Record<string, unknown>;
+
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : fallback.enabled,
+    mode: record.mode === "fallback" ? "fallback" : record.mode === "primary" ? "primary" : fallback.mode,
+    baseUrl: normalizeTrimmedString(record.baseUrl, fallback.baseUrl, 500),
+    apiKey: normalizeTrimmedString(record.apiKey, fallback.apiKey, 500),
+    // 大模型渠道未启用时允许模型留空，只有真正调用时才要求填好。
+    model: normalizeTrimmedString(record.model, fallback.model, 200),
+    models: normalizeLlmApiChannelModels(record.models),
+  };
+}
+
+/** 渠道模型 id 归一化：只保留字符串、trim、去空、去重，最多 200 个，每个最长 200 字符。 */
+export function normalizeLlmApiChannelModels(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const models: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const model = item.trim().slice(0, 200);
+    if (!model || seen.has(model)) {
+      continue;
+    }
+    seen.add(model);
+    models.push(model);
+    if (models.length >= 200) {
+      break;
+    }
+  }
+  return models;
 }
 
 function normalizeStringList(value: unknown): string[] {

@@ -116,6 +116,16 @@ export type GatewaySettings = {
       model: string;
     };
   };
+  llm: {
+    apiChannel: {
+      enabled: boolean;
+      mode: "primary" | "fallback";
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+      models: string[];
+    };
+  };
   wecom: {
     enabled: boolean;
     corpId: string;
@@ -147,7 +157,7 @@ export type ModelInfo = {
   name: string;
   input: Array<"text" | "image">;
   output?: Array<"text" | "image">;
-  source: string;
+  source: "static" | "codex-cache" | "codex-network" | "llm-api";
   isDefault?: boolean;
 };
 

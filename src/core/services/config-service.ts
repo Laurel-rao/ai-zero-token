@@ -6,10 +6,12 @@ import {
   loadSettings,
   normalizeAccountMaxConcurrency,
   normalizeCountLimit,
+  normalizeLlmApiChannelModels,
   normalizeMilliseconds,
   normalizeQuotaSyncConcurrency,
   saveSettings,
 } from "../store/settings-store.js";
+import { isLlmApiChannelModel, listLlmApiChannelModelIds, resolveLlmApiChannel } from "./llm-api-channel-service.js";
 
 type NetworkProxyParams = {
   enabled: boolean;
@@ -139,6 +141,30 @@ function normalizeImageApiChannelSave(
   return { enabled, mode, baseUrl, apiKey, model };
 }
 
+function normalizeLlmApiChannelSave(
+  params: Partial<GatewaySettings["llm"]["apiChannel"]> | undefined,
+  settings: GatewaySettings["llm"]["apiChannel"],
+): GatewaySettings["llm"]["apiChannel"] {
+  if (!params) {
+    return settings;
+  }
+
+  const baseUrl = params.baseUrl === undefined ? settings.baseUrl : params.baseUrl.trim().replace(/\/+$/, "");
+  const apiKey = params.apiKey === undefined ? settings.apiKey : params.apiKey.trim();
+  const enabled = params.enabled ?? settings.enabled;
+  const mode = params.mode === "fallback" ? "fallback" : params.mode === "primary" ? "primary" : settings.mode;
+  // 大模型渠道允许在未启用时把模型留空；启用时下面统一校验。
+  const model = params.model === undefined ? settings.model : params.model.trim();
+  // 同步到的模型目录：未传时保留原列表，不强制把 channel.model 塞进去。
+  const models = params.models === undefined ? settings.models : normalizeLlmApiChannelModels(params.models);
+
+  if (enabled && (!baseUrl || !apiKey || !model)) {
+    throw new Error("启用大模型 API 渠道时必须填写 Base URL、API Key 和模型。");
+  }
+
+  return { enabled, mode, baseUrl, apiKey, model, models };
+}
+
 export class ConfigService {
   async getSettings(): Promise<GatewaySettings> {
     return this.ensureSettings();
@@ -159,6 +185,10 @@ export class ConfigService {
       throw new Error(`暂不支持 provider: ${provider}`);
     }
     const model = settings.modelRouting.chatModel || settings.defaultModel;
+    // 聊天默认模型可以指向大模型 API 渠道里的外部模型。
+    if (isLlmApiChannelModel(resolveLlmApiChannel(settings.llm?.apiChannel), model)) {
+      return model;
+    }
     return (await hasCodexModel(model)) ? model : getPreferredCodexModel();
   }
 
@@ -279,15 +309,29 @@ export class ConfigService {
       limits?: Partial<GatewaySettings["image"]["limits"]>;
       apiChannel?: Partial<GatewaySettings["image"]["apiChannel"]>;
     };
+    llm?: {
+      apiChannel?: Partial<GatewaySettings["llm"]["apiChannel"]>;
+    };
     wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
     server?: { port: number };
   }): Promise<GatewaySettings> {
     const settings = await this.getSettings();
     let next: GatewaySettings = { ...settings };
 
+    // 先应用大模型 API 渠道配置（含同步到的模型目录），同一次 PUT 里新增的渠道模型
+    // 才能通过后面的默认模型 / 模型路由校验。
+    if (params.llm) {
+      next = {
+        ...next,
+        llm: {
+          apiChannel: normalizeLlmApiChannelSave(params.llm.apiChannel, next.llm.apiChannel),
+        },
+      };
+    }
+
     if (params.defaultModel) {
       const model = params.defaultModel.trim();
-      if (!(await hasCodexModel(model))) {
+      if (!(await hasCodexModel(model)) && !isLlmApiChannelModel(next.llm.apiChannel, model)) {
         throw new Error(`当前网关未找到可用模型: ${params.defaultModel}`);
       }
       next = {
@@ -303,6 +347,7 @@ export class ConfigService {
 
     if (params.modelRouting) {
       const routing = { ...params.modelRouting };
+      const channelModelIds = new Set(listLlmApiChannelModelIds(next.llm.apiChannel));
       const textModels: Array<[Exclude<keyof GatewaySettings["modelRouting"], "imageGenerationModel">, string]> = [
         ["chatModel", "聊天模型"],
         ["imageClassifierModel", "生图检查模型"],
@@ -315,7 +360,19 @@ export class ConfigService {
           continue;
         }
         const normalizedModel = model.trim();
-        if (isSupportedImageModel(normalizedModel) || !(await hasCodexModel(normalizedModel))) {
+        if (isSupportedImageModel(normalizedModel)) {
+          throw Object.assign(new Error(`${label}未找到可用文本模型: ${model}，请同步模型目录后重新选择。`), { statusCode: 400 });
+        }
+        // Codex 目录优先；命中渠道模型目录时也允许，外部文本 API 可以直接调用。
+        const codexModel = await hasCodexModel(normalizedModel);
+        const channelModel = channelModelIds.has(normalizedModel);
+        // 生图编排需要 Codex 的 image_generation 工具，外部文本 API 无法执行。
+        if (key === "imageOrchestratorModel" && channelModel && !codexModel) {
+          throw Object.assign(new Error("生图编排模型需要 Codex 的 image_generation 工具，不能使用大模型 API 渠道模型。"), {
+            statusCode: 400,
+          });
+        }
+        if (!codexModel && !channelModel) {
           throw Object.assign(new Error(`${label}未找到可用文本模型: ${model}，请同步模型目录后重新选择。`), { statusCode: 400 });
         }
         routing[key] = normalizedModel;

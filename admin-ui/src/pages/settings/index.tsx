@@ -1,4 +1,5 @@
 import {
+  BrainCircuit,
   ChevronDown,
   Gauge,
   Globe2,
@@ -78,6 +79,12 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     imageApiChannelBaseUrl: config.settings.image?.apiChannel?.baseUrl || "",
     imageApiChannelApiKey: config.settings.image?.apiChannel?.apiKey || "",
     imageApiChannelModel: config.settings.image?.apiChannel?.model || DEFAULT_IMAGE_MODEL,
+    llmApiChannelEnabled: Boolean(config.settings.llm?.apiChannel?.enabled),
+    llmApiChannelMode: config.settings.llm?.apiChannel?.mode === "fallback" ? "fallback" : "primary",
+    llmApiChannelBaseUrl: config.settings.llm?.apiChannel?.baseUrl || "",
+    llmApiChannelApiKey: config.settings.llm?.apiChannel?.apiKey || "",
+    llmApiChannelModel: config.settings.llm?.apiChannel?.model || "",
+    llmApiChannelModels: [...(config.settings.llm?.apiChannel?.models || [])],
     wecomEnabled: Boolean(config.settings.wecom?.enabled),
     wecomCorpId: config.settings.wecom?.corpId || "",
     wecomAgentId: config.settings.wecom?.agentId || "",
@@ -90,15 +97,15 @@ function profileSearchText(profile: ProfileSummary): string {
   return [profileLabel(profile, true), profile.email || "", profile.accountId, profile.codexAccountId || "", profile.profileId, getPlanType(profile)].join(" ").toLowerCase();
 }
 
-type SettingSectionId = "model" | "branding" | "api" | "wecom" | "proxy" | "runtime" | "limits" | "imageApi" | "rotation" | "display";
+type SettingSectionId = "model" | "branding" | "api" | "wecom" | "proxy" | "runtime" | "limits" | "imageApi" | "llmApi" | "rotation" | "display";
 
 type ModelSettingField = "defaultModel" | "imageClassifierModel" | "imageGenerationModel" | "imageOrchestratorModel" | "promptOptimizerModel";
 
-const MODEL_SETTING_FIELDS: Array<{ key: ModelSettingField; label: string; hint: string; output: "text" | "image" }> = [
+const MODEL_SETTING_FIELDS: Array<{ key: ModelSettingField; label: string; hint: string; output: "text" | "image"; allowLlmApi?: boolean }> = [
   { key: "defaultModel", label: "聊天模型", hint: "新聊天及未指定模型的文本接口使用；已有会话保留原模型。", output: "text" },
   { key: "imageClassifierModel", label: "生图检查模型", hint: "判断聊天回复是否包含可用于生图的提示词，不负责生成图片。", output: "text" },
   { key: "imageGenerationModel", label: "生图服务模型", hint: "实际输出图片，供生图工作台和聊天生图使用。", output: "image" },
-  { key: "imageOrchestratorModel", label: "生图编排模型", hint: "服务端调用图片生成工具的文本模型，与图片输出模型不同。", output: "text" },
+  { key: "imageOrchestratorModel", label: "生图编排模型", hint: "服务端调用图片生成工具的文本模型，与图片输出模型不同。", output: "text", allowLlmApi: false },
   { key: "promptOptimizerModel", label: "提示词优化模型", hint: "生图工作台“优化提示词”按钮使用的文本模型。", output: "text" },
 ];
 
@@ -184,6 +191,12 @@ export function SettingsPage(props: {
     imageApiChannelBaseUrl: "",
     imageApiChannelApiKey: "",
     imageApiChannelModel: DEFAULT_IMAGE_MODEL,
+    llmApiChannelEnabled: false,
+    llmApiChannelMode: "primary",
+    llmApiChannelBaseUrl: "",
+    llmApiChannelApiKey: "",
+    llmApiChannelModel: "",
+    llmApiChannelModels: [],
     wecomEnabled: false,
     wecomCorpId: "",
     wecomAgentId: "",
@@ -197,6 +210,14 @@ export function SettingsPage(props: {
   const [modelDirectory, setModelDirectory] = useState<ModelsResponse | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
+  const [llmChannelTest, setLlmChannelTest] = useState<{ state: "idle" | "testing" | "success" | "error"; message: string }>({
+    state: "idle",
+    message: "",
+  });
+  const [llmModelsSync, setLlmModelsSync] = useState<{ state: "idle" | "loading" | "success" | "error"; message: string }>({
+    state: "idle",
+    message: "",
+  });
   const settingsDirty = settingsDirtyFields.size > 0;
 
   const loadModelDirectory = useCallback(async (signal?: AbortSignal) => {
@@ -272,8 +293,13 @@ export function SettingsPage(props: {
   const imageModels = modelDirectory?.data.filter((model) => model.output?.includes("image")) ?? [];
   const modelCount = textModels.length;
   const imageModelCount = imageModels.length;
-  const invalidModelFields = MODEL_SETTING_FIELDS.filter((field) => {
+  const llmApiModelCount = textModels.filter((model) => model.source === "llm-api").length;
+  const modelOptionsForField = (field: (typeof MODEL_SETTING_FIELDS)[number]) => {
     const models = field.output === "image" ? imageModels : textModels;
+    return field.allowLlmApi === false ? models.filter((model) => model.source !== "llm-api") : models;
+  };
+  const invalidModelFields = MODEL_SETTING_FIELDS.filter((field) => {
+    const models = modelOptionsForField(field);
     return !models.some((model) => model.id === settingsDraft[field.key]);
   });
   const modelAutoRefresh = props.config?.modelAutoRefresh;
@@ -380,6 +406,20 @@ export function SettingsPage(props: {
         : "未启用",
       statusTone: settingsDraft.imageApiChannelEnabled ? "success" : "muted",
       metrics: [settingsDraft.imageApiChannelModel || "默认模型"],
+    },
+    {
+      id: "llmApi",
+      title: "大模型 API 渠道",
+      description: "把聊天与文本模型请求转发到外部 OpenAI 兼容 API",
+      icon: BrainCircuit,
+      tone: "violet",
+      status: settingsDraft.llmApiChannelEnabled
+        ? settingsDraft.llmApiChannelBaseUrl.trim() && settingsDraft.llmApiChannelApiKey.trim() && settingsDraft.llmApiChannelModel.trim()
+          ? settingsDraft.llmApiChannelMode === "primary" ? "已启用（优先使用）" : "已启用（Codex 失败后回退）"
+          : "待补齐配置"
+        : "未启用",
+      statusTone: settingsDraft.llmApiChannelEnabled ? "success" : "muted",
+      metrics: [settingsDraft.llmApiChannelModel || "未填写模型"],
     },
     {
       id: "rotation",
@@ -594,6 +634,16 @@ export function SettingsPage(props: {
           model: string;
         };
       };
+      llm?: {
+        apiChannel?: {
+          enabled: boolean;
+          mode: "primary" | "fallback";
+          baseUrl: string;
+          apiKey?: string;
+          model: string;
+          models: string[];
+        };
+      };
       wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
     } = {};
 
@@ -703,6 +753,18 @@ export function SettingsPage(props: {
         };
       }
     }
+    if (hasDirtyField("llmApiChannelEnabled", "llmApiChannelMode", "llmApiChannelBaseUrl", "llmApiChannelApiKey", "llmApiChannelModel", "llmApiChannelModels")) {
+      payload.llm = {
+        apiChannel: {
+          enabled: settingsDraft.llmApiChannelEnabled,
+          mode: settingsDraft.llmApiChannelMode,
+          baseUrl: settingsDraft.llmApiChannelBaseUrl.trim(),
+          ...(hasDirtyField("llmApiChannelApiKey") || settingsDraft.llmApiChannelApiKey ? { apiKey: settingsDraft.llmApiChannelApiKey.trim() } : {}),
+          model: settingsDraft.llmApiChannelModel.trim(),
+          models: Array.from(new Set(settingsDraft.llmApiChannelModels.map((item) => item.trim()).filter(Boolean))),
+        },
+      };
+    }
     if (hasDirtyField("wecomEnabled", "wecomCorpId", "wecomAgentId", "wecomSecret", "wecomNotifyImageResult")) {
       payload.wecom = {
         enabled: settingsDraft.wecomEnabled,
@@ -712,6 +774,14 @@ export function SettingsPage(props: {
         ...(hasDirtyField("wecomNotifyImageResult") ? { notifyImageResult: settingsDraft.wecomNotifyImageResult } : {}),
       };
     }
+    const llmChannelDirty = hasDirtyField(
+      "llmApiChannelEnabled",
+      "llmApiChannelMode",
+      "llmApiChannelBaseUrl",
+      "llmApiChannelApiKey",
+      "llmApiChannelModel",
+      "llmApiChannelModels",
+    );
     const busyAction: BusyAction = options?.restart ? "restart" : "settings";
     props.setBusy(busyAction);
     try {
@@ -723,6 +793,9 @@ export function SettingsPage(props: {
       props.setConfig(next);
       setSettingsDirtyFields(new Set());
       setSettingsDraft((draft) => ({ ...draft, apiKey: "" }));
+      if (llmChannelDirty) {
+        await loadModelDirectory();
+      }
       if (options?.restart) {
         props.setStatus("设置已保存，正在重启本地网关...");
         await fetchJson<{ ok: boolean; restarting?: boolean }>("/_gateway/admin/restart", { method: "POST" });
@@ -756,6 +829,49 @@ export function SettingsPage(props: {
       props.setStatus(`代理测试失败: ${errorMessage(error)}`);
     } finally {
       props.setBusy(null);
+    }
+  }
+
+  async function testLlmApiChannel() {
+    setLlmChannelTest({ state: "testing", message: "" });
+    try {
+      const result = await fetchJson<{ ok: boolean; model: string; latencyMs: number; reply: string }>("/_gateway/admin/llm-channel/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: formatJson({
+          baseUrl: settingsDraft.llmApiChannelBaseUrl.trim(),
+          apiKey: settingsDraft.llmApiChannelApiKey.trim(),
+          model: settingsDraft.llmApiChannelModel.trim(),
+        }),
+      });
+      setLlmChannelTest({
+        state: "success",
+        message: `连接成功：${result.model || settingsDraft.llmApiChannelModel.trim()}，${result.latencyMs}ms`,
+      });
+    } catch (error) {
+      setLlmChannelTest({ state: "error", message: errorMessage(error) });
+    }
+  }
+
+  async function syncLlmApiModels() {
+    setLlmModelsSync({ state: "loading", message: "" });
+    try {
+      const result = await fetchJson<{ ok: boolean; count: number; models: string[] }>("/_gateway/admin/llm-channel/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: formatJson({
+          baseUrl: settingsDraft.llmApiChannelBaseUrl.trim(),
+          apiKey: settingsDraft.llmApiChannelApiKey.trim(),
+        }),
+      });
+      const models = Array.from(new Set((result.models || []).map((item) => item.trim()).filter(Boolean)));
+      markSettingsDirty({ llmApiChannelModels: models });
+      setLlmModelsSync({
+        state: "success",
+        message: `已从上游同步 ${result.count || models.length} 个模型，保存后可在模型配置中选择`,
+      });
+    } catch (error) {
+      setLlmModelsSync({ state: "error", message: errorMessage(error) });
     }
   }
 
@@ -878,7 +994,7 @@ export function SettingsPage(props: {
             <div className="settings-config-body">
               <div className="settings-form-grid two-columns settings-model-grid" aria-busy={modelsLoading}>
                 {MODEL_SETTING_FIELDS.map((field) => {
-                  const options = field.output === "image" ? imageModels : textModels;
+                  const options = modelOptionsForField(field);
                   const value = settingsDraft[field.key];
                   const available = options.some((model) => model.id === value);
                   return (
@@ -895,7 +1011,7 @@ export function SettingsPage(props: {
                       >
                         {!available ? <option value={value} disabled>{modelsLoading ? "正在加载模型…" : value ? `${value}（当前目录不可用）` : "请选择模型"}</option> : null}
                         {options.map((model) => (
-                          <option key={model.id} value={model.id}>{model.id}</option>
+                          <option key={model.id} value={model.id}>{model.source === "llm-api" ? `${model.id}（大模型 API）` : model.id}</option>
                         ))}
                       </select>
                       <small className="field-hint" id={`setting-${field.key}-hint`}>
@@ -910,7 +1026,7 @@ export function SettingsPage(props: {
                   <span>模型目录</span>
                   <strong>{modelDirectory?.catalog.source || "-"}</strong>
                   <p>
-                    从 /_gateway/models 加载 {modelCount} 个文本模型、{imageModelCount} 个生图模型，无需填写模型名。文本目录来自 Codex，图片目录为网关支持列表；上游账号实际权限仍需以调用结果为准。
+                    从 /_gateway/models 加载 {modelCount} 个文本模型（其中大模型 API 渠道 {llmApiModelCount} 个）、{imageModelCount} 个生图模型，无需填写模型名。文本目录来自 Codex 与大模型 API 渠道，图片目录为网关支持列表；上游账号实际权限仍需以调用结果为准。
                     {modelAutoRefreshDetail ? ` ${modelAutoRefreshDetail}。` : ""}
                     {modelAutoRefresh?.lastError ? ` 最近错误：${modelAutoRefresh.lastError}` : ""}
                   </p>
@@ -1204,8 +1320,89 @@ export function SettingsPage(props: {
           ) : null}
         </section> : null}
 
-        {isAdmin ? <section className={`settings-config-card ${openSections.has("rotation") ? "is-open" : ""}`}>
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("llmApi") ? "is-open" : ""}`}>
           {renderSectionHeader(settingsSections[8])}
+          {openSections.has("llmApi") ? (
+            <div className="settings-config-body">
+              <label className="settings-toggle-row">
+                <input type="checkbox" checked={settingsDraft.llmApiChannelEnabled} onChange={(event) => markSettingsDirty({ llmApiChannelEnabled: event.target.checked })} />
+                <span>
+                  <strong>启用大模型 API 渠道</strong>
+                  <em>启用后聊天回复、生图检查、提示词优化等文本调用使用该渠道模型；生图编排/图片生成仍走 Codex 图片工具或生图 API 渠道；走 API Key 计费，不消耗 Codex 账号额度。</em>
+                </span>
+              </label>
+              <div className="settings-form-grid three-columns">
+                <label className="field">
+                  <span>Base URL</span>
+                  <input className="input" value={settingsDraft.llmApiChannelBaseUrl} onChange={(event) => markSettingsDirty({ llmApiChannelBaseUrl: event.target.value })} placeholder="https://api.deepseek.com" />
+                </label>
+                <label className="field">
+                  <span>API Key</span>
+                  <input className="input" type="password" value={settingsDraft.llmApiChannelApiKey} onChange={(event) => markSettingsDirty({ llmApiChannelApiKey: event.target.value })} placeholder="sk-..." />
+                </label>
+                <label className="field">
+                  <span>渠道模型</span>
+                  <input className="input" value={settingsDraft.llmApiChannelModel} onChange={(event) => markSettingsDirty({ llmApiChannelModel: event.target.value })} placeholder="gpt-4o-mini" />
+                  <small className="field-hint">保存后该渠道模型会出现在「模型配置」下拉，可分别用作聊天模型 / 生图检查模型 / 提示词优化模型（生图编排模型不可选渠道模型）。</small>
+                </label>
+              </div>
+              <label className="field">
+                <span>使用方式</span>
+                <select
+                  className="control"
+                  value={settingsDraft.llmApiChannelMode}
+                  onChange={(event) => markSettingsDirty({ llmApiChannelMode: event.target.value === "fallback" ? "fallback" : "primary" })}
+                >
+                  <option value="primary">优先使用 API 渠道，失败后回退 Codex 账号</option>
+                  <option value="fallback">优先用 Codex 账号，失败后回退 API 渠道</option>
+                </select>
+              </label>
+              <div className="settings-inline-actions">
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => void testLlmApiChannel()}
+                  disabled={Boolean(props.busy) || llmChannelTest.state === "testing" || !settingsDraft.llmApiChannelBaseUrl.trim() || !settingsDraft.llmApiChannelModel.trim()}
+                >
+                  {llmChannelTest.state === "testing" ? <Loader2 className="spin" size={16} /> : <Network size={16} />}
+                  测试连接
+                </button>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => void syncLlmApiModels()}
+                  disabled={Boolean(props.busy) || llmModelsSync.state === "loading" || !settingsDraft.llmApiChannelBaseUrl.trim()}
+                >
+                  {llmModelsSync.state === "loading" ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                  同步模型列表
+                </button>
+              </div>
+              {llmChannelTest.state === "success" ? (
+                <p className="settings-status-note" style={{ color: "#047857" }} role="status">{llmChannelTest.message}</p>
+              ) : null}
+              {llmChannelTest.state === "error" ? (
+                <p className="settings-status-note" style={{ color: "#b91c1c" }} role="alert">{llmChannelTest.message}</p>
+              ) : null}
+              {llmModelsSync.state === "success" ? (
+                <p className="settings-status-note" style={{ color: "#047857" }} role="status">{llmModelsSync.message}</p>
+              ) : null}
+              {llmModelsSync.state === "error" ? (
+                <p className="settings-status-note" style={{ color: "#b91c1c" }} role="alert">{llmModelsSync.message}</p>
+              ) : null}
+              <div className="settings-inline-actions" aria-label="已同步的渠道模型">
+                <span className="settings-metric">已同步 {settingsDraft.llmApiChannelModels.length} 个模型</span>
+                {settingsDraft.llmApiChannelModels.slice(0, 8).map((model) => (
+                  <span className="settings-metric" key={model}>{model}</span>
+                ))}
+                {settingsDraft.llmApiChannelModels.length > 8 ? <span className="settings-metric">等 {settingsDraft.llmApiChannelModels.length} 个</span> : null}
+              </div>
+              <p className="settings-status-note">Base URL 可不带 /v1（自动补全）；启用后文本调用统一使用这里的渠道模型；聊天页附件等非文本内容当前不会发给外部渠道。同步的模型列表会随保存写入配置，保存后可在「模型配置」下拉选择。</p>
+            </div>
+          ) : null}
+        </section> : null}
+
+        {isAdmin ? <section className={`settings-config-card ${openSections.has("rotation") ? "is-open" : ""}`}>
+          {renderSectionHeader(settingsSections[9])}
           {openSections.has("rotation") ? (
             <div className="settings-config-body">
               <div className="auto-switch-counts" aria-label="自动轮换账号统计">
@@ -1254,7 +1451,7 @@ export function SettingsPage(props: {
         </section> : null}
 
         <section className={`settings-config-card ${openSections.has("display") ? "is-open" : ""}`}>
-          {renderSectionHeader(settingsSections[9])}
+          {renderSectionHeader(settingsSections[10])}
           {openSections.has("display") ? (
             <div className="settings-config-body">
               <label className="settings-toggle-row">

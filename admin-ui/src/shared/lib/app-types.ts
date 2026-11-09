@@ -104,6 +104,12 @@ export type SettingDraft = {
   imageApiChannelBaseUrl: string;
   imageApiChannelApiKey: string;
   imageApiChannelModel: string;
+  llmApiChannelEnabled: boolean;
+  llmApiChannelMode: "primary" | "fallback";
+  llmApiChannelBaseUrl: string;
+  llmApiChannelApiKey: string;
+  llmApiChannelModel: string;
+  llmApiChannelModels: string[];
   wecomEnabled: boolean;
   wecomCorpId: string;
   wecomAgentId: string;

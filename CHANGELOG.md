@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.0.12 - 2026-11-09
 
+- Added a 大模型 API 渠道 (系统设置 → 大模型 API 渠道): an OpenAI-compatible text LLM endpoint (Base URL / API Key / model, primary or Codex-fallback mode) so chat replies, the chat image classifier and prompt optimization keep working when Codex accounts are unavailable, with a connection test in settings; image orchestration and image generation remain on Codex or the 生图 API 渠道 because they need the image-generation tool.
+- Merged the 大模型 API 渠道 models into the model catalog: 系统设置 → 大模型 API 渠道 can sync the upstream `/v1/models` list, and those external model ids then show up in the 聊天模型 / 生图检查模型 / 提示词优化模型 dropdowns (marked 「大模型 API」) for both the settings page and the chat page, with `/v1/models` and `/v1/responses` routing those model ids straight to the channel; 生图编排模型 stays Codex-only because it needs the Codex image-generation tool.
+- Reordered the image share page so images render above the prompt, folded long prompts to 20 lines by default (the 展开全部 / 收起提示词 toggle only appears when the prompt overflows, with a no-script fallback that keeps the full text visible), and added a 复制提示词 button that copies the complete prompt with a clipboard fallback for insecure or WeChat/WeCom contexts.
 - Redirected HTTP page navigations to HTTPS behind the reverse proxy (only when `X-Forwarded-Proto: http`, `GET/HEAD` document requests and the host is a real domain — API calls and IP access are untouched), so WeCom/WeChat built-in browsers no longer open the console in an insecure context where the clipboard API is unavailable and copying a preview image failed with 「当前页面不是安全环境」.
 - Reworded the image-copy failure toasts: insecure pages now say that HTTPS is required for the clipboard, and browsers without `ClipboardItem` are told to long-press or right-click to save instead.
 

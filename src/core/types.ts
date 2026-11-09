@@ -89,7 +89,7 @@ export type ModelInfo = {
   name: string;
   input: Array<"text" | "image">;
   output?: Array<"text" | "image">;
-  source: "static" | "codex-cache" | "codex-network";
+  source: "static" | "codex-cache" | "codex-network" | "llm-api";
   isDefault?: boolean;
 };
 
@@ -213,6 +213,17 @@ export type GatewaySettings = {
       baseUrl: string;
       apiKey: string;
       model: string;
+    };
+  };
+  llm: {
+    apiChannel: {
+      enabled: boolean;
+      mode: "primary" | "fallback";
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+      /** 从上游 GET /models 同步到的模型 id 列表。 */
+      models: string[];
     };
   };
   wecom: {

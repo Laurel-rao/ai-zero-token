@@ -33,6 +33,15 @@ import {
   startOpenAICodexRemoteLogin,
   type OpenAICodexRemoteLoginSession,
 } from "../core/providers/openai-codex/oauth.js";
+import {
+  isLlmApiChannelModel,
+  listLlmApiChannelModels,
+  requestLlmChatCompletion,
+  resolveLlmApiChannel,
+  streamLlmChatCompletion,
+  type LlmApiChannelConfig,
+  type LlmChatMessage,
+} from "../core/services/llm-api-channel-service.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
 import { notifyWecomImageResult } from "../core/services/wecom-message-service.js";
 import type { ChatAttachment, ChatConversationDetail, ChatMessage, GatewayUserRole, GenerationHistoryItem } from "../core/services/gateway-database-service.js";
@@ -522,31 +531,43 @@ function formatShareTimestamp(timestamp: number): string {
 }
 
 const SHARE_PAGE_STYLE = `
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light dark; --card-bg: #fff; --border-color: #e5e6eb; --muted: #8a9099; --link: #3370ff; }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 24px 16px 48px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; background: #f4f5f7; color: #1f2329; }
   main { max-width: 880px; margin: 0 auto; }
   header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
   h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  .hint { font-size: 12px; color: #8a9099; }
-  .card { background: #fff; border: 1px solid #e5e6eb; border-radius: 14px; padding: 18px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
-  .prompt { margin: 0 0 16px; font-size: 15px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 14px; padding: 18px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
   .images { display: grid; gap: 12px; }
   figure { margin: 0; }
   img { width: 100%; height: auto; display: block; border-radius: 10px; background: #f2f3f5; -webkit-touch-callout: default; -webkit-user-select: auto; user-select: auto; }
   .image-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
-  .image-actions a, .image-actions button { font: inherit; font-size: 13px; color: #3370ff; background: none; border: 0; padding: 4px 2px; cursor: pointer; text-decoration: none; -webkit-tap-highlight-color: transparent; }
-  .note { margin: 12px 0 0; font-size: 13px; color: #8a9099; }
+  .image-actions a, .image-actions button { font: inherit; font-size: 13px; color: var(--link); background: none; border: 0; padding: 4px 2px; cursor: pointer; text-decoration: none; -webkit-tap-highlight-color: transparent; }
+  .note { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
   .touch-hint { display: none; }
   @media (hover: none) { .touch-hint { display: block; } }
   img.is-save-target { animation: save-pulse 1.2s ease-out 2; outline: 3px solid rgba(51, 112, 255, 0.55); outline-offset: 3px; }
   @keyframes save-pulse { 0% { outline-offset: 3px; } 50% { outline-offset: 8px; } 100% { outline-offset: 3px; } }
-  .meta { margin: 16px 0 0; font-size: 13px; color: #8a9099; display: flex; flex-wrap: wrap; gap: 8px 16px; }
+  .prompt-block { margin-top: 16px; border-top: 1px solid var(--border-color); padding-top: 14px; }
+  .prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .prompt-title { font-size: 13px; font-weight: 600; color: #4e5969; }
+  .prompt-copy { font: inherit; font-size: 13px; color: var(--link); background: #f2f6ff; border: 0; border-radius: 999px; padding: 4px 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .prompt-copy:active { opacity: 0.7; }
+  .prompt-wrap { position: relative; }
+  .prompt { margin: 0; font-size: 15px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .prompt-wrap.is-collapsed .prompt { max-height: 32em; overflow: hidden; }
+  .prompt-wrap.is-collapsed::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 48px; background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--card-bg)); pointer-events: none; }
+  .prompt-toggle { display: inline-block; margin-top: 6px; font: inherit; font-size: 13px; color: var(--link); background: none; border: 0; padding: 4px 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .meta { margin: 16px 0 0; font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 8px 16px; }
   @media (prefers-color-scheme: dark) {
+    :root { --card-bg: #1f2023; --border-color: #2f3136; --muted: #9aa0a6; }
     body { background: #17181a; color: #e8eaed; }
-    .card { background: #1f2023; border-color: #2f3136; }
+    .card { background: var(--card-bg); }
     img { background: #26282c; }
-    .hint, .meta { color: #9aa0a6; }
+    .prompt-title { color: #c9cdd4; }
+    .prompt-copy { background: rgba(51, 112, 255, 0.16); }
+    .prompt-wrap.is-collapsed::after { background: linear-gradient(to bottom, rgba(31, 32, 35, 0), var(--card-bg)); }
   }
 `;
 
@@ -580,15 +601,25 @@ function renderImageSharePage(params: {
 <meta name="referrer" content="no-referrer" />
 <title>图片分享 · AI Zero Token</title>
 <style>${SHARE_PAGE_STYLE}</style>
+<noscript><style>.prompt-wrap.is-collapsed .prompt { max-height: none; overflow: visible; } .prompt-wrap.is-collapsed::after { display: none; } .prompt-toggle { display: none; }</style></noscript>
 </head>
 <body>
 <main>
   <header><h1>图片分享</h1><span class="hint">免登录查看</span></header>
   <section class="card">
-    <p class="prompt">${escapeHtmlText(item.prompt)}</p>
     <div class="images">${images}</div>
     <p class="note touch-hint">手机上长按图片即可保存到相册</p>
     <p class="note" id="share-note" hidden></p>
+    <div class="prompt-block">
+      <div class="prompt-head">
+        <span class="prompt-title">提示词</span>
+        <button type="button" class="prompt-copy" data-copy-prompt>复制提示词</button>
+      </div>
+      <div class="prompt-wrap is-collapsed" id="prompt-wrap">
+        <p class="prompt" id="prompt-text">${escapeHtmlText(item.prompt)}</p>
+      </div>
+      <button type="button" class="prompt-toggle" data-toggle-prompt aria-expanded="false" aria-controls="prompt-text" hidden>展开全部</button>
+    </div>
     <p class="meta">${meta}</p>
   </section>
 </main>
@@ -603,6 +634,93 @@ function renderImageSharePage(params: {
     window.clearTimeout(timer);
     timer = window.setTimeout(function () { note.hidden = true; }, 4000);
   }
+
+  // 提示词：默认只显示 20 行，超出时才出现展开按钮；复制按钮复制完整提示词。
+  var promptWrap = document.getElementById("prompt-wrap");
+  var promptText = document.getElementById("prompt-text");
+  var toggleButton = document.querySelector("[data-toggle-prompt]");
+  var copyButton = document.querySelector("[data-copy-prompt]");
+  var copyTimer = 0;
+  var expanded = false;
+
+  function promptLineHeight() {
+    if (!promptText) return 24;
+    var style = window.getComputedStyle(promptText);
+    var lineHeight = parseFloat(style.lineHeight);
+    if (lineHeight && !isNaN(lineHeight)) return lineHeight;
+    return (parseFloat(style.fontSize) || 15) * 1.6;
+  }
+
+  function updatePromptUi() {
+    if (!promptWrap || !promptText || !toggleButton) return;
+    var overflowing = promptText.scrollHeight > promptLineHeight() * 20 + 1;
+    if (!overflowing) expanded = false;
+    toggleButton.hidden = !overflowing;
+    if (overflowing && !expanded) {
+      promptWrap.classList.add("is-collapsed");
+    } else {
+      promptWrap.classList.remove("is-collapsed");
+    }
+    toggleButton.textContent = expanded ? "收起提示词" : "展开全部";
+    toggleButton.setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+
+  function copyText(text, onSuccess, onFailure) {
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext !== false) {
+      navigator.clipboard.writeText(text).then(onSuccess, function () { legacyCopy(text, onSuccess, onFailure); });
+      return;
+    }
+    legacyCopy(text, onSuccess, onFailure);
+  }
+
+  function legacyCopy(text, onSuccess, onFailure) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.left = "0";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    var copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (error) {
+      copied = false;
+    }
+    area.remove();
+    if (copied) onSuccess(); else onFailure();
+  }
+
+  if (copyButton) {
+    copyButton.addEventListener("click", function () {
+      if (!promptText) return;
+      copyText(promptText.textContent || "", function () {
+        copyButton.textContent = "已复制";
+        window.clearTimeout(copyTimer);
+        copyTimer = window.setTimeout(function () { copyButton.textContent = "复制提示词"; }, 2000);
+        showNote("提示词已复制");
+      }, function () {
+        showNote("复制失败，请长按文字手动复制");
+      });
+    });
+  }
+
+  if (toggleButton) {
+    toggleButton.addEventListener("click", function () {
+      expanded = !expanded;
+      updatePromptUi();
+      if (!expanded && promptWrap) {
+        promptWrap.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    });
+  }
+
+  updatePromptUi();
+  window.addEventListener("resize", updatePromptUi);
+
   var isWechat = /MicroMessenger|wxwork/i.test(navigator.userAgent);
   document.addEventListener("click", function (event) {
     var target = event.target;
@@ -1364,6 +1482,20 @@ const settingsUpdateSchema = z.object({
         .optional(),
     })
     .optional(),
+  llm: z
+    .object({
+      apiChannel: z
+        .object({
+          enabled: z.boolean().optional(),
+          mode: z.enum(["primary", "fallback"]).optional(),
+          baseUrl: z.string().max(500).optional(),
+          apiKey: z.string().max(500).optional(),
+          model: z.string().trim().max(200).optional(),
+          models: z.array(z.string().trim().max(200)).max(200).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   wecom: z
     .object({
       enabled: z.boolean().optional(),
@@ -1378,6 +1510,17 @@ const settingsUpdateSchema = z.object({
       port: z.number().int().min(1).max(65535),
     })
     .optional(),
+});
+
+const llmChannelTestSchema = z.object({
+  baseUrl: z.string().max(500).optional(),
+  apiKey: z.string().max(500).optional(),
+  model: z.string().trim().max(200).optional(),
+});
+
+const llmChannelModelsSchema = z.object({
+  baseUrl: z.string().max(500).optional(),
+  apiKey: z.string().max(500).optional(),
 });
 
 const proxyTestSchema = z.object({
@@ -2314,6 +2457,23 @@ async function createGatewayChatCodexBody(params: {
   };
 }
 
+function buildLlmChatMessages(messages: ChatMessage[]): LlmChatMessage[] {
+  const result: LlmChatMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant") {
+      continue;
+    }
+    // 外部 OpenAI 兼容渠道只接收纯文本：聊天气泡里的文本附件会被展开，
+    // 图片/文件附件不会发送（渠道能力差异见设置页说明）。
+    const content = (message.role === "user" ? buildGatewayChatText(message) : message.content).trim();
+    if (!content) {
+      continue;
+    }
+    result.push({ role: message.role, content });
+  }
+  return result;
+}
+
 function chatMessageTitle(content: string, attachments: ChatAttachment[]): string {
   const text = content.trim().replace(/\s+/g, " ");
   if (text) {
@@ -2658,6 +2818,10 @@ function getImageGenerationTimeoutMs(settings: GatewaySettings): number {
     : DEFAULT_IMAGE_GENERATION_TIMEOUT_MS;
 }
 
+function isLlmChannelChatResult(result: ChatResult): boolean {
+  return isObjectRecord(result.raw) && result.raw._gatewayLlmRoute === "llm-api-channel";
+}
+
 function buildResponseApiBody(result: ChatResult, includeRaw?: boolean): Record<string, unknown> {
   const usage = buildResponsesUsagePayload(extractTokenUsage(result.raw));
   const responseBody: Record<string, unknown> = {
@@ -2816,6 +2980,13 @@ function serializeSettings(settings: GatewaySettings, isAdmin: boolean, envApiKe
       apiChannel: {
         ...settings.image.apiChannel,
         apiKey: isAdmin ? settings.image.apiChannel.apiKey : "",
+      },
+    },
+    llm: {
+      ...settings.llm,
+      apiChannel: {
+        ...settings.llm.apiChannel,
+        apiKey: isAdmin ? settings.llm.apiChannel.apiKey : "",
       },
     },
   };
@@ -3180,6 +3351,10 @@ function sseTokenUsageStatus(stats: SseStreamStats, statusCode: number): UsageTo
     return "terminal_without_usage";
   }
   return "not_returned";
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function createApp(params?: {
@@ -4013,12 +4188,37 @@ export function createApp(params?: {
     return { ok: true };
   });
 
+  /**
+   * 解析聊天页要使用的模型：渠道「优先」时直接用渠道模型；「回退」时先按
+   * Codex 目录解析，解析失败但渠道可用时退回渠道模型，避免 Codex 未登录/
+   * 目录同步失败时连回退机会都没有。
+   */
+  async function resolveChatModel(requested: string | undefined, fallbackModel: string | undefined, channel: LlmApiChannelConfig | undefined): Promise<string> {
+    const candidate = (requested || fallbackModel || "").trim();
+    // 选中的模型属于外部渠道目录时直接使用该模型（Codex 无法提供）。
+    if (channel && candidate && isLlmApiChannelModel(channel, candidate)) {
+      return candidate;
+    }
+    if (channel?.mode === "primary") {
+      return channel.model;
+    }
+    try {
+      return await ctx.modelService.resolveModel("openai-codex", requested || fallbackModel);
+    } catch (error) {
+      if (channel) {
+        return channel.model;
+      }
+      throw error;
+    }
+  }
+
   async function streamGatewayChatAssistantReply(params: {
     request: FastifyRequest;
     reply: FastifyReply;
     owner: string | undefined;
     conversationId: string;
     model: string;
+    llmChannel?: LlmApiChannelConfig;
     assistantMessage: ChatMessage;
     contextMessages: ChatMessage[];
     promptLength: number;
@@ -4031,6 +4231,154 @@ export function createApp(params?: {
     let accumulated = "";
     let sseBuffer = "";
     let inBandFailure: CodexInBandFailure | undefined;
+    let channelAttempted = false;
+    let channelUsage: UsageTokenUsage | null = null;
+    const channel = params.llmChannel;
+
+    async function failChatReplyWithReason(error: unknown): Promise<void> {
+      const normalized = normalizeError(error);
+      if (profile) {
+        await ctx.authService.recordProfileRequestFailure(profile.profileId, error, undefined, "openai-codex").catch(() => undefined);
+      }
+      const failedMessage = await ctx.gatewayDatabaseService.updateChatMessage(params.assistantMessage.id, params.owner, {
+        content: accumulated.trim(),
+        status: "failed",
+        model: params.model,
+        error: normalized.message,
+        metadata: {
+          durationMs: performance.now() - startedAt,
+          requestId: params.request.id,
+        },
+      });
+      pushGatewayRequestLog({
+        id: params.request.id,
+        owner: params.owner,
+        method: params.request.method,
+        endpoint: params.request.url,
+        account: channelAttempted ? "大模型 API 渠道" : profileLogLabel(profile),
+        model: params.model,
+        statusCode: getErrorStatusCode(normalized),
+        durationMs: performance.now() - startedAt,
+        source: "聊天工作台",
+        details: {
+          requestId: params.request.id,
+          remoteAddress: params.request.ip,
+          userAgent: params.request.headers["user-agent"],
+          request: {
+            conversationId: params.conversationId,
+            promptLength: params.promptLength,
+            attachmentCount: params.contextMessages.reduce((sum, message) => sum + message.attachments.length, 0),
+            contextMessageCount: params.contextMessages.length,
+            ...(channelAttempted ? { llmChannel: true } : {}),
+          },
+          response: {
+            assistantMessageId: params.assistantMessage.id,
+            textPreview: truncateForLog(accumulated, CHAT_LOG_TEXT_PREVIEW_CHARS),
+            textLength: accumulated.length,
+          },
+          error: {
+            message: normalized.message,
+            upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
+            upstreamRequestId: (normalized as Error & { requestId?: unknown }).requestId,
+            upstreamErrorCode: (normalized as Error & { upstreamErrorCode?: unknown }).upstreamErrorCode,
+            upstreamErrorMessage: (normalized as Error & { upstreamErrorMessage?: unknown }).upstreamErrorMessage,
+          },
+        },
+        usage: {
+          profile,
+          tokenUsage: channelAttempted ? channelUsage : null,
+        },
+      });
+      writeGatewayChatSse(params.reply, "error", {
+        message: normalized.message,
+        assistantMessage: failedMessage,
+      });
+      writeGatewayChatSse(params.reply, "done", { ok: false });
+      params.reply.raw.end();
+    }
+
+    async function completeViaChannel(): Promise<void> {
+      const activeChannel = channel;
+      if (!activeChannel) {
+        throw new Error("大模型 API 渠道未配置完整。");
+      }
+      channelAttempted = true;
+      // 聊天页选中的模型若在渠道目录里就沿用，否则使用渠道默认模型。
+      const requestModel = isLlmApiChannelModel(activeChannel, params.model)
+        ? params.model
+        : activeChannel.model || params.model;
+      let resolvedModel = requestModel;
+      for await (const event of streamLlmChatCompletion({
+        channel: activeChannel,
+        model: requestModel,
+        messages: buildLlmChatMessages(params.contextMessages),
+        signal: abortController.signal,
+        timeoutMs: 5 * 60 * 1000,
+      })) {
+        if (event.type === "delta") {
+          accumulated += event.text;
+          writeGatewayChatSse(params.reply, "message_delta", {
+            id: params.assistantMessage.id,
+            delta: event.text,
+          });
+        } else if (event.type === "usage") {
+          channelUsage = normalizeTokenUsage(event.usage);
+        } else if (event.type === "done") {
+          resolvedModel = event.model || resolvedModel;
+        }
+      }
+      if (!accumulated.trim()) {
+        throw new Error("大模型 API 渠道没有返回文本内容。");
+      }
+      const finalMessage = await ctx.gatewayDatabaseService.updateChatMessage(params.assistantMessage.id, params.owner, {
+        content: accumulated.trim(),
+        status: "success",
+        model: resolvedModel,
+        error: null,
+        metadata: {
+          durationMs: performance.now() - startedAt,
+          account: "大模型 API 渠道",
+          requestId: params.request.id,
+        },
+      });
+      pushGatewayRequestLog({
+        id: params.request.id,
+        owner: params.owner,
+        method: params.request.method,
+        endpoint: params.request.url,
+        account: "大模型 API 渠道",
+        model: resolvedModel,
+        statusCode: 200,
+        durationMs: performance.now() - startedAt,
+        source: "聊天工作台",
+        details: {
+          requestId: params.request.id,
+          remoteAddress: params.request.ip,
+          userAgent: params.request.headers["user-agent"],
+          request: {
+            conversationId: params.conversationId,
+            promptLength: params.promptLength,
+            attachmentCount: params.contextMessages.reduce((sum, message) => sum + message.attachments.length, 0),
+            contextMessageCount: params.contextMessages.length,
+            llmChannel: true,
+          },
+          response: {
+            assistantMessageId: params.assistantMessage.id,
+            textPreview: truncateForLog(accumulated, CHAT_LOG_TEXT_PREVIEW_CHARS),
+            textLength: accumulated.length,
+          },
+        },
+        usage: {
+          tokenUsage: channelUsage,
+        },
+      });
+      writeGatewayChatSse(params.reply, "message_done", {
+        message: finalMessage,
+        durationMs: performance.now() - startedAt,
+      });
+      writeGatewayChatSse(params.reply, "done", { ok: true });
+      params.reply.raw.end();
+    }
 
     params.reply.raw.on("close", () => {
       abortController.abort();
@@ -4042,6 +4390,21 @@ export function createApp(params?: {
       "X-Accel-Buffering": "no",
     });
     writeGatewayChatSse(params.reply, "message_start", params.startPayload);
+
+    let channelFailure: unknown;
+    if (channel?.mode === "primary") {
+      try {
+        await completeViaChannel();
+        return params.reply;
+      } catch (error) {
+        channelFailure = error;
+        // 渠道已经输出过增量时无法再切换到 Codex，只能按失败收尾。
+        if (accumulated) {
+          await failChatReplyWithReason(error);
+          return params.reply;
+        }
+      }
+    }
 
     try {
       profile = await ctx.authService.requireUsableProfile("openai-codex");
@@ -4139,63 +4502,21 @@ export function createApp(params?: {
       writeGatewayChatSse(params.reply, "done", { ok: true });
       params.reply.raw.end();
     } catch (error) {
-      const normalized = normalizeError(error);
-      if (profile) {
-        await ctx.authService.recordProfileRequestFailure(profile.profileId, error, undefined, "openai-codex").catch(() => undefined);
+      let failure = error;
+      // Codex 在输出任何文本增量之前失败时，回退到大模型 API 渠道。
+      if (channel?.mode === "fallback" && !accumulated) {
+        try {
+          await completeViaChannel();
+          return params.reply;
+        } catch (channelError) {
+          channelAttempted = true;
+          failure = new Error(`Codex 账号调用失败：${errorText(error)}；大模型 API 渠道回退失败：${errorText(channelError)}`);
+        }
+      } else if (channelFailure) {
+        // 渠道优先模式：渠道失败后已回退 Codex，Codex 也失败时合并两个原因。
+        failure = new Error(`大模型 API 渠道调用失败：${errorText(channelFailure)}；Codex 账号回退失败：${errorText(error)}`);
       }
-      const failedMessage = await ctx.gatewayDatabaseService.updateChatMessage(params.assistantMessage.id, params.owner, {
-        content: accumulated.trim(),
-        status: "failed",
-        model: params.model,
-        error: normalized.message,
-        metadata: {
-          durationMs: performance.now() - startedAt,
-          requestId: params.request.id,
-        },
-      });
-      pushGatewayRequestLog({
-        id: params.request.id,
-        owner: params.owner,
-        method: params.request.method,
-        endpoint: params.request.url,
-        account: profileLogLabel(profile),
-        model: params.model,
-        statusCode: getErrorStatusCode(normalized),
-        durationMs: performance.now() - startedAt,
-        source: "聊天工作台",
-        details: {
-          requestId: params.request.id,
-          remoteAddress: params.request.ip,
-          userAgent: params.request.headers["user-agent"],
-          request: {
-            conversationId: params.conversationId,
-            promptLength: params.promptLength,
-            attachmentCount: params.contextMessages.reduce((sum, message) => sum + message.attachments.length, 0),
-            contextMessageCount: params.contextMessages.length,
-          },
-          response: {
-            assistantMessageId: params.assistantMessage.id,
-            textPreview: truncateForLog(accumulated, CHAT_LOG_TEXT_PREVIEW_CHARS),
-            textLength: accumulated.length,
-          },
-          error: {
-            message: normalized.message,
-            upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
-            upstreamRequestId: (normalized as Error & { requestId?: unknown }).requestId,
-            upstreamErrorCode: (normalized as Error & { upstreamErrorCode?: unknown }).upstreamErrorCode,
-            upstreamErrorMessage: (normalized as Error & { upstreamErrorMessage?: unknown }).upstreamErrorMessage,
-          },
-        },
-        usage: {
-          profile,
-        },
-      });
-      writeGatewayChatSse(params.reply, "error", {
-        message: normalized.message,
-        assistantMessage: failedMessage,
-      });
-      writeGatewayChatSse(params.reply, "done", { ok: false });
-      params.reply.raw.end();
+      await failChatReplyWithReason(failure);
     }
     return params.reply;
   }
@@ -4215,7 +4536,10 @@ export function createApp(params?: {
       return { error: { type: "not_found", message: "聊天会话不存在。" } };
     }
 
-    const model = await ctx.modelService.resolveModel("openai-codex", parsed.data.model || conversation.model);
+    // 大模型 API 渠道启用为「优先使用」时，文本回复直接走渠道模型，不再要求
+    // Codex 模型目录里有该模型（Codex 账号未登录/目录同步失败时聊天仍可用）。
+    const llmChannel = resolveLlmApiChannel((await ctx.configService.getSettings()).llm?.apiChannel);
+    const model = await resolveChatModel(parsed.data.model, conversation.model, llmChannel);
     const userMessage = await ctx.gatewayDatabaseService.saveChatMessage({
       conversationId: id,
       owner,
@@ -4249,6 +4573,7 @@ export function createApp(params?: {
       owner,
       conversationId: id,
       model,
+      llmChannel,
       assistantMessage,
       contextMessages,
       promptLength: parsed.data.content.length,
@@ -4328,7 +4653,8 @@ export function createApp(params?: {
       return { error: { type: "validation_error", message: "只能重试失败的回复。" } };
     }
 
-    const model = await ctx.modelService.resolveModel("openai-codex", parsed.data.model || existing.model || conversation.model);
+    const llmChannel = resolveLlmApiChannel((await ctx.configService.getSettings()).llm?.apiChannel);
+    const model = await resolveChatModel(parsed.data.model || existing.model, conversation.model, llmChannel);
     if (conversation.model !== model) {
       await ctx.gatewayDatabaseService.updateChatConversation(id, owner, { model });
     }
@@ -4353,6 +4679,7 @@ export function createApp(params?: {
       owner,
       conversationId: id,
       model,
+      llmChannel,
       assistantMessage,
       contextMessages,
       promptLength: lastUserMessage?.content.length ?? 0,
@@ -4388,7 +4715,8 @@ export function createApp(params?: {
       return { error: { type: "not_found", message: "要编辑的用户消息不存在。" } };
     }
 
-    const model = await ctx.modelService.resolveModel("openai-codex", parsed.data.model || conversation.model || existing.model);
+    const llmChannel = resolveLlmApiChannel((await ctx.configService.getSettings()).llm?.apiChannel);
+    const model = await resolveChatModel(parsed.data.model || conversation.model, existing.model, llmChannel);
     if (conversation.model !== model || conversation.title === "新对话") {
       await ctx.gatewayDatabaseService.updateChatConversation(id, owner, {
         model,
@@ -4428,6 +4756,7 @@ export function createApp(params?: {
       owner,
       conversationId: id,
       model,
+      llmChannel,
       assistantMessage,
       contextMessages,
       promptLength: parsed.data.content.length,
@@ -4682,7 +5011,7 @@ export function createApp(params?: {
     const isAdmin = isAdminSession(session);
     const [status, models, modelCatalog, versionStatus, settings, profile, profiles, codexStatus, usage, users, currentUserRecord] = await Promise.all([
       ctx.authService.getStatus(),
-      ctx.modelService.listModels(),
+      ctx.modelService.listModels("openai-codex", { includeLlmApiChannel: true }),
       ctx.modelService.getCatalog(),
       ctx.versionService.getVersionStatus(),
       ctx.configService.getSettings(),
@@ -5802,6 +6131,59 @@ export function createApp(params?: {
     return buildAdminConfig(request);
   });
 
+  app.post("/_gateway/admin/llm-channel/test", async (request, reply) => {
+    const parsed = llmChannelTestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+    const settings = await ctx.configService.getSettings();
+    const saved = settings.llm.apiChannel;
+    const channel: LlmApiChannelConfig = {
+      enabled: true,
+      mode: "primary",
+      baseUrl: parsed.data.baseUrl?.trim() || saved.baseUrl,
+      apiKey: parsed.data.apiKey?.trim() || saved.apiKey,
+      model: parsed.data.model?.trim() || saved.model,
+      models: saved.models ?? [],
+    };
+    if (!channel.baseUrl || !channel.apiKey || !channel.model) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: "请先填写 Base URL、API Key 和模型。" } };
+    }
+    const startedAt = performance.now();
+    const result = await requestLlmChatCompletion({
+      channel,
+      messages: [{ role: "user", content: "请只回复：连接成功" }],
+      maxTokens: 32,
+      timeoutMs: 20_000,
+    });
+    return {
+      ok: true,
+      model: result.model,
+      latencyMs: Math.round(performance.now() - startedAt),
+      reply: result.text.slice(0, 200),
+    };
+  });
+
+  app.post("/_gateway/admin/llm-channel/models", async (request, reply) => {
+    const parsed = llmChannelModelsSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: parsed.error.issues[0]?.message ?? "请求体格式错误" } };
+    }
+    const settings = await ctx.configService.getSettings();
+    const saved = settings.llm.apiChannel;
+    const baseUrl = parsed.data.baseUrl?.trim() || saved.baseUrl;
+    const apiKey = parsed.data.apiKey?.trim() || saved.apiKey;
+    if (!baseUrl || !apiKey) {
+      reply.code(400);
+      return { error: { type: "validation_error", message: "请先填写 Base URL 和 API Key。" } };
+    }
+    const models = await listLlmApiChannelModels({ baseUrl, apiKey, timeoutMs: 15_000 });
+    return { ok: true, count: models.length, models };
+  });
+
   app.post("/_gateway/admin/restart", async (_request, reply) => {
     if (!params?.onRestart) {
       reply.code(501);
@@ -6575,10 +6957,11 @@ export function createApp(params?: {
       const normalized = normalizeError(error);
       const statusCode = getErrorStatusCode(normalized);
       const activeProfile = await ctx.authService.getActiveProfile();
+      const failedLlmChannel = resolveLlmApiChannel((await ctx.configService.getSettings()).llm?.apiChannel);
       pushGatewayRequestLog({
         method: request.method,
         endpoint: request.url,
-        account: profileLogLabel(activeProfile),
+        account: failedLlmChannel?.mode === "primary" ? "大模型 API 渠道" : profileLogLabel(activeProfile),
         model: parsed.data.model ?? "default",
         statusCode,
         durationMs: performance.now() - startedAt,
@@ -6589,6 +6972,7 @@ export function createApp(params?: {
           userAgent: request.headers["user-agent"],
           request: summarizeResponsesRequest(parsed.data),
           codex: summarizeCodexChatBody(codexBody),
+          ...(failedLlmChannel ? { llmChannel: true } : {}),
           error: {
             message: normalized.message,
             upstreamStatus: (normalized as Error & { upstreamStatus?: unknown }).upstreamStatus,
@@ -6603,12 +6987,13 @@ export function createApp(params?: {
       throw error;
     }
 
-    const activeProfile = result.profile ?? await ctx.authService.getActiveProfile();
+    const llmChannelResult = isLlmChannelChatResult(result);
+    const activeProfile = llmChannelResult ? null : result.profile ?? await ctx.authService.getActiveProfile();
     pushGatewayRequestLog({
       id: request.id,
       method: request.method,
       endpoint: request.url,
-      account: profileLogLabel(activeProfile),
+      account: llmChannelResult ? "大模型 API 渠道" : profileLogLabel(activeProfile),
       model: result.model,
       statusCode: 200,
       durationMs: performance.now() - startedAt,

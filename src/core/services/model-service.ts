@@ -7,6 +7,7 @@ import { IMAGE_MODEL_INFOS } from "../models/image-models.js";
 import type { ModelCatalogInfo, ModelInfo, ProviderId } from "../types.js";
 import type { AuthService } from "./auth-service.js";
 import { ConfigService } from "./config-service.js";
+import { isLlmApiChannelModel, listLlmApiChannelModelIds, resolveLlmApiChannel } from "./llm-api-channel-service.js";
 
 const CODEX_MODEL_AUTO_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 const CODEX_MODEL_AUTO_REFRESH_INITIAL_DELAY_MS = 20 * 1000;
@@ -39,7 +40,10 @@ export class ModelService {
     private readonly authService: AuthService,
   ) {}
 
-  async listModels(provider: ProviderId = "openai-codex"): Promise<ModelInfo[]> {
+  async listModels(
+    provider: ProviderId = "openai-codex",
+    options?: { includeLlmApiChannel?: boolean },
+  ): Promise<ModelInfo[]> {
     if (provider !== "openai-codex") {
       throw new Error(`暂不支持 provider: ${provider}`);
     }
@@ -48,14 +52,37 @@ export class ModelService {
       getCodexModelCatalog(),
       this.configService.getDefaultModel(provider),
     ]);
-    return models.map((model) => ({
+    const codexModels: ModelInfo[] = models.map((model) => ({
       ...model,
       isDefault: model.id === defaultModel,
     }));
+    if (!options?.includeLlmApiChannel) {
+      return codexModels;
+    }
+
+    // 把大模型 API 渠道同步到的外部文本模型并入目录；与 Codex 模型重名时 Codex 优先。
+    const settings = await this.configService.getSettings();
+    const channelModelIds = listLlmApiChannelModelIds(resolveLlmApiChannel(settings.llm?.apiChannel));
+    if (channelModelIds.length === 0) {
+      return codexModels;
+    }
+    const existingIds = new Set(codexModels.map((model) => model.id));
+    const channelModels: ModelInfo[] = channelModelIds
+      .filter((id) => !existingIds.has(id))
+      .map((id) => ({
+        provider,
+        id,
+        name: id,
+        input: ["text"],
+        output: ["text"],
+        source: "llm-api",
+        isDefault: id === settings.modelRouting.chatModel,
+      }));
+    return [...codexModels, ...channelModels];
   }
 
   async listAvailableModels(): Promise<ModelInfo[]> {
-    const models = await this.listModels();
+    const models = await this.listModels("openai-codex", { includeLlmApiChannel: true });
     const byId = new Map<string, ModelInfo>(models.map((model) => [model.id, { ...model, output: ["text"] }]));
     for (const model of IMAGE_MODEL_INFOS) {
       byId.set(model.id, model);
@@ -230,6 +257,11 @@ export class ModelService {
     }
 
     if (!(await hasCodexModel(requested))) {
+      // 不在 Codex 目录里时，再看是否属于已启用的大模型 API 渠道模型目录。
+      const settings = await this.configService.getSettings();
+      if (isLlmApiChannelModel(resolveLlmApiChannel(settings.llm?.apiChannel), requested)) {
+        return requested;
+      }
       throw new Error(`当前网关未找到可用模型: ${requested}`);
     }
 
