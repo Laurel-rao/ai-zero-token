@@ -4,7 +4,8 @@ export type LlmApiChannelConfig = GatewaySettings["llm"]["apiChannel"];
 
 export type LlmChatContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+  | { type: "image_url"; image_url: { url: string } }
+  | { type: "file"; file: { filename: string; file_data: string } };
 
 export type LlmChatMessage = {
   role: "system" | "user" | "assistant";

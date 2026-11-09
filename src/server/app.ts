@@ -2458,6 +2458,21 @@ async function createGatewayChatCodexBody(params: {
   };
 }
 
+/** 文件附件统一用 OpenAI 兼容的 file 内容块（base64 data URL）转发，由上游模型解析。 */
+async function buildLlmFileAttachmentParts(attachment: ChatAttachment): Promise<LlmChatContentPart[]> {
+  const dataUrl = await chatAttachmentDataUrl(attachment);
+  if (!dataUrl) {
+    return [];
+  }
+  return [{
+    type: "file",
+    file: {
+      filename: attachment.name,
+      file_data: dataUrl,
+    },
+  }];
+}
+
 async function buildLlmChatMessages(messages: ChatMessage[]): Promise<LlmChatMessage[]> {
   const result: LlmChatMessage[] = [];
   for (const message of messages) {
@@ -2472,8 +2487,8 @@ async function buildLlmChatMessages(messages: ChatMessage[]): Promise<LlmChatMes
       continue;
     }
 
-    // 用户消息：文本附件展开成文本，图片附件以 OpenAI 兼容的 image_url
-    // （base64 data URL）发送；其他文件附件外部渠道无法接收，跳过。
+    // 用户消息：文本附件展开成文本，图片附件以 image_url（base64 data URL）发送，
+    // PDF/DOCX/PPTX/XLSX 文件附件以 OpenAI 兼容的 file 内容块原样转发。
     const text = buildGatewayChatText(message).trim();
     const imageAttachments = message.attachments.filter(
       (attachment) => attachment.kind === "image" && (attachment.dataUrl || attachment.path),
@@ -2489,11 +2504,17 @@ async function buildLlmChatMessages(messages: ChatMessage[]): Promise<LlmChatMes
       }
       parts.push({ type: "image_url", image_url: { url: dataUrl } });
     }
+    const fileAttachments = message.attachments.filter(
+      (attachment) => attachment.kind === "file" && (attachment.dataUrl || attachment.path),
+    );
+    for (const attachment of fileAttachments) {
+      parts.push(...await buildLlmFileAttachmentParts(attachment));
+    }
     if (parts.length === 0) {
       continue;
     }
     if (!parts.some((part) => part.type === "text")) {
-      parts.unshift({ type: "text", text: "请根据附件图片回复。" });
+      parts.unshift({ type: "text", text: "请根据附件内容回复。" });
     }
     result.push({ role: "user", content: parts });
   }
