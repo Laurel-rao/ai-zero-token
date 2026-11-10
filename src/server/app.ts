@@ -111,7 +111,9 @@ const WECOM_CHAT_TASK_TIMEOUT_MS = 5 * 60 * 1000;
 const WECOM_CLASSIFIER_TIMEOUT_MS = 3 * 60 * 1000;
 const WECOM_IMAGE_SUBMIT_TIMEOUT_MS = 60 * 1000;
 const WECOM_IMAGE_POLL_INTERVAL_MS = 2000;
-const WECOM_IMAGE_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+// 生图 API 渠道单张图实测可能要 4~7 分钟，轮询上限必须比它宽，
+// 否则会在任务成功前误报「图片生成超时」；15 分钟同时覆盖排队等待。
+const WECOM_IMAGE_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 const WECOM_IMAGE_JPEG_MAX_EDGE = 2048;
 const WECOM_IMAGE_JPEG_MAX_BYTES = 2 * 1024 * 1024;
 const WECOM_CONVERSATION_TITLE = "企业微信";
@@ -4047,7 +4049,12 @@ export function createApp(params?: {
       throw new Error("生图接口没有返回任务 ID。");
     }
 
-    const deadline = Date.now() + WECOM_IMAGE_POLL_TIMEOUT_MS;
+    const generationTimeoutMs = Number.isFinite(params.settings.image.generationTimeoutMs)
+      ? params.settings.image.generationTimeoutMs
+      : 0;
+    // 以网关自己的生图超时为下限再加 1 分钟缓冲，避免轮询比生图更早放弃。
+    const pollTimeoutMs = Math.max(WECOM_IMAGE_POLL_TIMEOUT_MS, generationTimeoutMs + 60_000);
+    const deadline = Date.now() + pollTimeoutMs;
     let item: GenerationHistoryItem | null = null;
     while (Date.now() < deadline) {
       item = await ctx.gatewayDatabaseService.getGenerationHistoryItem(generationId, params.username);
