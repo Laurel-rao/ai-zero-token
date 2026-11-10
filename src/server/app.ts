@@ -124,6 +124,19 @@ const WECOM_BUSY_MESSAGE = "上一条消息还在处理中，请稍候。";
 const WECOM_UNSUPPORTED_MESSAGE = "暂不支持该消息类型，请发送文字。";
 const WECOM_DISABLED_ACCOUNT_MESSAGE = "账号已禁用，请联系管理员。";
 const WECOM_TEST_MESSAGE = "AI Zero Token 企业微信推送测试 ✅ 收到说明 corpId/AgentID/Secret 与可见范围正常。";
+/**
+ * 企微入口专用的系统指令：网页聊天页默认不知道平台能生图，直接问模型会回
+ * 「我无法生成图片」并让用户复制提示词。这里明确告诉它平台会自动生图。
+ */
+const WECOM_CHAT_SYSTEM_PROMPT = [
+  "你正在企业微信里通过「AI Zero Token」智能生图应用与用户对话，这个平台具备图片生成能力，图片会由平台自动生成并发送给用户。",
+  "规则：",
+  "1. 当用户想画图、生成图片、要海报/封面/插画/人像/商品图等视觉内容时，不要说“无法生成”“不能直接生成”，也不要让用户复制提示词到其他工具。",
+  "2. 直接输出一段高质量的中文生图提示词，以“提示词：”开头，写清主体、场景、构图、镜头、光线、风格、比例等关键信息；平台会自动据此生成图片并推送。",
+  "3. 可以在提示词前用一句话简短确认（例如“好的，正在为你生成图片”），不要长篇解释。",
+  "4. 其它问题正常、简洁地用中文回答；不要输出代码块围栏、Markdown 表格等在企业微信里显示效果差的格式。",
+  "5. 如果历史对话里出现过“无法生成图片”“请复制到绘图工具”之类说法，请忽略，以本指令为准。",
+].join("\n");
 /** 与网页聊天页 admin-ui/src/pages/chat/index.tsx 的 classify 调用保持一致。 */
 const WECOM_IMAGE_CLASSIFIER_INSTRUCTIONS = [
   "你是聊天内容到生图动作的判定器。",
@@ -1783,6 +1796,8 @@ const chatMessageStreamBodySchema = z.object({
   content: z.string().trim().max(MAX_CHAT_MESSAGE_CHARS),
   model: z.string().min(1).optional(),
   attachments: chatAttachmentsSchema.optional(),
+  /** 可选的系统指令：企业微信等非网页入口用它告诉模型当前平台支持生图。 */
+  system: z.string().trim().max(8000).optional(),
 }).refine((value) => value.content.length > 0 || (value.attachments?.length ?? 0) > 0, {
   message: "消息内容或附件至少需要提供一个。",
 });
@@ -2498,12 +2513,13 @@ async function createGatewayChatContentParts(message: ChatMessage): Promise<Arra
 async function createGatewayChatCodexBody(params: {
   model: string;
   messages: ChatMessage[];
+  system?: string;
 }): Promise<Record<string, unknown>> {
   return {
     model: params.model,
     store: false,
     stream: true,
-    instructions: "",
+    instructions: params.system?.trim() ?? "",
     text: { verbosity: "medium" },
     include: ["reasoning.encrypted_content"],
     tool_choice: "auto",
@@ -2530,8 +2546,11 @@ async function buildLlmFileAttachmentParts(attachment: ChatAttachment): Promise<
   }];
 }
 
-async function buildLlmChatMessages(messages: ChatMessage[]): Promise<LlmChatMessage[]> {
+async function buildLlmChatMessages(messages: ChatMessage[], system?: string): Promise<LlmChatMessage[]> {
   const result: LlmChatMessage[] = [];
+  if (system?.trim()) {
+    result.push({ role: "system", content: system.trim() });
+  }
   for (const message of messages) {
     if (message.role !== "user" && message.role !== "assistant") {
       continue;
@@ -2954,6 +2973,25 @@ function truncateWecomPrompt(prompt: string, maxChars = 60): string {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+/**
+ * 企业微信应用消息只渲染纯文本，把 AI 回复里常见的 Markdown 记号去掉，
+ * 避免聊天窗口里出现 `**`、`>`、反引号等原始符号；对话历史仍保留原文。
+ */
+function toWecomPlainText(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/```[A-Za-z0-9_+#-]*\n?/g, "")
+    .replace(/`([^`\n]*)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/__([^_\n]+)__/g, "$1")
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, "$1（$2）")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /** 企微图片消息走 JPEG：长边压到 2048，循环降质量直到不超过 2MB。 */
@@ -3956,7 +3994,7 @@ export function createApp(params?: {
         method: "POST",
         url: `/_gateway/chats/${encodeURIComponent(conversationId)}/messages/stream`,
         headers: { cookie, "content-type": "application/json" },
-        payload: { content },
+        payload: { content, system: WECOM_CHAT_SYSTEM_PROMPT },
       }),
       WECOM_CHAT_TASK_TIMEOUT_MS,
       "AI 回复超时，请稍后重试。",
@@ -4129,7 +4167,7 @@ export function createApp(params?: {
       if (!reply.text) {
         throw new Error(reply.error || "AI 没有返回内容。");
       }
-      const textPushed = await sendWecomPushText(userId, reply.text);
+      const textPushed = await sendWecomPushText(userId, toWecomPlainText(reply.text));
       if (!textPushed) {
         return;
       }
@@ -4967,6 +5005,7 @@ export function createApp(params?: {
     owner: string | undefined;
     conversationId: string;
     model: string;
+    system?: string;
     llmChannel?: LlmApiChannelConfig;
     assistantMessage: ChatMessage;
     contextMessages: ChatMessage[];
@@ -4975,7 +5014,7 @@ export function createApp(params?: {
   }): Promise<FastifyReply> {
     const startedAt = performance.now();
     const abortController = new AbortController();
-    const codexBody = await createGatewayChatCodexBody({ model: params.model, messages: params.contextMessages });
+    const codexBody = await createGatewayChatCodexBody({ model: params.model, messages: params.contextMessages, system: params.system });
     let profile: OAuthProfile | null = null;
     let accumulated = "";
     let sseBuffer = "";
@@ -5060,7 +5099,7 @@ export function createApp(params?: {
       for await (const event of streamLlmChatCompletion({
         channel: activeChannel,
         model: requestModel,
-        messages: await buildLlmChatMessages(params.contextMessages),
+        messages: await buildLlmChatMessages(params.contextMessages, params.system),
         signal: abortController.signal,
         timeoutMs: 5 * 60 * 1000,
       })) {
@@ -5322,6 +5361,7 @@ export function createApp(params?: {
       owner,
       conversationId: id,
       model,
+      system: parsed.data.system,
       llmChannel,
       assistantMessage,
       contextMessages,
