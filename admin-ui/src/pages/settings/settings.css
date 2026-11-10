@@ -1325,6 +1325,176 @@
   background: #f8fafc;
 }
 
+/* 企业微信「接收消息」配置子区块 */
+.settings-wecom-chat-block {
+  display: grid;
+  gap: 12px;
+  margin-top: 6px;
+  padding-top: 18px;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.settings-wecom-chat-head {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-wecom-chat-head strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.settings-wecom-chat-head em {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+.settings-wecom-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.settings-wecom-action-row .btn-secondary {
+  min-height: 42px;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+.settings-wecom-test-user {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
+.settings-check-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-check-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.settings-check-list li.is-ok {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+}
+
+.settings-check-list li.is-fail {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.settings-check-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  color: #fff;
+  background: #94a3b8;
+}
+
+.settings-check-list li.is-ok .settings-check-icon {
+  background: #059669;
+}
+
+.settings-check-list li.is-fail .settings-check-icon {
+  background: #dc2626;
+}
+
+.settings-check-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-check-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.settings-check-copy em {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.settings-wecom-status {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fbfcff;
+}
+
+.settings-wecom-status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-wecom-status-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settings-mini-button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.settings-wecom-status-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.settings-wecom-status-list > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.settings-wecom-status-list dt {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.settings-wecom-status-list dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.settings-wecom-status-list > div.is-error dd {
+  color: #b91c1c;
+}
+
 @media (max-width: 860px) {
   .settings-page-head,
   .settings-save-bar,
@@ -1421,6 +1591,19 @@
   .database-group-members-layout,
   .database-group-members-query {
     grid-template-columns: 1fr;
+  }
+
+  .settings-wecom-action-row .btn-secondary {
+    width: 100%;
+  }
+
+  .settings-wecom-test-user {
+    flex-basis: 100%;
+  }
+
+  .settings-wecom-status-list > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }
 

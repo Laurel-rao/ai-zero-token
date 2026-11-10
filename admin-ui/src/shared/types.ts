@@ -132,6 +132,12 @@ export type GatewaySettings = {
     agentId: string;
     secret: string;
     notifyImageResult: boolean;
+    /** 企业微信「接收消息」回调 Token（1-32 位字母数字）。 */
+    callbackToken: string;
+    /** 企业微信「接收消息」回调 EncodingAESKey（43 位 Base64 字符）。 */
+    callbackAesKey: string;
+    /** 是否允许企业微信用户在应用聊天窗口内直接对话。 */
+    chatEnabled: boolean;
   };
   server: {
     host: string;

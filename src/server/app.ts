@@ -16,6 +16,7 @@ import {
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { Zip, ZipPassThrough } from "fflate";
+import sharp from "sharp";
 import { z } from "zod";
 import { createGatewayContext } from "../core/context.js";
 import { DEFAULT_IMAGE_MODEL } from "../core/models/image-models.js";
@@ -44,7 +45,24 @@ import {
   type LlmChatMessage,
 } from "../core/services/llm-api-channel-service.js";
 import type { UsageImageRoute, UsageRecordEvent, UsageTokenStatus, UsageTokenUsage } from "../core/services/usage-service.js";
-import { notifyWecomImageResult } from "../core/services/wecom-message-service.js";
+import {
+  WECOM_CALLBACK_PATH,
+  buildWecomPassiveReplyXml,
+  buildWecomVerifyEcho,
+  isWecomCallbackConfigured,
+  parseWecomIncomingMessage,
+  runWecomCallbackSelfTest,
+  type WecomCallbackSettings,
+  type WecomIncomingMessage,
+} from "../core/services/wecom-callback.js";
+import {
+  checkWecomPushCredentials,
+  notifyWecomImageResult,
+  sendWecomImageMessage,
+  sendWecomTestMessage,
+  sendWecomTextMessage,
+  type WecomPushConfig,
+} from "../core/services/wecom-message-service.js";
 import type { ChatAttachment, ChatConversationDetail, ChatMessage, GatewayUserRole, GenerationHistoryItem } from "../core/services/gateway-database-service.js";
 import { getBrandingAssetsDir, getChatAttachmentAssetsDir, getGenerationAssetsDir } from "../core/store/state-paths.js";
 
@@ -83,6 +101,35 @@ const gzipAsync = promisify(gzip);
 const inflateAsync = promisify(inflate);
 const brotliDecompressAsync = promisify(brotliDecompress);
 const zstdDecompressAsync = typeof zstdDecompress === "function" ? promisify(zstdDecompress) : null;
+
+/** 内部 app.inject 请求标记：生图完成后不再重复走企微推送（调用方自己推送）。 */
+const WECOM_INTERNAL_HEADER = "x-azt-wecom-internal";
+const WECOM_CALLBACK_MSG_ID_TTL_MS = 10 * 60 * 1000;
+const WECOM_CALLBACK_MSG_ID_SWEEP_MS = 60 * 1000;
+const WECOM_CHAT_MAX_PENDING_JOBS = 2;
+const WECOM_CHAT_TASK_TIMEOUT_MS = 5 * 60 * 1000;
+const WECOM_CLASSIFIER_TIMEOUT_MS = 3 * 60 * 1000;
+const WECOM_IMAGE_SUBMIT_TIMEOUT_MS = 60 * 1000;
+const WECOM_IMAGE_POLL_INTERVAL_MS = 2000;
+const WECOM_IMAGE_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+const WECOM_IMAGE_JPEG_MAX_EDGE = 2048;
+const WECOM_IMAGE_JPEG_MAX_BYTES = 2 * 1024 * 1024;
+const WECOM_CONVERSATION_TITLE = "企业微信";
+const WECOM_WELCOME_MESSAGE = "你好，我是 AI Zero Token 助手。直接发消息可以聊天，也可以让我生成图片，例如：画一只戴墨镜的柴犬。";
+const WECOM_CHAT_DISABLED_MESSAGE = "企业微信对话未开启，请联系管理员。";
+const WECOM_THINKING_MESSAGE = "已收到，正在思考…";
+const WECOM_BUSY_MESSAGE = "上一条消息还在处理中，请稍候。";
+const WECOM_UNSUPPORTED_MESSAGE = "暂不支持该消息类型，请发送文字。";
+const WECOM_DISABLED_ACCOUNT_MESSAGE = "账号已禁用，请联系管理员。";
+const WECOM_TEST_MESSAGE = "AI Zero Token 企业微信推送测试 ✅ 收到说明 corpId/AgentID/Secret 与可见范围正常。";
+/** 与网页聊天页 admin-ui/src/pages/chat/index.tsx 的 classify 调用保持一致。 */
+const WECOM_IMAGE_CLASSIFIER_INSTRUCTIONS = [
+  "你是聊天内容到生图动作的判定器。",
+  "判断 assistant 回复是否已经给出了可以直接用于图片生成的画面描述、提示词、分镜画面、海报/商品图/插画/摄影等视觉生成需求。",
+  "只有当回复内容适合立即调用图片生成时才返回 shouldGenerate=true。",
+  "如果只是普通问答、代码、表格、解释、拒绝、无明确画面主体或需要继续追问，返回 false。",
+  "返回严格 JSON，不要 Markdown：{\"shouldGenerate\":boolean,\"prompt\":\"中文生图提示词\",\"reason\":\"简短原因\"}",
+].join("\n");
 
 const assetContentTypes: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -417,6 +464,7 @@ function isPublicPath(method: string, url: string): boolean {
     pathOnly === "/_gateway/auth/wecom/callback" ||
     pathOnly === "/_gateway/auth/wecom/complete" ||
     pathOnly === "/_gateway/auth/logout" ||
+    pathOnly === WECOM_CALLBACK_PATH ||
     pathOnly.startsWith("/_gateway/branding-assets/") ||
     pathOnly.startsWith("/s/") ||
     pathOnly.startsWith("/assets/");
@@ -1504,6 +1552,9 @@ const settingsUpdateSchema = z.object({
       agentId: z.string().optional(),
       secret: z.string().optional(),
       notifyImageResult: z.boolean().optional(),
+      callbackToken: z.string().max(64).optional(),
+      callbackAesKey: z.string().max(64).optional(),
+      chatEnabled: z.boolean().optional(),
     })
     .optional(),
   server: z
@@ -1511,6 +1562,10 @@ const settingsUpdateSchema = z.object({
       port: z.number().int().min(1).max(65535),
     })
     .optional(),
+});
+
+const wecomTestMessageSchema = z.object({
+  userId: z.string().trim().min(1).max(64),
 });
 
 const llmChannelTestSchema = z.object({
@@ -2672,6 +2727,262 @@ async function notifyBackgroundImageResult(params: {
   });
 }
 
+/**
+ * 企业微信「接收消息」回调 + 企微内对话的运行状态，管理接口读取，
+ * 全部放在 createApp 闭包里，重启即清零。
+ */
+type WecomCallbackRuntimeState = {
+  startedAt: number;
+  lastVerifiedAt?: number;
+  lastMessageAt?: number;
+  lastMessageType?: string;
+  lastMessageUser?: string;
+  lastReplyAt?: number;
+  pendingJobs: number;
+  lastError?: { at: number; stage: string; message: string };
+  lastPushAt?: number;
+  lastPushError?: { at: number; message: string };
+};
+
+type WecomSelfTestCheck = { id: string; label: string; ok: boolean; detail?: string };
+
+/** 内部注入请求带标记头：生图结束后由企微桥接逻辑自己推送，避免重复通知。 */
+function isWecomInternalRequest(request: FastifyRequest): boolean {
+  const value = request.headers[WECOM_INTERNAL_HEADER];
+  return (Array.isArray(value) ? value[0] : value) === "1";
+}
+
+function toWecomCallbackSettings(wecom: GatewaySettings["wecom"]): WecomCallbackSettings {
+  return {
+    token: wecom.callbackToken.trim(),
+    aesKey: wecom.callbackAesKey.trim(),
+    corpId: wecom.corpId.trim(),
+  };
+}
+
+function toWecomPushConfig(wecom: GatewaySettings["wecom"]): WecomPushConfig {
+  return {
+    corpId: wecom.corpId.trim(),
+    agentId: wecom.agentId.trim(),
+    secret: wecom.secret.trim(),
+  };
+}
+
+function isWecomPushConfigured(wecom: GatewaySettings["wecom"]): boolean {
+  return Boolean(wecom.enabled && wecom.corpId.trim() && wecom.agentId.trim() && wecom.secret.trim());
+}
+
+function getWecomQueryValue(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value) && typeof value[0] === "string") {
+    return value[0];
+  }
+  return undefined;
+}
+
+/**
+ * 从原始 URL 的 query 里取参数。
+ *
+ * 企微回调的 echostr / Encrypt 是 base64，可能包含 "+"。Fastify 的 query 解析会把
+ * 未编码的 "+" 当成空格，导致签名校验失败，所以这里优先解析原始 query：
+ * decodeURIComponent 会保留未编码的 "+"，同时也能正确还原 %2B。
+ */
+function getWecomRawQueryValue(url: string | undefined, name: string): string | undefined {
+  const queryString = url?.split("?")[1] ?? "";
+  if (!queryString) {
+    return undefined;
+  }
+  const match = new RegExp(`(?:^|&)${name}=([^&]*)`).exec(queryString);
+  if (!match) {
+    return undefined;
+  }
+  const raw = match[1] ?? "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** 企微回调参数：原始 query 优先，取不到再回退 Fastify 解析结果。 */
+function getWecomCallbackQueryValue(
+  request: FastifyRequest,
+  query: Record<string, unknown>,
+  name: string,
+): string | undefined {
+  return getWecomRawQueryValue(request.raw.url, name) ?? getWecomQueryValue(query[name]);
+}
+
+/** 给 app.inject 调用加超时保护，避免上游卡死时任务永远挂着。 */
+function submitWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function sleepForWecom(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+function safeParseJsonText(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** 从 /v1/responses 的返回体里取正文（output_text 优先，兼容 output[0].content[0].text）。 */
+function extractWecomResponseOutputText(body: unknown): string {
+  if (!body || typeof body !== "object") {
+    return "";
+  }
+  const record = body as { output_text?: unknown; output?: unknown };
+  if (typeof record.output_text === "string" && record.output_text.trim()) {
+    return record.output_text.trim();
+  }
+  if (Array.isArray(record.output)) {
+    for (const item of record.output) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const content = (item as { content?: unknown }).content;
+      if (!Array.isArray(content)) {
+        continue;
+      }
+      for (const part of content) {
+        if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+          const text = (part as { text: string }).text.trim();
+          if (text) {
+            return text;
+          }
+        }
+      }
+    }
+  }
+  return "";
+}
+
+/** 容错解析生图判定 JSON：非 JSON / 字段缺失都按「不生成」处理。 */
+function parseWecomImageDecision(text: string): { shouldGenerate: boolean; prompt: string } {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { shouldGenerate: false, prompt: "" };
+  }
+  const withoutFence = trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const candidates = [withoutFence];
+  const firstBrace = withoutFence.indexOf("{");
+  const lastBrace = withoutFence.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(withoutFence.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { shouldGenerate?: unknown; prompt?: unknown };
+      const shouldGenerate = parsed.shouldGenerate === true || String(parsed.shouldGenerate).trim().toLowerCase() === "true";
+      const prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
+      return { shouldGenerate: shouldGenerate && Boolean(prompt), prompt };
+    } catch {
+      continue;
+    }
+  }
+  return { shouldGenerate: false, prompt: "" };
+}
+
+/** 解析聊天 SSE 缓冲结果：message_done 取回复正文，error 取失败原因。 */
+function parseWecomSseAssistantReply(body: string): { text: string; error?: string } {
+  const blocks = body.replace(/\r\n/g, "\n").split("\n\n");
+  let text = "";
+  let errorMessage: string | undefined;
+  for (const block of blocks) {
+    let eventName = "";
+    const dataLines: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    const dataText = dataLines.join("\n").trim();
+    if (!eventName || !dataText) {
+      continue;
+    }
+    const payload = safeParseJsonText(dataText);
+    if (!payload || typeof payload !== "object") {
+      continue;
+    }
+    if (eventName === "message_done") {
+      const message = (payload as { message?: unknown }).message;
+      if (message && typeof message === "object") {
+        const content = (message as { content?: unknown }).content;
+        if (typeof content === "string") {
+          text = content.trim();
+        }
+      }
+    } else if (eventName === "error") {
+      const message = (payload as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim()) {
+        errorMessage = message.trim();
+      }
+    }
+  }
+  return { text, error: errorMessage };
+}
+
+function truncateWecomPrompt(prompt: string, maxChars = 60): string {
+  const normalized = prompt.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+/** 企微图片消息走 JPEG：长边压到 2048，循环降质量直到不超过 2MB。 */
+async function convertWecomImageToJpeg(filePath: string): Promise<Buffer> {
+  const raw = await fs.readFile(filePath);
+  const render = async (quality: number): Promise<Buffer> => sharp(raw)
+    .rotate()
+    .resize({
+      width: WECOM_IMAGE_JPEG_MAX_EDGE,
+      height: WECOM_IMAGE_JPEG_MAX_EDGE,
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality })
+    .toBuffer();
+  let quality = 82;
+  let buffer = await render(quality);
+  while (buffer.byteLength > WECOM_IMAGE_JPEG_MAX_BYTES && quality > 30) {
+    quality = Math.max(30, quality - 10);
+    buffer = await render(quality);
+  }
+  if (buffer.byteLength > WECOM_IMAGE_JPEG_MAX_BYTES) {
+    buffer = await sharp(raw)
+      .rotate()
+      .resize({ width: 1280, height: 1280, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 70 })
+      .toBuffer();
+  }
+  return buffer;
+}
+
 function getImageEditReferences(data: z.infer<typeof imageEditsBodySchema>): Array<z.infer<typeof imageReferenceSchema>> {
   if (Array.isArray(data.images)) {
     return data.images;
@@ -3021,6 +3332,9 @@ function serializeSettings(settings: GatewaySettings, isAdmin: boolean, envApiKe
     wecom: {
       ...settings.wecom,
       secret: isAdmin ? settings.wecom.secret : "",
+      // 非管理员不下发回调 Token 与 EncodingAESKey，避免普通用户读到回调密钥。
+      callbackToken: isAdmin ? settings.wecom.callbackToken : "",
+      callbackAesKey: isAdmin ? settings.wecom.callbackAesKey : "",
     },
     image: {
       ...settings.image,
@@ -3427,6 +3741,10 @@ export function createApp(params?: {
         .catch((error) => done(error as Error));
     },
   );
+  // 企业微信「接收消息」回调以 XML 投递密文，这里原样保留字符串交给协议层解析。
+  app.addContentTypeParser(["text/xml", "application/xml"], { parseAs: "string" }, (_request, body, done) => {
+    done(null, body);
+  });
   const ctx = createGatewayContext();
   const gatewayRequestLogs: GatewayRequestLog[] = [];
   const codexResponseProfileBindings = new Map<string, { profileId: string; accountId: string; seenAt: number }>();
@@ -3435,6 +3753,24 @@ export function createApp(params?: {
   const pendingWecomEmbedStates = new Map<string, number>();
   const pendingWecomOAuthStates = new Map<string, number>();
   const pendingWecomCompleteTokens = new Map<string, { username: string; role: GatewayUserRole; expiresAt: number }>();
+  const wecomCallbackState: WecomCallbackRuntimeState = { startedAt: Date.now(), pendingJobs: 0 };
+  /** 已处理的企微消息 MsgId（TTL 10 分钟），用于抵御企微重复推送。 */
+  const wecomSeenMessageIds = new Map<string, number>();
+  /** 每个企微用户固定的「企业微信」会话 id，被删除后自动重建。 */
+  const wecomConversationIds = new Map<string, string>();
+  /** 每个企微用户的串行任务链，保证同一用户的消息按顺序处理。 */
+  const wecomChatChains = new Map<string, Promise<void>>();
+  /** 每个企微用户未完成的任务数（含正在处理的一条）。 */
+  const wecomPendingJobsByOwner = new Map<string, number>();
+  const wecomMsgIdSweepTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [msgId, seenAt] of wecomSeenMessageIds) {
+      if (now - seenAt > WECOM_CALLBACK_MSG_ID_TTL_MS) {
+        wecomSeenMessageIds.delete(msgId);
+      }
+    }
+  }, WECOM_CALLBACK_MSG_ID_SWEEP_MS);
+  wecomMsgIdSweepTimer.unref?.();
 
   function ensureSecurityConfigured(): boolean {
     return Boolean(security.adminUser && security.adminPasswordHash && security.sessionSecret !== "change-me");
@@ -3493,6 +3829,365 @@ export function createApp(params?: {
       });
       return undefined;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 企微「接收消息」回调 + 企微内对话桥接
+  // 核心思路：伪造该企微用户的 session cookie，用 app.inject 复用网页聊天页的
+  // 会话/SSE/分类器/生图路由，再通过企微应用消息把结果推回聊天窗口。
+  // ---------------------------------------------------------------------------
+
+  function recordWecomCallbackVerified(): void {
+    wecomCallbackState.lastVerifiedAt = Date.now();
+  }
+
+  function recordWecomCallbackError(stage: string, error: unknown): void {
+    wecomCallbackState.lastError = { at: Date.now(), stage, message: errorText(error) };
+  }
+
+  function recordWecomIncomingMessage(incoming: WecomIncomingMessage): void {
+    wecomCallbackState.lastMessageAt = Date.now();
+    wecomCallbackState.lastMessageType = incoming.msgType;
+    wecomCallbackState.lastMessageUser = incoming.fromUser;
+  }
+
+  function recordWecomPassiveReply(): void {
+    wecomCallbackState.lastReplyAt = Date.now();
+  }
+
+  function recordWecomPushSuccess(): void {
+    wecomCallbackState.lastPushAt = Date.now();
+    wecomCallbackState.lastPushError = undefined;
+  }
+
+  function recordWecomPushError(error: unknown): void {
+    const message = errorText(error);
+    wecomCallbackState.lastPushError = { at: Date.now(), message };
+    console.warn("[gateway:wecom] push failed", { message });
+  }
+
+  /** 被动回复（加密 XML）直接回给企微，必须在 5 秒内返回。 */
+  function sendWecomPassiveReply(
+    reply: FastifyReply,
+    wecom: GatewaySettings["wecom"],
+    params: { toUser: string; content: string },
+  ): FastifyReply {
+    const xml = buildWecomPassiveReplyXml(toWecomCallbackSettings(wecom), {
+      toUser: params.toUser,
+      fromUser: wecom.corpId.trim(),
+      content: params.content,
+    });
+    recordWecomPassiveReply();
+    reply.type("application/xml; charset=utf-8");
+    return reply.send(xml);
+  }
+
+  /** 主动推送文本；失败只记录状态并返回 false，不抛异常。 */
+  async function sendWecomPushText(userId: string, content: string): Promise<boolean> {
+    try {
+      const settings = await ctx.configService.getSettings();
+      if (!isWecomPushConfigured(settings.wecom)) {
+        return false;
+      }
+      await sendWecomTextMessage({
+        config: toWecomPushConfig(settings.wecom),
+        userId,
+        content,
+      });
+      recordWecomPushSuccess();
+      return true;
+    } catch (error) {
+      recordWecomPushError(error);
+      return false;
+    }
+  }
+
+  /** 主动推送图片；失败只记录状态并返回 false，不抛异常。 */
+  async function sendWecomPushImage(userId: string, image: Buffer): Promise<boolean> {
+    try {
+      const settings = await ctx.configService.getSettings();
+      if (!isWecomPushConfigured(settings.wecom)) {
+        return false;
+      }
+      await sendWecomImageMessage({
+        config: toWecomPushConfig(settings.wecom),
+        userId,
+        image,
+        filename: "image.jpg",
+      });
+      recordWecomPushSuccess();
+      return true;
+    } catch (error) {
+      recordWecomPushError(error);
+      return false;
+    }
+  }
+
+  /** 每个企微用户固定复用标题为「企业微信」的会话；被删除后自动重建。 */
+  async function resolveWecomConversationId(username: string): Promise<string> {
+    const cached = wecomConversationIds.get(username);
+    if (cached) {
+      const existing = await ctx.gatewayDatabaseService.getChatConversation(cached, username);
+      if (existing) {
+        return cached;
+      }
+      wecomConversationIds.delete(username);
+    }
+    const conversations = await ctx.gatewayDatabaseService.listChatConversations(100, username);
+    const found = conversations.find((item) => item.title === WECOM_CONVERSATION_TITLE);
+    if (found) {
+      wecomConversationIds.set(username, found.id);
+      return found.id;
+    }
+    const created = await ctx.gatewayDatabaseService.createChatConversation({
+      owner: username,
+      title: WECOM_CONVERSATION_TITLE,
+    });
+    wecomConversationIds.set(username, created.id);
+    return created.id;
+  }
+
+  /** 跑一轮网页聊天页同款 SSE 聊天，取 assistant 最终回复文本。 */
+  async function runWecomChatTurn(cookie: string, conversationId: string, content: string): Promise<{ text: string; error?: string }> {
+    const response = await submitWithTimeout(
+      app.inject({
+        method: "POST",
+        url: `/_gateway/chats/${encodeURIComponent(conversationId)}/messages/stream`,
+        headers: { cookie, "content-type": "application/json" },
+        payload: { content },
+      }),
+      WECOM_CHAT_TASK_TIMEOUT_MS,
+      "AI 回复超时，请稍后重试。",
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      const payload = safeParseJsonText(response.body) as { error?: { message?: unknown } } | null;
+      const message = typeof payload?.error?.message === "string"
+        ? payload.error.message
+        : `聊天接口返回 HTTP ${response.statusCode}`;
+      throw new Error(message);
+    }
+    return parseWecomSseAssistantReply(response.body);
+  }
+
+  /** 与网页聊天页一致的生图动作判定；判定失败/非 JSON 一律视为不生成。 */
+  async function classifyWecomImageAction(
+    cookie: string,
+    replyText: string,
+    settings: GatewaySettings,
+  ): Promise<{ shouldGenerate: boolean; prompt: string }> {
+    try {
+      const model = settings.modelRouting.imageClassifierModel || settings.defaultModel;
+      const response = await submitWithTimeout(
+        app.inject({
+          method: "POST",
+          url: "/v1/responses",
+          headers: { cookie, "content-type": "application/json" },
+          payload: {
+            model,
+            instructions: WECOM_IMAGE_CLASSIFIER_INSTRUCTIONS,
+            input: `assistant 回复：\n${replyText.slice(0, 6000)}`,
+            reasoning: { effort: "low" },
+            max_output_tokens: 900,
+          },
+        }),
+        WECOM_CLASSIFIER_TIMEOUT_MS,
+        "生图判定超时。",
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return { shouldGenerate: false, prompt: "" };
+      }
+      return parseWecomImageDecision(extractWecomResponseOutputText(safeParseJsonText(response.body)));
+    } catch (error) {
+      console.warn("[gateway:wecom] image classification failed", { message: errorText(error) });
+      return { shouldGenerate: false, prompt: "" };
+    }
+  }
+
+  /** 提交生图任务 → 轮询历史 → 推送图片 + 免登录分享链接。 */
+  async function generateWecomImageAndPush(params: {
+    request: FastifyRequest;
+    userId: string;
+    username: string;
+    cookie: string;
+    prompt: string;
+    settings: GatewaySettings;
+  }): Promise<void> {
+    const submitResponse = await submitWithTimeout(
+      app.inject({
+        method: "POST",
+        url: "/v1/images/generations",
+        headers: {
+          cookie: params.cookie,
+          [WECOM_INTERNAL_HEADER]: "1",
+          "content-type": "application/json",
+        },
+        payload: {
+          model: params.settings.modelRouting.imageGenerationModel,
+          prompt: params.prompt,
+          n: 1,
+          size: "1024x1024",
+          quality: "high",
+          output_format: "png",
+          response_format: "b64_json",
+          _gateway_background: true,
+        },
+      }),
+      WECOM_IMAGE_SUBMIT_TIMEOUT_MS,
+      "提交生图任务超时。",
+    );
+    const submitPayload = safeParseJsonText(submitResponse.body) as { id?: unknown; error?: { message?: unknown } } | null;
+    if (submitResponse.statusCode < 200 || submitResponse.statusCode >= 300) {
+      const message = typeof submitPayload?.error?.message === "string"
+        ? submitPayload.error.message
+        : `生图接口返回 HTTP ${submitResponse.statusCode}`;
+      throw new Error(message);
+    }
+    const generationId = typeof submitPayload?.id === "string" ? submitPayload.id.trim() : "";
+    if (!generationId) {
+      throw new Error("生图接口没有返回任务 ID。");
+    }
+
+    const deadline = Date.now() + WECOM_IMAGE_POLL_TIMEOUT_MS;
+    let item: GenerationHistoryItem | null = null;
+    while (Date.now() < deadline) {
+      item = await ctx.gatewayDatabaseService.getGenerationHistoryItem(generationId, params.username);
+      if (item && item.status !== "queued" && item.status !== "running") {
+        break;
+      }
+      await sleepForWecom(WECOM_IMAGE_POLL_INTERVAL_MS);
+    }
+    if (!item || item.status === "queued" || item.status === "running") {
+      throw new Error("图片生成超时，请稍后在网页端生图记录中查看。");
+    }
+    if (item.status !== "success") {
+      throw new Error(item.error?.trim() || "生图任务未成功完成。");
+    }
+    const image = item.images[0];
+    if (!image) {
+      throw new Error("生图任务没有返回图片。");
+    }
+    const filename = image.previewFilename?.trim() || image.filename.trim();
+    const resolved = resolveGenerationImageFile(`${item.id}/${filename}`);
+    if (!resolved) {
+      throw new Error("找不到生成的图片文件。");
+    }
+    const jpeg = await convertWecomImageToJpeg(resolved.filePath);
+    const imageSent = await sendWecomPushImage(params.userId, jpeg);
+
+    const origin = resolveOrigin(params.request);
+    const fallbackUrl = image.url
+      ? (image.url.startsWith("http") ? image.url : `${origin}${image.url}`)
+      : `${origin}/#/generate`;
+    const shareUrl = (await createImageShareUrl(params.request, params.username, generationId)) || fallbackUrl;
+    const promptExcerpt = truncateWecomPrompt(params.prompt);
+    const headline = imageSent
+      ? `🖼 图片已生成：${promptExcerpt}`
+      : `🖼 图片已生成（图片消息发送失败）：${promptExcerpt}`;
+    await sendWecomPushText(params.userId, `${headline}\n查看原图与参数：${shareUrl}`);
+  }
+
+  /** 处理一条企微文字消息：建号/建会话 → 聊天 → 推送文本 → 按需生图推图。 */
+  async function runWecomChatTask(params: {
+    request: FastifyRequest;
+    userId: string;
+    settings: GatewaySettings;
+    content: string;
+  }): Promise<void> {
+    const userId = params.userId.trim();
+    if (!userId) {
+      return;
+    }
+    const username = `wxwork:${userId}`;
+    try {
+      let user = await ctx.gatewayDatabaseService.getUserByUsername(username);
+      if (!user) {
+        await ctx.gatewayDatabaseService.createUser({
+          username,
+          displayName: userId,
+          passwordHash: hashSecret(randomUUID()),
+          role: "user",
+        });
+        user = await ctx.gatewayDatabaseService.getUserByUsername(username);
+      }
+      if (!user) {
+        throw new Error("企业微信账号创建失败。");
+      }
+      if (user.disabled) {
+        await sendWecomPushText(userId, WECOM_DISABLED_ACCOUNT_MESSAGE);
+        return;
+      }
+      const cookie = `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(createAdminSessionToken(security, user.username, user.role))}`;
+      const conversationId = await resolveWecomConversationId(username);
+      const reply = await runWecomChatTurn(cookie, conversationId, params.content);
+      if (!reply.text) {
+        throw new Error(reply.error || "AI 没有返回内容。");
+      }
+      const textPushed = await sendWecomPushText(userId, reply.text);
+      if (!textPushed) {
+        return;
+      }
+      const decision = await classifyWecomImageAction(cookie, reply.text, params.settings);
+      if (!decision.shouldGenerate || !decision.prompt) {
+        return;
+      }
+      try {
+        await generateWecomImageAndPush({
+          request: params.request,
+          userId,
+          username,
+          cookie,
+          prompt: decision.prompt,
+          settings: params.settings,
+        });
+      } catch (error) {
+        recordWecomCallbackError("image", error);
+        await sendWecomPushText(userId, `图片生成失败：${errorText(error)}`);
+      }
+    } catch (error) {
+      recordWecomCallbackError("chat", error);
+      await sendWecomPushText(userId, `抱歉，回复失败：${errorText(error)}`);
+    }
+  }
+
+  /**
+   * 每用户串行队列：同一用户的消息按顺序处理；未完成任务数达到上限时返回 false，
+   * 由调用方被动回复「上一条还在处理中」。任务内异常全部兜底，不会逃逸成 unhandledRejection。
+   */
+  function enqueueWecomChatTask(params: {
+    request: FastifyRequest;
+    userId: string;
+    settings: GatewaySettings;
+    content: string;
+  }): boolean {
+    const ownerKey = `wxwork:${params.userId.trim()}`;
+    const pending = wecomPendingJobsByOwner.get(ownerKey) ?? 0;
+    if (pending >= WECOM_CHAT_MAX_PENDING_JOBS) {
+      return false;
+    }
+    wecomPendingJobsByOwner.set(ownerKey, pending + 1);
+    wecomCallbackState.pendingJobs += 1;
+    const previous = wecomChatChains.get(ownerKey) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => runWecomChatTask(params))
+      .catch((error) => {
+        recordWecomCallbackError("queue", error);
+        console.warn("[gateway:wecom] chat task failed", { message: errorText(error) });
+      })
+      .finally(() => {
+        const remaining = (wecomPendingJobsByOwner.get(ownerKey) ?? 1) - 1;
+        if (remaining > 0) {
+          wecomPendingJobsByOwner.set(ownerKey, remaining);
+        } else {
+          wecomPendingJobsByOwner.delete(ownerKey);
+        }
+        wecomCallbackState.pendingJobs = Math.max(0, wecomCallbackState.pendingJobs - 1);
+        if (wecomChatChains.get(ownerKey) === next) {
+          wecomChatChains.delete(ownerKey);
+        }
+      });
+    wecomChatChains.set(ownerKey, next);
+    return true;
   }
 
   function resolveDataOwnerFilter(session: AdminSession | null, requestedOwner?: string): string | undefined {
@@ -7368,7 +8063,7 @@ export function createApp(params?: {
         await notifyBackgroundImageResult({
           settings,
           request,
-          background: Boolean(parsed.data._gateway_background),
+          background: Boolean(parsed.data._gateway_background) && !isWecomInternalRequest(request),
           owner: requestOwner,
           generationId,
           status: "failed",
@@ -7467,7 +8162,8 @@ export function createApp(params?: {
       await notifyBackgroundImageResult({
         settings,
         request,
-        background: Boolean(parsed.data._gateway_background),
+        // 企微桥接自己推送结果，避免同一次生图再触发一条完成通知。
+        background: Boolean(parsed.data._gateway_background) && !isWecomInternalRequest(request),
         owner: requestOwner,
         generationId,
         status: "success",
@@ -7992,6 +8688,248 @@ export function createApp(params?: {
     }
 
     return runImageEditJob();
+  });
+
+  // ---------------------------------------------------------------------------
+  // 企业微信「接收消息」回调（公开路径，无登录）
+  // ---------------------------------------------------------------------------
+
+  app.get(WECOM_CALLBACK_PATH, async (request, reply) => {
+    await ensureBootstrapUsers();
+    const settings = await ctx.configService.getSettings();
+    if (!isWecomCallbackConfigured(settings.wecom)) {
+      reply.code(404);
+      return reply.type("text/plain; charset=utf-8").send("企业微信回调未配置");
+    }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    try {
+      const echo = buildWecomVerifyEcho(toWecomCallbackSettings(settings.wecom), {
+        msg_signature: getWecomCallbackQueryValue(request, query, "msg_signature"),
+        timestamp: getWecomCallbackQueryValue(request, query, "timestamp"),
+        nonce: getWecomCallbackQueryValue(request, query, "nonce"),
+        echostr: getWecomCallbackQueryValue(request, query, "echostr"),
+      });
+      recordWecomCallbackVerified();
+      return reply.type("text/plain; charset=utf-8").send(echo);
+    } catch (error) {
+      recordWecomCallbackError("verify", error);
+      reply.code(400);
+      return reply.type("text/plain; charset=utf-8").send(`企业微信回调校验失败：${errorText(error)}`);
+    }
+  });
+
+  app.post(WECOM_CALLBACK_PATH, async (request, reply) => {
+    await ensureBootstrapUsers();
+    const settings = await ctx.configService.getSettings();
+    if (!isWecomCallbackConfigured(settings.wecom)) {
+      return reply.type("text/plain; charset=utf-8").send("success");
+    }
+    const rawBody = typeof request.body === "string" ? request.body : "";
+    if (!rawBody.trim()) {
+      return reply.type("text/plain; charset=utf-8").send("success");
+    }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    let incoming: WecomIncomingMessage;
+    try {
+      incoming = parseWecomIncomingMessage(toWecomCallbackSettings(settings.wecom), rawBody, {
+        msg_signature: getWecomCallbackQueryValue(request, query, "msg_signature"),
+        timestamp: getWecomCallbackQueryValue(request, query, "timestamp"),
+        nonce: getWecomCallbackQueryValue(request, query, "nonce"),
+      });
+    } catch (error) {
+      recordWecomCallbackError("parse", error);
+      console.warn("[gateway:wecom] callback parse failed", { message: errorText(error) });
+      reply.code(400);
+      return reply.type("text/plain; charset=utf-8").send("企业微信回调解析失败");
+    }
+
+    // 企微在 5 秒内没收到响应会重推同一条消息，按 MsgId 去重。
+    const msgId = incoming.msgId?.trim();
+    if (msgId) {
+      if (wecomSeenMessageIds.has(msgId)) {
+        return reply.type("text/plain; charset=utf-8").send("");
+      }
+      wecomSeenMessageIds.set(msgId, Date.now());
+    }
+    recordWecomIncomingMessage(incoming);
+    const fromUser = incoming.fromUser.trim();
+    if (!fromUser) {
+      return reply.type("text/plain; charset=utf-8").send("");
+    }
+
+    try {
+      if (incoming.msgType === "event") {
+        if (!incoming.event || incoming.event === "enter_agent") {
+          return sendWecomPassiveReply(reply, settings.wecom, { toUser: fromUser, content: WECOM_WELCOME_MESSAGE });
+        }
+        return reply.type("text/plain; charset=utf-8").send("");
+      }
+      if (incoming.msgType !== "text") {
+        return sendWecomPassiveReply(reply, settings.wecom, { toUser: fromUser, content: WECOM_UNSUPPORTED_MESSAGE });
+      }
+      const content = (incoming.content ?? "").trim().slice(0, 4000);
+      if (!content) {
+        return reply.type("text/plain; charset=utf-8").send("");
+      }
+      if (!settings.wecom.enabled || !settings.wecom.chatEnabled) {
+        return sendWecomPassiveReply(reply, settings.wecom, { toUser: fromUser, content: WECOM_CHAT_DISABLED_MESSAGE });
+      }
+      const accepted = enqueueWecomChatTask({
+        request,
+        userId: fromUser,
+        settings,
+        content,
+      });
+      if (!accepted) {
+        return sendWecomPassiveReply(reply, settings.wecom, { toUser: fromUser, content: WECOM_BUSY_MESSAGE });
+      }
+      // 被动回复必须在 5 秒内返回，异步任务把真正的回复用应用消息推送。
+      return sendWecomPassiveReply(reply, settings.wecom, { toUser: fromUser, content: WECOM_THINKING_MESSAGE });
+    } catch (error) {
+      recordWecomCallbackError("reply", error);
+      console.warn("[gateway:wecom] callback reply failed", { message: errorText(error) });
+      return reply.type("text/plain; charset=utf-8").send("success");
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // 企业微信管理接口（管理员）
+  // ---------------------------------------------------------------------------
+
+  app.get("/_gateway/admin/wecom/status", async (request) => {
+    const settings = await ctx.configService.getSettings();
+    return {
+      callbackUrl: `${resolveOrigin(request)}${WECOM_CALLBACK_PATH}`,
+      configured: isWecomCallbackConfigured(settings.wecom),
+      chatEnabled: settings.wecom.chatEnabled,
+      startedAt: wecomCallbackState.startedAt,
+      lastVerifiedAt: wecomCallbackState.lastVerifiedAt,
+      lastMessageAt: wecomCallbackState.lastMessageAt,
+      lastMessageType: wecomCallbackState.lastMessageType,
+      lastMessageUser: wecomCallbackState.lastMessageUser,
+      lastReplyAt: wecomCallbackState.lastReplyAt,
+      pendingJobs: wecomCallbackState.pendingJobs,
+      lastError: wecomCallbackState.lastError,
+      lastPushAt: wecomCallbackState.lastPushAt,
+      lastPushError: wecomCallbackState.lastPushError,
+    };
+  });
+
+  app.post("/_gateway/admin/wecom/self-test", async (request) => {
+    const settings = await ctx.configService.getSettings();
+    const wecom = settings.wecom;
+    const callbackConfigured = isWecomCallbackConfigured(wecom);
+    const tokenOk = /^[A-Za-z0-9]{1,32}$/.test(wecom.callbackToken.trim());
+    const aesKeyOk = /^[A-Za-z0-9+/]{43}$/.test(wecom.callbackAesKey.trim());
+    const checks: WecomSelfTestCheck[] = [];
+
+    const configProblems = [
+      wecom.enabled ? undefined : "未启用企业微信",
+      wecom.corpId.trim() ? undefined : "缺少企业 ID",
+      wecom.agentId.trim() ? undefined : "缺少 AgentID",
+      wecom.secret.trim() ? undefined : "缺少 Secret",
+      wecom.callbackToken.trim() ? (tokenOk ? undefined : "Token 需为 1-32 位字母数字") : "缺少接收消息 Token",
+      wecom.callbackAesKey.trim() ? (aesKeyOk ? undefined : "EncodingAESKey 需为 43 位 base64 字符") : "缺少 EncodingAESKey",
+    ].filter((item): item is string => Boolean(item));
+    checks.push({
+      id: "config",
+      label: "企业微信配置完整性",
+      ok: configProblems.length === 0 && callbackConfigured,
+      detail: configProblems.join("；") || "企业 ID、AgentID、Secret、Token、EncodingAESKey 均已填写。",
+    });
+
+    if (wecom.corpId.trim() && wecom.secret.trim()) {
+      try {
+        const pushCheck = await checkWecomPushCredentials(toWecomPushConfig(wecom));
+        checks.push({
+          id: "accessToken",
+          label: "应用凭证可用性（gettoken）",
+          ok: pushCheck.ok,
+          detail: pushCheck.detail,
+        });
+      } catch (error) {
+        checks.push({
+          id: "accessToken",
+          label: "应用凭证可用性（gettoken）",
+          ok: false,
+          detail: errorText(error),
+        });
+      }
+    } else {
+      checks.push({
+        id: "accessToken",
+        label: "应用凭证可用性（gettoken）",
+        ok: false,
+        detail: "缺少企业 ID 或 Secret，无法获取 access_token。",
+      });
+    }
+
+    if (callbackConfigured) {
+      try {
+        const selfTest = runWecomCallbackSelfTest(toWecomCallbackSettings(wecom));
+        const failures = selfTest.checks
+          .filter((item) => !item.ok)
+          .map((item) => (item.detail ? `${item.label}：${item.detail}` : item.label));
+        checks.push({
+          id: "crypto",
+          label: "回调加解密自检",
+          ok: selfTest.ok,
+          detail: selfTest.ok ? "加解密回环、签名校验、被动回复均通过。" : failures.join("；") || "回调加解密自检未通过。",
+        });
+        for (const item of selfTest.checks) {
+          checks.push({ id: `crypto:${item.id}`, label: item.label, ok: item.ok, detail: item.detail });
+        }
+      } catch (error) {
+        checks.push({ id: "crypto", label: "回调加解密自检", ok: false, detail: errorText(error) });
+      }
+    } else {
+      checks.push({
+        id: "crypto",
+        label: "回调加解密自检",
+        ok: false,
+        detail: "请先启用企业微信并填写企业 ID、接收消息 Token 与 EncodingAESKey。",
+      });
+    }
+
+    const callbackUrl = `${resolveOrigin(request)}${WECOM_CALLBACK_PATH}`;
+    checks.push({
+      id: "endpoint",
+      label: "回调地址可构造",
+      ok: /^https?:\/\//i.test(callbackUrl),
+      detail: callbackUrl,
+    });
+
+    return { ok: checks.every((item) => item.ok), checks };
+  });
+
+  app.post("/_gateway/admin/wecom/test-message", async (request, reply) => {
+    const parsed = wecomTestMessageSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { message: parsed.error.issues[0]?.message ?? "企业微信 UserId 格式错误。" } };
+    }
+    const settings = await ctx.configService.getSettings();
+    if (!isWecomPushConfigured(settings.wecom)) {
+      reply.code(400);
+      return { error: { message: "请先启用企业微信并填写企业 ID、AgentID 和 Secret。" } };
+    }
+    try {
+      await sendWecomTestMessage({
+        config: toWecomPushConfig(settings.wecom),
+        userId: parsed.data.userId,
+        content: WECOM_TEST_MESSAGE,
+      });
+      recordWecomPushSuccess();
+      return { ok: true };
+    } catch (error) {
+      recordWecomPushError(error);
+      reply.code(400);
+      return { error: { message: errorText(error) } };
+    }
+  });
+
+  app.addHook("onClose", async () => {
+    clearInterval(wecomMsgIdSweepTimer);
   });
 
   return app;

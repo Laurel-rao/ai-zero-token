@@ -96,6 +96,9 @@ export function createDefaultSettings(): GatewaySettings {
       agentId: "",
       secret: "",
       notifyImageResult: true,
+      callbackToken: "",
+      callbackAesKey: "",
+      chatEnabled: false,
     },
     server: {
       host: "0.0.0.0",
@@ -157,6 +160,9 @@ function normalizeSettings(parsed: Partial<GatewaySettings>): GatewaySettings {
       agentId: parsed.wecom?.agentId ?? defaults.wecom.agentId,
       secret: parsed.wecom?.secret ?? defaults.wecom.secret,
       notifyImageResult: parsed.wecom?.notifyImageResult ?? defaults.wecom.notifyImageResult,
+      callbackToken: normalizeTrimmedString(parsed.wecom?.callbackToken, defaults.wecom.callbackToken, 64),
+      callbackAesKey: normalizeTrimmedString(parsed.wecom?.callbackAesKey, defaults.wecom.callbackAesKey, 64),
+      chatEnabled: parsed.wecom?.chatEnabled ?? defaults.wecom.chatEnabled,
     },
     server: {
       host: parsed.server?.host ?? defaults.server.host,

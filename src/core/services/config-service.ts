@@ -312,7 +312,16 @@ export class ConfigService {
     llm?: {
       apiChannel?: Partial<GatewaySettings["llm"]["apiChannel"]>;
     };
-    wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
+    wecom?: {
+      enabled?: boolean;
+      corpId?: string;
+      agentId?: string;
+      secret?: string;
+      notifyImageResult?: boolean;
+      callbackToken?: string;
+      callbackAesKey?: string;
+      chatEnabled?: boolean;
+    };
     server?: { port: number };
   }): Promise<GatewaySettings> {
     const settings = await this.getSettings();
@@ -467,17 +476,34 @@ export class ConfigService {
       const agentId = params.wecom.agentId?.trim() ?? next.wecom.agentId;
       const secret = params.wecom.secret?.trim() ?? next.wecom.secret;
       const notifyImageResult = params.wecom.notifyImageResult ?? next.wecom.notifyImageResult;
+      const callbackToken = params.wecom.callbackToken?.trim() ?? next.wecom.callbackToken;
+      const callbackAesKey = params.wecom.callbackAesKey?.trim() ?? next.wecom.callbackAesKey;
+      const chatEnabled = params.wecom.chatEnabled ?? next.wecom.chatEnabled;
       if (enabled && (!corpId || !agentId || !secret)) {
         throw new Error("启用企业微信扫码登录时必须填写企业 ID、AgentID 和 Secret。");
+      }
+      // 只在本次显式开启「企业微信内对话」时校验回调密钥，
+      // 避免管理员保存其他企微设置时被历史空值拦住。
+      if (params.wecom.chatEnabled === true) {
+        if (!/^[A-Za-z0-9]{1,32}$/.test(callbackToken)) {
+          throw new Error("开启企业微信内对话时必须填写 1-32 位字母数字的「接收消息 Token」。");
+        }
+        if (!/^[A-Za-z0-9+/]{43}$/.test(callbackAesKey)) {
+          throw new Error("开启企业微信内对话时必须填写 43 位「EncodingAESKey」。");
+        }
       }
       next = {
         ...next,
         wecom: {
+          ...next.wecom,
           enabled,
           corpId,
           agentId,
           secret,
           notifyImageResult,
+          callbackToken,
+          callbackAesKey,
+          chatEnabled,
         },
       };
     }

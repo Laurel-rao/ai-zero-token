@@ -14,22 +14,103 @@ import {
   Copy,
   RefreshCw,
   Search,
+  Send,
   ShieldCheck,
   Upload,
   UsersRound,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { fetchJson } from "@/shared/api";
 import type { AdminConfig, ModelCatalogInfo, ModelInfo, ProfileSummary } from "@/shared/types";
-import type { BusyAction, SettingDraft } from "@/shared/lib/app-types";
-import { errorMessage, readFileAsDataUrl } from "@/shared/lib/app-utils";
+import type { BusyAction, SettingDraft as BaseSettingDraft } from "@/shared/lib/app-types";
+import { copyText, errorMessage, readFileAsDataUrl } from "@/shared/lib/app-utils";
 import { formatDuration, formatFileSize, formatFullTime, formatJson } from "@/shared/lib/format";
 import { autoSwitchEligibility, getPlanType, isCodexActiveProfile, profileHealth, profileLabel } from "@/shared/lib/profiles";
 import type { UserRole } from "@/routes/routes";
 import { normalizeBranding } from "@/shared/lib/branding";
 import { DEFAULT_IMAGE_MODEL } from "@/shared/lib/image-models";
 import { DEFAULT_PROMPT_OPTIMIZER_SYSTEM_PROMPT } from "@/shared/lib/prompt-optimizer";
+
+/**
+ * 在共享 SettingDraft 基础上追加企业微信「接收消息」相关草稿字段。
+ * 仅设置页使用，保持共享 app-types.ts 不变。
+ */
+type SettingDraft = BaseSettingDraft & {
+  wecomCallbackToken: string;
+  wecomCallbackAesKey: string;
+  wecomChatEnabled: boolean;
+};
+
+type WecomSelfTestCheck = {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail?: string;
+};
+
+type WecomSelfTestResult = {
+  ok: boolean;
+  checks: WecomSelfTestCheck[];
+};
+
+type WecomCallbackStatus = {
+  callbackUrl?: string;
+  configured?: boolean;
+  chatEnabled?: boolean;
+  startedAt?: number;
+  lastVerifiedAt?: number;
+  lastMessageAt?: number;
+  lastMessageType?: string;
+  lastMessageUser?: string;
+  lastReplyAt?: number;
+  pendingJobs?: number;
+  lastError?: { at?: number; stage?: string; message?: string };
+  lastPushAt?: number;
+  lastPushError?: string;
+};
+
+type WecomAsyncState = "idle" | "loading" | "success" | "error";
+
+const WECOM_CALLBACK_PATH = "/_gateway/wecom/callback";
+const WECOM_CALLBACK_TOKEN_PATTERN = /^[A-Za-z0-9]{1,32}$/;
+const WECOM_CALLBACK_AES_KEY_PATTERN = /^[A-Za-z0-9+/]{43}$/;
+
+function randomAlphaNumeric(length: number): string {
+  const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = new Uint8Array(length);
+  window.crypto.getRandomValues(bytes);
+  let result = "";
+  for (const byte of bytes) {
+    result += charset[byte % charset.length];
+  }
+  return result;
+}
+
+/** 企微 EncodingAESKey：32 字节随机数的 base64（去掉末尾 = 后为 43 字符）。 */
+function randomWecomAesKey(): string {
+  const bytes = new Uint8Array(32);
+  window.crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes)).replace(/=+$/u, "");
+}
+
+function wecomMessageTypeLabel(type?: string): string {
+  switch (type) {
+    case "text":
+      return "文本";
+    case "image":
+      return "图片";
+    case "voice":
+      return "语音";
+    case "event":
+      return "事件";
+    case "unknown":
+      return "未知类型";
+    default:
+      return type || "未知类型";
+  }
+}
 
 function countToDraft(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
@@ -90,6 +171,9 @@ function createSettingsDraft(config: AdminConfig): SettingDraft {
     wecomAgentId: config.settings.wecom?.agentId || "",
     wecomSecret: config.settings.wecom?.secret || "",
     wecomNotifyImageResult: config.settings.wecom?.notifyImageResult ?? true,
+    wecomCallbackToken: config.settings.wecom?.callbackToken || "",
+    wecomCallbackAesKey: config.settings.wecom?.callbackAesKey || "",
+    wecomChatEnabled: Boolean(config.settings.wecom?.chatEnabled),
   };
 }
 
@@ -202,6 +286,9 @@ export function SettingsPage(props: {
     wecomAgentId: "",
     wecomSecret: "",
     wecomNotifyImageResult: true,
+    wecomCallbackToken: "",
+    wecomCallbackAesKey: "",
+    wecomChatEnabled: false,
   });
   const [settingsDirtyFields, setSettingsDirtyFields] = useState<Set<keyof SettingDraft>>(() => new Set());
   const [autoSwitchSearch, setAutoSwitchSearch] = useState("");
@@ -219,7 +306,24 @@ export function SettingsPage(props: {
     message: "",
   });
   const [llmModelCustomInput, setLlmModelCustomInput] = useState(false);
+  const [wecomCallbackUrlCopied, setWecomCallbackUrlCopied] = useState(false);
+  const [wecomTestUserId, setWecomTestUserId] = useState("");
+  const [wecomSelfTest, setWecomSelfTest] = useState<{
+    state: WecomAsyncState;
+    checks: WecomSelfTestCheck[];
+    message: string;
+  }>({ state: "idle", checks: [], message: "" });
+  const [wecomTestMessage, setWecomTestMessage] = useState<{ state: WecomAsyncState; message: string }>({
+    state: "idle",
+    message: "",
+  });
+  const [wecomStatus, setWecomStatus] = useState<WecomCallbackStatus | null>(null);
+  const [wecomStatusError, setWecomStatusError] = useState("");
+  const [wecomStatusLoading, setWecomStatusLoading] = useState(false);
+  const [wecomStatusLoaded, setWecomStatusLoaded] = useState(false);
+  const wecomCallbackUrl = `${window.location.origin}${WECOM_CALLBACK_PATH}`;
   const settingsDirty = settingsDirtyFields.size > 0;
+  const wecomSectionOpen = openSections.has("wecom");
 
   const loadModelDirectory = useCallback(async (signal?: AbortSignal) => {
     setModelsLoading(true);
@@ -240,6 +344,33 @@ export function SettingsPage(props: {
     void loadModelDirectory(controller.signal);
     return () => controller.abort();
   }, [loadModelDirectory, props.role]);
+
+  const loadWecomStatus = useCallback(async (signal?: AbortSignal) => {
+    setWecomStatusLoading(true);
+    setWecomStatusError("");
+    try {
+      const result = await fetchJson<WecomCallbackStatus>("/_gateway/admin/wecom/status", { signal });
+      if (!signal?.aborted) {
+        setWecomStatus(result && typeof result === "object" ? result : null);
+        setWecomStatusLoaded(true);
+      }
+    } catch (error) {
+      if (!signal?.aborted) {
+        setWecomStatusError(errorMessage(error));
+      }
+    } finally {
+      if (!signal?.aborted) {
+        setWecomStatusLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (props.role !== "admin" || !wecomSectionOpen) return;
+    const controller = new AbortController();
+    void loadWecomStatus(controller.signal);
+    return () => controller.abort();
+  }, [loadWecomStatus, props.role, wecomSectionOpen]);
 
   useEffect(() => {
     if (!props.config || settingsDirty) {
@@ -318,6 +449,23 @@ export function SettingsPage(props: {
   const modelAutoRefresh = props.config?.modelAutoRefresh;
   const isAdmin = props.role === "admin";
   const wecomConfigured = Boolean(settingsDraft.wecomEnabled && settingsDraft.wecomCorpId.trim() && settingsDraft.wecomAgentId.trim());
+  const wecomChatDirtyFields: Array<keyof SettingDraft> = [
+    "wecomEnabled",
+    "wecomCorpId",
+    "wecomAgentId",
+    "wecomSecret",
+    "wecomCallbackToken",
+    "wecomCallbackAesKey",
+    "wecomChatEnabled",
+  ];
+  const wecomChatConfigDirty = wecomChatDirtyFields.some((field) => settingsDirtyFields.has(field));
+  const wecomStatusHasActivity = Boolean(
+    wecomStatus?.lastVerifiedAt ||
+      wecomStatus?.lastMessageAt ||
+      wecomStatus?.lastError ||
+      wecomStatus?.lastPushAt ||
+      wecomStatus?.lastPushError,
+  );
   const selectedModel = settingsDraft.defaultModel || props.config?.settings.defaultModel || "-";
   const brandingPreviewIcon = settingsDraft.brandingAppIconUrl || settingsDraft.brandingFaviconUrl;
   const apiKeyConfigured = Boolean(props.config?.settings.security?.userApiKeyConfigured);
@@ -657,7 +805,16 @@ export function SettingsPage(props: {
           models: string[];
         };
       };
-      wecom?: { enabled?: boolean; corpId?: string; agentId?: string; secret?: string; notifyImageResult?: boolean };
+      wecom?: {
+        enabled?: boolean;
+        corpId?: string;
+        agentId?: string;
+        secret?: string;
+        notifyImageResult?: boolean;
+        callbackToken?: string;
+        callbackAesKey?: string;
+        chatEnabled?: boolean;
+      };
     } = {};
 
     if (hasDirtyField("defaultModel")) {
@@ -778,13 +935,39 @@ export function SettingsPage(props: {
         },
       };
     }
-    if (hasDirtyField("wecomEnabled", "wecomCorpId", "wecomAgentId", "wecomSecret", "wecomNotifyImageResult")) {
+    if (
+      hasDirtyField(
+        "wecomEnabled",
+        "wecomCorpId",
+        "wecomAgentId",
+        "wecomSecret",
+        "wecomNotifyImageResult",
+        "wecomCallbackToken",
+        "wecomCallbackAesKey",
+        "wecomChatEnabled",
+      )
+    ) {
+      if (settingsDraft.wecomChatEnabled) {
+        const callbackToken = settingsDraft.wecomCallbackToken.trim();
+        const callbackAesKey = settingsDraft.wecomCallbackAesKey.trim();
+        if (!WECOM_CALLBACK_TOKEN_PATTERN.test(callbackToken)) {
+          props.setStatus("企业微信回调 Token 必须是 1-32 位字母或数字，请点击“生成”或手动填写。");
+          return;
+        }
+        if (!WECOM_CALLBACK_AES_KEY_PATTERN.test(callbackAesKey)) {
+          props.setStatus("EncodingAESKey 必须是 43 位 Base64 字符，请点击“生成”或手动填写。");
+          return;
+        }
+      }
       payload.wecom = {
         enabled: settingsDraft.wecomEnabled,
         ...(hasDirtyField("wecomCorpId") ? { corpId: settingsDraft.wecomCorpId } : {}),
         ...(hasDirtyField("wecomAgentId") ? { agentId: settingsDraft.wecomAgentId } : {}),
         ...(hasDirtyField("wecomSecret") ? { secret: settingsDraft.wecomSecret } : {}),
         ...(hasDirtyField("wecomNotifyImageResult") ? { notifyImageResult: settingsDraft.wecomNotifyImageResult } : {}),
+        callbackToken: settingsDraft.wecomCallbackToken.trim(),
+        ...(hasDirtyField("wecomCallbackAesKey") ? { callbackAesKey: settingsDraft.wecomCallbackAesKey.trim() } : {}),
+        chatEnabled: settingsDraft.wecomChatEnabled,
       };
     }
     const llmChannelDirty = hasDirtyField(
@@ -794,6 +977,16 @@ export function SettingsPage(props: {
       "llmApiChannelApiKey",
       "llmApiChannelModel",
       "llmApiChannelModels",
+    );
+    const wecomDirty = hasDirtyField(
+      "wecomEnabled",
+      "wecomCorpId",
+      "wecomAgentId",
+      "wecomSecret",
+      "wecomNotifyImageResult",
+      "wecomCallbackToken",
+      "wecomCallbackAesKey",
+      "wecomChatEnabled",
     );
     const busyAction: BusyAction = options?.restart ? "restart" : "settings";
     props.setBusy(busyAction);
@@ -808,6 +1001,9 @@ export function SettingsPage(props: {
       setSettingsDraft((draft) => ({ ...draft, apiKey: "" }));
       if (llmChannelDirty) {
         await loadModelDirectory();
+      }
+      if (wecomDirty) {
+        void loadWecomStatus();
       }
       if (options?.restart) {
         props.setStatus("设置已保存，正在重启本地网关...");
@@ -935,6 +1131,87 @@ export function SettingsPage(props: {
       props.setStatus("API Key 已复制。保存设置后才会生效。");
     } catch {
       props.setStatus("复制失败，请手动选中当前 API Key。");
+    }
+  }
+
+  function generateWecomCallbackToken() {
+    markSettingsDirty({ wecomCallbackToken: randomAlphaNumeric(32) });
+    props.setStatus("已生成新的企业微信回调 Token，请与企微后台接收消息配置保持一致并保存设置。");
+  }
+
+  function generateWecomCallbackAesKey() {
+    markSettingsDirty({ wecomCallbackAesKey: randomWecomAesKey() });
+    props.setStatus("已生成新的 EncodingAESKey，请与企微后台接收消息配置保持一致并保存设置。");
+  }
+
+  function toggleWecomChatEnabled(enabled: boolean) {
+    if (!enabled) {
+      markSettingsDirty({ wecomChatEnabled: false });
+      return;
+    }
+    const tokenEmpty = !settingsDraft.wecomCallbackToken.trim();
+    const aesKeyEmpty = !settingsDraft.wecomCallbackAesKey.trim();
+    markSettingsDirty({
+      wecomChatEnabled: true,
+      ...(tokenEmpty ? { wecomCallbackToken: randomAlphaNumeric(32) } : {}),
+      ...(aesKeyEmpty ? { wecomCallbackAesKey: randomWecomAesKey() } : {}),
+    });
+    if (tokenEmpty || aesKeyEmpty) {
+      props.setStatus("已自动生成 Token 与 EncodingAESKey，保存设置后请把它们填入企业微信后台的接收消息配置。");
+    }
+  }
+
+  async function copyWecomCallbackUrl() {
+    const copied = await copyText(wecomCallbackUrl);
+    if (!copied) {
+      props.setStatus("复制失败，请手动选中回调地址。");
+      return;
+    }
+    setWecomCallbackUrlCopied(true);
+    window.setTimeout(() => setWecomCallbackUrlCopied(false), 1400);
+    props.setStatus("企业微信回调地址已复制。");
+  }
+
+  async function runWecomSelfTest() {
+    setWecomSelfTest({ state: "loading", checks: [], message: "" });
+    try {
+      const result = await fetchJson<WecomSelfTestResult>("/_gateway/admin/wecom/self-test", { method: "POST" });
+      const checks = Array.isArray(result?.checks) ? result.checks : [];
+      const ok = Boolean(result?.ok);
+      setWecomSelfTest({
+        state: ok ? "success" : "error",
+        checks,
+        message: ok ? "全部检查通过。" : "存在未通过的检查项，请按提示修正后重试。",
+      });
+      props.setStatus(ok ? "企业微信配置自检通过。" : "企业微信配置自检未全部通过，请查看检查项。");
+      void loadWecomStatus();
+    } catch (error) {
+      const message = errorMessage(error);
+      setWecomSelfTest({ state: "error", checks: [], message: `自检请求失败: ${message}` });
+      props.setStatus(`企业微信配置自检失败: ${message}`);
+    }
+  }
+
+  async function sendWecomTestMessage() {
+    const userId = wecomTestUserId.trim();
+    if (!userId) {
+      props.setStatus("请先填写接收测试消息的企业微信 UserId。");
+      return;
+    }
+    setWecomTestMessage({ state: "loading", message: "" });
+    try {
+      await fetchJson<{ ok?: boolean }>("/_gateway/admin/wecom/test-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: formatJson({ userId }),
+      });
+      setWecomTestMessage({ state: "success", message: "已发送，请在企业微信中查收" });
+      props.setStatus("企业微信测试消息已发送。");
+      void loadWecomStatus();
+    } catch (error) {
+      const message = errorMessage(error);
+      setWecomTestMessage({ state: "error", message: `发送失败: ${message}` });
+      props.setStatus(`企业微信测试消息发送失败: ${message}`);
     }
   }
 
@@ -1162,6 +1439,208 @@ export function SettingsPage(props: {
                   <em>后台生图任务结束（成功或异常）后，给提交人推送一条企业微信应用消息，附带提示词、用时和生图页入口；仅对 wxwork: 开头的企业微信账号生效。</em>
                 </span>
               </label>
+              <div className="settings-wecom-chat-block">
+                <div className="settings-wecom-chat-head">
+                  <strong>企业微信内对话（接收消息）</strong>
+                  <em>开启后，用户直接在企业微信应用聊天窗口发消息即可与 AI 对话或让它生成图片。</em>
+                </div>
+                <p className="settings-status-note">
+                  需要在企业微信管理后台 → 应用 → 接收消息 → 设置 API 接收，填入下方回调 URL、Token、EncodingAESKey 并保存。
+                  接收消息依赖上方的企业微信开关、企业 ID、AgentID 与 Secret，未开启时回调不会生效。
+                </p>
+                <label className="settings-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={settingsDraft.wecomChatEnabled}
+                    onChange={(event) => toggleWecomChatEnabled(event.target.checked)}
+                  />
+                  <span>
+                    <strong>在企业微信内开启对话（接收消息）</strong>
+                    <em>打开时会自动补齐为空的 Token 与 EncodingAESKey；仍需在企微后台填入相同值并保存设置。</em>
+                  </span>
+                </label>
+                {settingsDraft.wecomChatEnabled && !settingsDraft.wecomEnabled ? (
+                  <p className="settings-status-note" style={{ color: "#b45309" }} role="alert">
+                    接收消息还依赖企业微信总开关：请开启上方「启用企业微信扫码登录」并保存。
+                  </p>
+                ) : null}
+                <div className="settings-form-grid two-columns">
+                  <label className="field">
+                    <span>回调 URL</span>
+                    <div className="settings-input-with-action">
+                      <input className="input" readOnly value={wecomCallbackUrl} onFocus={(event) => event.currentTarget.select()} />
+                      <button className="btn-secondary" type="button" onClick={() => void copyWecomCallbackUrl()}>
+                        {wecomCallbackUrlCopied ? <Check size={15} /> : <Copy size={15} />}
+                        {wecomCallbackUrlCopied ? "已复制" : "复制"}
+                      </button>
+                    </div>
+                    <small className="field-hint">企微后台「接收消息 → 设置 API 接收」里的 URL 填这一项，需公网可访问。</small>
+                  </label>
+                  <label className="field">
+                    <span>Token</span>
+                    <div className="settings-input-with-action">
+                      <input
+                        className="input"
+                        maxLength={32}
+                        value={settingsDraft.wecomCallbackToken}
+                        onChange={(event) => markSettingsDirty({ wecomCallbackToken: event.target.value })}
+                        placeholder="1-32 位字母或数字"
+                      />
+                      <button className="btn-secondary" type="button" onClick={generateWecomCallbackToken}>
+                        生成
+                      </button>
+                    </div>
+                    <small className="field-hint">与企微后台 Token 完全一致，1-32 位字母或数字。</small>
+                  </label>
+                  <label className="field">
+                    <span>EncodingAESKey</span>
+                    <div className="settings-input-with-action">
+                      <input
+                        className="input"
+                        maxLength={43}
+                        value={settingsDraft.wecomCallbackAesKey}
+                        onChange={(event) => markSettingsDirty({ wecomCallbackAesKey: event.target.value })}
+                        placeholder="43 位 Base64 字符"
+                      />
+                      <button className="btn-secondary" type="button" onClick={generateWecomCallbackAesKey}>
+                        生成
+                      </button>
+                    </div>
+                    <small className="field-hint">与企微后台 EncodingAESKey 完全一致，43 位 Base64 字符。</small>
+                  </label>
+                </div>
+                <div className="settings-wecom-action-row">
+                  <button
+                    className="btn-secondary"
+                    type="button"
+                    onClick={() => void runWecomSelfTest()}
+                    disabled={wecomSelfTest.state === "loading"}
+                  >
+                    {wecomSelfTest.state === "loading" ? <Loader2 className="spin" size={16} /> : <ShieldCheck size={16} />}
+                    配置自检
+                  </button>
+                  <label className="field settings-wecom-test-user">
+                    <span>企微 UserId</span>
+                    <input
+                      className="input"
+                      value={wecomTestUserId}
+                      onChange={(event) => setWecomTestUserId(event.target.value)}
+                      placeholder="例如 ZhangSan"
+                    />
+                  </label>
+                  <button
+                    className="btn-secondary"
+                    type="button"
+                    onClick={() => void sendWecomTestMessage()}
+                    disabled={wecomTestMessage.state === "loading" || !wecomTestUserId.trim()}
+                  >
+                    {wecomTestMessage.state === "loading" ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+                    发送测试消息
+                  </button>
+                </div>
+                {wecomChatConfigDirty ? (
+                  <p className="settings-status-note">配置自检和测试消息使用已保存的配置；当前有未保存的企业微信修改，建议先点击底部“保存设置”。</p>
+                ) : null}
+                {wecomSelfTest.state === "success" ? (
+                  <p className="settings-status-note" style={{ color: "#047857" }} role="status">{wecomSelfTest.message}</p>
+                ) : null}
+                {wecomSelfTest.state === "error" ? (
+                  <p className="settings-status-note" style={{ color: "#b91c1c" }} role="alert">{wecomSelfTest.message}</p>
+                ) : null}
+                {wecomSelfTest.checks.length > 0 ? (
+                  <ul className="settings-check-list" aria-label="企业微信配置自检结果">
+                    {wecomSelfTest.checks.map((check) => (
+                      <li className={check.ok ? "is-ok" : "is-fail"} key={check.id}>
+                        <span className="settings-check-icon">{check.ok ? <Check size={14} /> : <X size={14} />}</span>
+                        <span className="settings-check-copy">
+                          <strong>{check.label || check.id}</strong>
+                          {check.detail ? <em>{check.detail}</em> : null}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {wecomTestMessage.state === "success" ? (
+                  <p className="settings-status-note" style={{ color: "#047857" }} role="status">{wecomTestMessage.message}</p>
+                ) : null}
+                {wecomTestMessage.state === "error" ? (
+                  <p className="settings-status-note" style={{ color: "#b91c1c" }} role="alert">{wecomTestMessage.message}</p>
+                ) : null}
+                <div className="settings-wecom-status">
+                  <div className="settings-wecom-status-head">
+                    <strong>回调状态</strong>
+                    <button
+                      className="btn-secondary settings-mini-button"
+                      type="button"
+                      onClick={() => void loadWecomStatus()}
+                      disabled={wecomStatusLoading}
+                    >
+                      {wecomStatusLoading ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
+                      刷新
+                    </button>
+                  </div>
+                  {wecomStatusError ? (
+                    <p className="settings-status-note" style={{ color: "#b91c1c" }} role="alert">读取回调状态失败: {wecomStatusError}</p>
+                  ) : null}
+                  {!wecomStatusError && !wecomStatusHasActivity ? (
+                    <p className="settings-status-note">{wecomStatusLoaded ? "尚未收到企业微信回调。" : "正在读取企业微信回调状态…"}</p>
+                  ) : null}
+                  {wecomStatusHasActivity && wecomStatus ? (
+                    <dl className="settings-wecom-status-list">
+                      <div>
+                        <dt>最近回调验证时间</dt>
+                        <dd>{wecomStatus.lastVerifiedAt ? formatFullTime(wecomStatus.lastVerifiedAt) : "尚未验证"}</dd>
+                      </div>
+                      {wecomStatus.lastMessageAt ? (
+                        <div>
+                          <dt>最近收到消息</dt>
+                          <dd>
+                            {wecomMessageTypeLabel(wecomStatus.lastMessageType)}
+                            {wecomStatus.lastMessageUser ? ` · ${wecomStatus.lastMessageUser}` : ""}
+                            {` · ${formatFullTime(wecomStatus.lastMessageAt)}`}
+                          </dd>
+                        </div>
+                      ) : null}
+                      {wecomStatus.lastReplyAt ? (
+                        <div>
+                          <dt>最近回复时间</dt>
+                          <dd>{formatFullTime(wecomStatus.lastReplyAt)}</dd>
+                        </div>
+                      ) : null}
+                      {typeof wecomStatus.pendingJobs === "number" && wecomStatus.pendingJobs > 0 ? (
+                        <div>
+                          <dt>待处理消息</dt>
+                          <dd>{wecomStatus.pendingJobs} 条</dd>
+                        </div>
+                      ) : null}
+                      {wecomStatus.lastPushAt || wecomStatus.lastPushError ? (
+                        <div>
+                          <dt>最近推送</dt>
+                          <dd>{wecomStatus.lastPushError ? `失败: ${wecomStatus.lastPushError}` : formatFullTime(wecomStatus.lastPushAt)}</dd>
+                        </div>
+                      ) : null}
+                      {wecomStatus.lastError ? (
+                        <div className="is-error">
+                          <dt>最近错误</dt>
+                          <dd>
+                            {wecomStatus.lastError.stage ? `${wecomStatus.lastError.stage}: ` : ""}
+                            {wecomStatus.lastError.message || "未知错误"}
+                            {wecomStatus.lastError.at ? `（${formatFullTime(wecomStatus.lastError.at)}）` : ""}
+                          </dd>
+                        </div>
+                      ) : null}
+                    </dl>
+                  ) : null}
+                  {wecomStatus ? (
+                    <p className="settings-status-note">
+                      {wecomStatus.configured ? "回调已配置" : "回调未配置"}
+                      {" · "}
+                      {wecomStatus.chatEnabled ? "企微内对话已开启" : "企微内对话未开启"}
+                      {wecomStatus.callbackUrl ? ` · ${wecomStatus.callbackUrl}` : ""}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
             </div>
           ) : null}
         </section> : null}

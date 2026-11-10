@@ -232,6 +232,12 @@ export type GatewaySettings = {
     agentId: string;
     secret: string;
     notifyImageResult: boolean;
+    /** 企业微信「接收消息」回调 Token（企业管理后台 → 应用 → 接收消息 → 设置 API 接收）。 */
+    callbackToken: string;
+    /** 企业微信「接收消息」回调 EncodingAESKey（43 位 base64 字符）。 */
+    callbackAesKey: string;
+    /** 是否允许在企业微信应用聊天窗口内与 AI 双向对话（文字问答 + 按需生成图片）。 */
+    chatEnabled: boolean;
   };
   server: {
     host: string;
