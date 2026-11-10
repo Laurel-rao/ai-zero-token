@@ -19,6 +19,7 @@ import { Zip, ZipPassThrough } from "fflate";
 import sharp from "sharp";
 import { z } from "zod";
 import { createGatewayContext } from "../core/context.js";
+import { getGatewayLogBus, installGatewayConsoleLogTee } from "../core/services/log-bus-service.js";
 import { DEFAULT_IMAGE_MODEL } from "../core/models/image-models.js";
 import type { ChatResult, GatewaySettings, OAuthProfile, ProfileSummary } from "../core/types.js";
 import { isTransientHttpError, requestText } from "../core/providers/http-client.js";
@@ -3764,6 +3765,8 @@ export function createApp(params?: {
   onRestart?: () => void | Promise<void>;
   onRestartCodex?: () => void | Promise<void>;
 }) {
+  // 尽量早地把 console 输出接进实时日志总线，后续初始化日志也能在面板里看到。
+  installGatewayConsoleLogTee();
   const security = createSecurityConfig();
   const defaultBodyLimit = params?.bodyLimit ?? DEFAULT_ROUTE_BODY_LIMIT_BYTES;
   const codexCompactBodyLimit = Math.max(defaultBodyLimit, CODEX_COMPACT_BODY_LIMIT_BYTES);
@@ -3879,6 +3882,7 @@ export function createApp(params?: {
 
   function recordWecomCallbackVerified(): void {
     wecomCallbackState.lastVerifiedAt = Date.now();
+    console.info("[gateway:wecom] callback verify ok");
   }
 
   function recordWecomCallbackError(stage: string, error: unknown): void {
@@ -3889,6 +3893,11 @@ export function createApp(params?: {
     wecomCallbackState.lastMessageAt = Date.now();
     wecomCallbackState.lastMessageType = incoming.msgType;
     wecomCallbackState.lastMessageUser = incoming.fromUser;
+    console.info("[gateway:wecom] callback received", {
+      type: incoming.msgType,
+      fromUser: incoming.fromUser,
+      msgId: incoming.msgId,
+    });
   }
 
   function recordWecomPassiveReply(): void {
@@ -3935,6 +3944,7 @@ export function createApp(params?: {
         content,
       });
       recordWecomPushSuccess();
+      console.info("[gateway:wecom] push ok", { kind: "text", userId, chars: content.length });
       return true;
     } catch (error) {
       recordWecomPushError(error);
@@ -3956,6 +3966,7 @@ export function createApp(params?: {
         filename: "image.jpg",
       });
       recordWecomPushSuccess();
+      console.info("[gateway:wecom] push ok", { kind: "image", userId, bytes: image.byteLength });
       return true;
     } catch (error) {
       recordWecomPushError(error);
@@ -4086,6 +4097,12 @@ export function createApp(params?: {
     if (!generationId) {
       throw new Error("生图接口没有返回任务 ID。");
     }
+    const imageStartedAt = Date.now();
+    console.info("[gateway:wecom] image submitted", {
+      generationId,
+      user: params.userId,
+      promptLength: params.prompt.length,
+    });
 
     const generationTimeoutMs = Number.isFinite(params.settings.image.generationTimeoutMs)
       ? params.settings.image.generationTimeoutMs
@@ -4129,6 +4146,12 @@ export function createApp(params?: {
       ? `🖼 图片已生成：${promptExcerpt}`
       : `🖼 图片已生成（图片消息发送失败）：${promptExcerpt}`;
     await sendWecomPushText(params.userId, `${headline}\n查看原图与参数：${shareUrl}`);
+    console.info("[gateway:wecom] image done", {
+      generationId,
+      user: params.userId,
+      imageSent,
+      durationMs: Date.now() - imageStartedAt,
+    });
   }
 
   /** 处理一条企微文字消息：建号/建会话 → 聊天 → 推送文本 → 按需生图推图。 */
@@ -4142,7 +4165,9 @@ export function createApp(params?: {
     if (!userId) {
       return;
     }
+    const startedAt = Date.now();
     const username = `wxwork:${userId}`;
+    console.info("[gateway:wecom] chat task start", { user: userId, contentLength: params.content.length });
     try {
       let user = await ctx.gatewayDatabaseService.getUserByUsername(username);
       if (!user) {
@@ -4159,6 +4184,7 @@ export function createApp(params?: {
       }
       if (user.disabled) {
         await sendWecomPushText(userId, WECOM_DISABLED_ACCOUNT_MESSAGE);
+        console.info("[gateway:wecom] chat task done", { user: userId, outcome: "disabled", durationMs: Date.now() - startedAt });
         return;
       }
       const cookie = `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(createAdminSessionToken(security, user.username, user.role))}`;
@@ -4173,6 +4199,7 @@ export function createApp(params?: {
       }
       const decision = await classifyWecomImageAction(cookie, reply.text, params.settings);
       if (!decision.shouldGenerate || !decision.prompt) {
+        console.info("[gateway:wecom] chat task done", { user: userId, outcome: "text", durationMs: Date.now() - startedAt });
         return;
       }
       try {
@@ -4184,12 +4211,15 @@ export function createApp(params?: {
           prompt: decision.prompt,
           settings: params.settings,
         });
+        console.info("[gateway:wecom] chat task done", { user: userId, outcome: "image", durationMs: Date.now() - startedAt });
       } catch (error) {
         recordWecomCallbackError("image", error);
+        console.warn("[gateway:wecom] image task failed", { user: userId, message: errorText(error) });
         await sendWecomPushText(userId, `图片生成失败：${errorText(error)}`);
       }
     } catch (error) {
       recordWecomCallbackError("chat", error);
+      console.warn("[gateway:wecom] chat task failed", { user: userId, message: errorText(error) });
       await sendWecomPushText(userId, `抱歉，回复失败：${errorText(error)}`);
     }
   }
@@ -4207,10 +4237,12 @@ export function createApp(params?: {
     const ownerKey = `wxwork:${params.userId.trim()}`;
     const pending = wecomPendingJobsByOwner.get(ownerKey) ?? 0;
     if (pending >= WECOM_CHAT_MAX_PENDING_JOBS) {
+      console.warn("[gateway:wecom] chat busy", { user: params.userId, pending });
       return false;
     }
     wecomPendingJobsByOwner.set(ownerKey, pending + 1);
     wecomCallbackState.pendingJobs += 1;
+    console.info("[gateway:wecom] chat enqueued", { user: params.userId, contentLength: params.content.length });
     const previous = wecomChatChains.get(ownerKey) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -4890,6 +4922,70 @@ export function createApp(params?: {
   app.get("/_gateway/admin/usage", async () => ctx.usageService.getSummary());
 
   app.post("/_gateway/admin/usage/reset", async () => ctx.usageService.backupAndReset());
+
+  /**
+   * 实时日志 SSE 流：侧边栏「实时日志」面板订阅。
+   * 连接后先推一份内存快照，再持续推送新日志；每 15 秒发注释心跳保活。
+   * 仅管理员可用（普通用户会被 onRequest 鉴权或这里显式拦下）。
+   */
+  app.get("/_gateway/admin/logs/stream", async (request, reply) => {
+    const session = await getSessionFromRequest(request);
+    if (!isAdminSession(session)) {
+      if (!session) {
+        reply.code(401);
+        return { error: { type: "unauthorized", message: "Login required." } };
+      }
+      reply.code(403);
+      return { error: { type: "forbidden", message: "仅管理员可查看实时日志。" } };
+    }
+    const bus = getGatewayLogBus();
+    // 长连接由我们直接接管原始响应，避免 Fastify 在 handler 返回时结束它。
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    raw.flushHeaders?.();
+    const writeEvent = (event: string, payload: unknown): void => {
+      try {
+        raw.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+      } catch {
+        // 客户端已断开时忽略写入失败，由 close 事件统一清理。
+      }
+    };
+    writeEvent("snapshot", { entries: bus.snapshot(), serverTime: Date.now() });
+    const unsubscribe = bus.subscribe((entry) => writeEvent("log", entry));
+    const heartbeat = setInterval(() => {
+      try {
+        raw.write(": ping\n\n");
+      } catch {
+        // 忽略心跳写失败。
+      }
+    }, 15_000);
+    heartbeat.unref?.();
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) {
+        return;
+      }
+      cleaned = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+      try {
+        raw.end();
+      } catch {
+        // 已经结束的响应忽略。
+      }
+    };
+    request.raw.on("close", cleanup);
+    request.raw.on("error", cleanup);
+    raw.on("close", cleanup);
+    raw.on("error", cleanup);
+    return reply;
+  });
 
   app.get("/_gateway/chats", async (request) => {
     const parsed = chatListQuerySchema.safeParse(request.query);

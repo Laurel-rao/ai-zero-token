@@ -1,6 +1,6 @@
 import type { UseAdminWorkspaceResult } from "@/hooks/useAdminWorkspace";
 import { getAppIconUrl, normalizeBranding } from "@/shared/lib/branding";
-import { ChevronDown, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { ChevronDown, PanelLeftClose, PanelLeftOpen, Terminal } from "lucide-react";
 import { useEffect, useState } from "react";
 
 const NAV_OPEN_STORAGE_KEY = "azt.sidebar.openGroups";
@@ -9,10 +9,12 @@ export function AppSidebar({
   workspace,
   collapsed,
   onCollapsedChange,
+  onOpenLiveLog,
 }: {
   workspace: UseAdminWorkspaceResult;
   collapsed: boolean;
   onCollapsedChange: (value: boolean) => void;
+  onOpenLiveLog?: () => void;
 }) {
   const { routes, activeRoute, goRoute, config } = workspace;
   const versionStatus = config?.versionStatus;
@@ -119,11 +121,20 @@ export function AppSidebar({
         })}
       </nav>
 
-      <div className={`sidebar-status tone-${versionTone}`}>
-        <strong className="sidebar-version-line">
-          <i className={`version-dot tone-${versionTone}`} />
-          {versionStatus?.currentVersion || versionStatus?.latestVersion || "—"}
-        </strong>
+      <div className="sidebar-footer">
+        {onOpenLiveLog ? (
+          <button className="sidebar-live-log" type="button" onClick={onOpenLiveLog} title="实时日志">
+            <Terminal className="nav-icon" size={15} />
+            <span className="nav-label">实时日志</span>
+            <i className="sidebar-live-log-dot" aria-hidden="true" />
+          </button>
+        ) : null}
+        <div className={`sidebar-status tone-${versionTone}`}>
+          <strong className="sidebar-version-line">
+            <i className={`version-dot tone-${versionTone}`} />
+            {versionStatus?.currentVersion || versionStatus?.latestVersion || "—"}
+          </strong>
+        </div>
       </div>
     </aside>
   );

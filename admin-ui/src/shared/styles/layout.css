@@ -35,6 +35,7 @@
   border-radius: 18px;
   padding: 14px 2px 8px;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
   align-content: start;
   max-height: calc(100vh - 20px);
@@ -244,6 +245,66 @@
 .sidebar-links {
   margin-top: auto;
   gap: 12px;
+}
+
+/* 侧边栏底部：实时日志入口 + 版本号 */
+.sidebar-footer {
+  display: grid;
+  gap: 10px;
+  align-self: end;
+}
+
+.sidebar-live-log {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.sidebar-live-log:hover {
+  color: var(--brand);
+  background: rgba(99, 91, 255, 0.08);
+  border-color: rgba(99, 91, 255, 0.2);
+}
+
+.sidebar-live-log .nav-icon {
+  flex: 0 0 auto;
+}
+
+.sidebar-live-log .nav-label {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.sidebar-live-log-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.16);
+}
+
+.sidebar.is-collapsed .sidebar-live-log {
+  width: 44px;
+  min-height: 42px;
+  padding: 0;
+  justify-content: center;
+}
+
+.sidebar.is-collapsed .sidebar-live-log .nav-label,
+.sidebar.is-collapsed .sidebar-live-log-dot {
+  display: none;
 }
 
 .sidebar-status {

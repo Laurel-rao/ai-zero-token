@@ -3,6 +3,7 @@ import { AppTopbar } from "./AppTopbar";
 import { AppOverlays } from "./AppOverlays";
 import { RouteRenderer } from "./RouteRenderer";
 import { AppMobileNavigation } from "./AppMobileNavigation";
+import { LiveLogDrawer } from "@/shared/components/LiveLogDrawer";
 import type { UseAdminWorkspaceResult } from "@/hooks/useAdminWorkspace";
 import { useEffect, useState } from "react";
 
@@ -16,6 +17,8 @@ export function AppShell({ workspace }: { workspace: UseAdminWorkspaceResult }) 
       return false;
     }
   });
+  const [liveLogOpen, setLiveLogOpen] = useState(false);
+  const canViewLiveLog = workspace.role === "admin";
 
   useEffect(() => {
     try {
@@ -27,8 +30,13 @@ export function AppShell({ workspace }: { workspace: UseAdminWorkspaceResult }) 
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""} ${workspace.activeRoute === "chat" ? "is-chat-route" : ""}`}>
-      <AppSidebar workspace={workspace} collapsed={sidebarCollapsed} onCollapsedChange={setSidebarCollapsed} />
-      <AppMobileNavigation workspace={workspace} />
+      <AppSidebar
+        workspace={workspace}
+        collapsed={sidebarCollapsed}
+        onCollapsedChange={setSidebarCollapsed}
+        onOpenLiveLog={canViewLiveLog ? () => setLiveLogOpen(true) : undefined}
+      />
+      <AppMobileNavigation workspace={workspace} onOpenLiveLog={canViewLiveLog ? () => setLiveLogOpen(true) : undefined} />
 
       <main className={`main route-${workspace.activeRoute}`}>
         <AppTopbar workspace={workspace} />
@@ -36,6 +44,7 @@ export function AppShell({ workspace }: { workspace: UseAdminWorkspaceResult }) 
       </main>
 
       <AppOverlays workspace={workspace} />
+      {canViewLiveLog ? <LiveLogDrawer open={liveLogOpen} onClose={() => setLiveLogOpen(false)} /> : null}
     </div>
   );
 }

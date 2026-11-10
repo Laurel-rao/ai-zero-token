@@ -1,0 +1,450 @@
+/* 侧边栏「实时日志」抽屉（深色终端风格） */
+
+.live-log-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(6px);
+  cursor: default;
+}
+
+.live-log-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 26;
+  width: min(780px, 100vw);
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  color: #e2e8f0;
+  background: #0b1220;
+  border-left: 1px solid rgba(148, 163, 184, 0.24);
+  box-shadow: -28px 0 64px rgba(2, 6, 23, 0.45);
+}
+
+.live-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  background: linear-gradient(180deg, #111c2e, #0b1220);
+}
+
+.live-log-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #f1f5f9;
+}
+
+.live-log-title strong {
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
+.live-log-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #cbd5e1;
+  background: rgba(148, 163, 184, 0.12);
+  white-space: nowrap;
+}
+
+.live-log-conn i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.live-log-conn.is-open {
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.14);
+}
+
+.live-log-conn.is-open i {
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16);
+}
+
+.live-log-conn.is-connecting i,
+.live-log-conn.is-reconnecting i {
+  background: #fbbf24;
+  animation: live-log-pulse 1.2s ease-in-out infinite;
+}
+
+.live-log-conn.is-forbidden,
+.live-log-conn.is-error,
+.live-log-conn.is-closed {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.live-log-conn.is-forbidden i,
+.live-log-conn.is-error i,
+.live-log-conn.is-closed i {
+  background: #f87171;
+}
+
+@keyframes live-log-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.live-log-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.live-log-action,
+.live-log-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(148, 163, 184, 0.08);
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.live-log-action:hover,
+.live-log-icon-button:hover {
+  color: #f8fafc;
+  background: rgba(148, 163, 184, 0.18);
+  border-color: rgba(148, 163, 184, 0.4);
+}
+
+.live-log-icon-button {
+  width: 30px;
+  padding: 0;
+}
+
+.live-log-icon-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.live-log-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: #0f172a;
+}
+
+.live-log-levels {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.live-log-level-chip {
+  min-height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.live-log-level-chip:hover {
+  color: #e2e8f0;
+}
+
+.live-log-level-chip.is-active {
+  color: #0f172a;
+  background: #e2e8f0;
+}
+
+.live-log-level-chip.is-active.level-warn {
+  background: #fbbf24;
+}
+
+.live-log-level-chip.is-active.level-error {
+  background: #f87171;
+}
+
+.live-log-select,
+.live-log-search {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.live-log-select {
+  max-width: 190px;
+}
+
+.live-log-search {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
+
+.live-log-select:focus,
+.live-log-search:focus {
+  outline: 2px solid rgba(99, 102, 241, 0.55);
+  outline-offset: 1px;
+}
+
+.live-log-http-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #94a3b8;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.live-log-http-toggle input {
+  accent-color: #6366f1;
+}
+
+.live-log-banner {
+  padding: 8px 16px;
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.1);
+  border-bottom: 1px solid rgba(248, 113, 113, 0.24);
+  font-size: 12px;
+}
+
+.live-log-list {
+  overflow: auto;
+  padding: 8px 10px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+}
+
+.live-log-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.live-log-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.4);
+}
+
+.live-log-row {
+  display: grid;
+  grid-template-columns: 96px 42px minmax(96px, max-content) minmax(0, 1fr) 16px;
+  gap: 8px;
+  align-items: start;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+}
+
+.live-log-row:hover {
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.live-log-row.is-expandable {
+  cursor: pointer;
+}
+
+.live-log-row.level-warn {
+  border-left-color: rgba(251, 191, 36, 0.7);
+}
+
+.live-log-row.level-error {
+  border-left-color: rgba(248, 113, 113, 0.8);
+  background: rgba(248, 113, 113, 0.06);
+}
+
+.live-log-time {
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.live-log-level {
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.live-log-level.level-info {
+  color: #93c5fd;
+}
+
+.live-log-level.level-warn {
+  color: #fbbf24;
+}
+
+.live-log-level.level-error {
+  color: #f87171;
+}
+
+.live-log-scope {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 650;
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+}
+
+.live-log-scope.tone-wecom {
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.16);
+}
+
+.live-log-scope.tone-image {
+  color: #f0abfc;
+  background: rgba(217, 70, 239, 0.14);
+}
+
+.live-log-scope.tone-chat {
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.14);
+}
+
+.live-log-scope.tone-http {
+  color: #cbd5e1;
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.live-log-scope.tone-auth {
+  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.12);
+}
+
+.live-log-scope.tone-gateway {
+  color: #a5b4fc;
+  background: rgba(99, 102, 241, 0.14);
+}
+
+.live-log-message {
+  color: #dbe4f0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.live-log-chevron {
+  margin-top: 3px;
+  color: #64748b;
+}
+
+.live-log-detail {
+  grid-column: 1 / -1;
+  margin: 4px 0 2px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(2, 6, 23, 0.6);
+  color: #94a3b8;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.live-log-empty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 56px 20px;
+  color: #64748b;
+  text-align: center;
+}
+
+.live-log-empty strong {
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.live-log-empty span {
+  max-width: 320px;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.live-log-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  background: #0f172a;
+  color: #64748b;
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .live-log-drawer {
+    width: 100vw;
+    border-left: 0;
+  }
+
+  .live-log-row {
+    grid-template-columns: 78px 40px minmax(0, 1fr) 14px;
+    gap: 6px;
+  }
+
+  .live-log-scope {
+    display: none;
+  }
+
+  .live-log-head {
+    flex-wrap: wrap;
+  }
+
+  .live-log-head-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .live-log-select {
+    max-width: none;
+    flex: 1 1 140px;
+  }
+}

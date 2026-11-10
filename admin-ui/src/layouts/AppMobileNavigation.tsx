@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Grid2X2, LogOut, X } from "lucide-react";
+import { Grid2X2, LogOut, Terminal, X } from "lucide-react";
 import type { UseAdminWorkspaceResult } from "@/hooks/useAdminWorkspace";
 import type { AppRoute } from "@/routes/routes";
 import { getAppIconUrl, normalizeBranding } from "@/shared/lib/branding";
@@ -14,7 +14,7 @@ const ROUTE_SECTIONS: Array<{ title: string; routes: AppRoute[] }> = [
   { title: "系统", routes: ["settings", "settings-users", "settings-groups"] },
 ];
 
-export function AppMobileNavigation({ workspace }: { workspace: UseAdminWorkspaceResult }) {
+export function AppMobileNavigation({ workspace, onOpenLiveLog }: { workspace: UseAdminWorkspaceResult; onOpenLiveLog?: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuOpenerRef = useRef<HTMLElement | null>(null);
@@ -171,6 +171,19 @@ export function AppMobileNavigation({ workspace }: { workspace: UseAdminWorkspac
                           </button>
                         );
                       })}
+                      {section.title === "系统" && onOpenLiveLog ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMenuOpen(false);
+                            onOpenLiveLog();
+                          }}
+                          aria-label="实时日志"
+                        >
+                          <span><Terminal size={20} /></span>
+                          <strong>实时日志</strong>
+                        </button>
+                      ) : null}
                     </div>
                   </section>
                 );
