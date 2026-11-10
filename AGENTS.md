@@ -4,11 +4,14 @@
 
 This project was customized and deployed as a Docker service for:
 
-- Public URL: `http://64.83.17.240/`（只用 IP；域名 `ai.reeko.net.cn` 已于 2026-11-10 迁移到另一台服务器的 Sub2API，不再指向本服务）
+- Public URL: `https://ai.reeko.net.cn/`（DNS 指向 `43.167.247.47`；该机 nginx 443 整体反代到旧服务器 `64.83.17.240` 的 HTTPS。Sub2API 保留在 `https://ai.reeko.net.cn:8081/`）
+- 备用直连: `http://64.83.17.240/`（HTTP 直连旧服务器）
 - Deployment host: `root@64.83.17.240`
-- WeCom 接收消息回调 URL（实际使用）: `https://ai.reeko.net.cn/_gateway/wecom/callback`
-  - `ai.reeko.net.cn` 自 2026-11-10 起由 `43.167.247.47` 的 Sub2API nginx 承接；该机已在 `/etc/nginx/conf.d/sub2api-443-ssl.conf` 里为 `location = /_gateway/wecom/callback` 和 `location ^~ /s/` 配置反代到 `64.83.17.240`（备份：`/root/sub2api-443-ssl.conf.bak-20261110T194657`）。Sub2API 重新部署覆盖 nginx 配置后，这两条 location 需要重新补上，否则企微回调与图片分享链接会失效。
-  - 纯 IP 回调无法通过企业微信「域名主体校验」，不要再用 IP 地址配置接收消息。
+- WeCom 接收消息回调 URL: `https://ai.reeko.net.cn/_gateway/wecom/callback`
+  - 反代配置在 `43.167.247.47` 的 `/etc/nginx/conf.d/sub2api-443-ssl.conf`：`location / { proxy_pass https://64.83.17.240; proxy_ssl_server_name on; proxy_ssl_name ai.reeko.net.cn; ... }`。
+  - 必须用 **HTTPS upstream**：如果反代到旧服务器的 HTTP 80，旧 nginx 会把 `X-Forwarded-Proto` 固定成 `http`，应用又会 301 到 https，浏览器出现 `ERR_TOO_MANY_REDIRECTS`。
+  - 备份：`/root/sub2api-443-ssl.conf.bak-whole-20261110T195958`、`/root/sub2api-443-ssl.conf.bak-httpsupstream-*`。Sub2API 重新部署覆盖 nginx 配置后需要重新改回该反代，否则域名会回到 Sub2API。
+  - 纯 IP 回调无法通过企业微信「域名主体校验」，不要把接收消息配置成 IP。
 - Public ports: `80` and `443` through Nginx
 - Container binding: `127.0.0.1:8787 -> 8787`
 - Container name: `ai-zero-token`
@@ -64,14 +67,14 @@ The service listens on `8787` inside the container. Nginx owns public ports
 Run these checks after deployment:
 
 ```bash
-curl -s -o /dev/null -w 'health=%{http_code}\n' http://64.83.17.240/_gateway/health
-curl -s http://64.83.17.240/ | sed -n '1,40p'
-curl -s -o /dev/null -w 'callback=%{http_code}\n' 'http://64.83.17.240/_gateway/wecom/callback?msg_signature=x&timestamp=1&nonce=1&echostr=x'
+curl -s -o /dev/null -w 'health=%{http_code}\n' https://ai.reeko.net.cn/_gateway/health
+curl -s https://ai.reeko.net.cn/ | sed -n '1,40p'
+curl -s -o /dev/null -w 'callback=%{http_code}\n' 'https://ai.reeko.net.cn/_gateway/wecom/callback?msg_signature=x&timestamp=1&nonce=1&echostr=x'
 ssh root@64.83.17.240 'docker logs --tail 80 ai-zero-token'
 ssh root@64.83.17.240 'docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 ```
 
-`/_gateway/health` 返回 JSON、`/` 返回 `AI Zero Token` 的 HTML 才算部署成功；未配置回调时 callback 探测返回 400「企业微信回调校验失败」是预期。域名 `ai.reeko.net.cn` 已迁走，不要再拿它做部署验证。
+`/_gateway/health` 返回 JSON、`/` 返回 `AI Zero Token` 的 HTML 才算部署成功；未配置回调时 callback 探测返回 400「企业微信回调校验失败」是预期。也可直接用 `http://64.83.17.240/` 复查旧服务器本身。
 
 Expected auth status without browser cookie:
 
@@ -91,7 +94,7 @@ This means the admin auth system is configured and the unauthenticated curl is c
 - If a UI change appears stale, check the asset hash in the served HTML:
 
   ```bash
-  curl -s http://64.83.17.240/ | sed -n '1,40p'
+  curl -s https://ai.reeko.net.cn/ | sed -n '1,40p'
   ```
 
 ### Useful Server Debug Commands

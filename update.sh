@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-root@64.83.17.240}"
-PUBLIC_URL="${PUBLIC_URL:-http://64.83.17.240}"
+PUBLIC_URL="${PUBLIC_URL:-https://ai.reeko.net.cn}"
 REMOTE_SRC="${REMOTE_SRC:-/opt/ai-zero-token/src}"
 REMOTE_ENV="${REMOTE_ENV:-/opt/ai-zero-token/.env}"
 REMOTE_STATE="${REMOTE_STATE:-/opt/ai-zero-token/state}"
