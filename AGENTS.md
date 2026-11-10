@@ -6,7 +6,9 @@ This project was customized and deployed as a Docker service for:
 
 - Public URL: `http://64.83.17.240/`（只用 IP；域名 `ai.reeko.net.cn` 已于 2026-11-10 迁移到另一台服务器的 Sub2API，不再指向本服务）
 - Deployment host: `root@64.83.17.240`
-- WeCom 接收消息回调 URL: `http://64.83.17.240/_gateway/wecom/callback`（IP 没有公网证书，只能走 HTTP；企微后台允许 http 回调）
+- WeCom 接收消息回调 URL（实际使用）: `https://ai.reeko.net.cn/_gateway/wecom/callback`
+  - `ai.reeko.net.cn` 自 2026-11-10 起由 `43.167.247.47` 的 Sub2API nginx 承接；该机已在 `/etc/nginx/conf.d/sub2api-443-ssl.conf` 里为 `location = /_gateway/wecom/callback` 和 `location ^~ /s/` 配置反代到 `64.83.17.240`（备份：`/root/sub2api-443-ssl.conf.bak-20261110T194657`）。Sub2API 重新部署覆盖 nginx 配置后，这两条 location 需要重新补上，否则企微回调与图片分享链接会失效。
+  - 纯 IP 回调无法通过企业微信「域名主体校验」，不要再用 IP 地址配置接收消息。
 - Public ports: `80` and `443` through Nginx
 - Container binding: `127.0.0.1:8787 -> 8787`
 - Container name: `ai-zero-token`
