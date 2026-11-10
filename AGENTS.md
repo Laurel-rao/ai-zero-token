@@ -4,9 +4,9 @@
 
 This project was customized and deployed as a Docker service for:
 
-- Public URL: `http://ai.reeko.net.cn/`
+- Public URL: `http://64.83.17.240/`（只用 IP；域名 `ai.reeko.net.cn` 已于 2026-11-10 迁移到另一台服务器的 Sub2API，不再指向本服务）
 - Deployment host: `root@64.83.17.240`
-- Expected DNS A record: `ai.reeko.net.cn -> 64.83.17.240`
+- WeCom 接收消息回调 URL: `http://64.83.17.240/_gateway/wecom/callback`（IP 没有公网证书，只能走 HTTP；企微后台允许 http 回调）
 - Public ports: `80` and `443` through Nginx
 - Container binding: `127.0.0.1:8787 -> 8787`
 - Container name: `ai-zero-token`
@@ -55,22 +55,21 @@ All settings are overridable through environment variables:
 `DEPLOY_MODE`, `COMPOSE_PROJECT_NAME`.
 
 The service listens on `8787` inside the container. Nginx owns public ports
-`80` and `443` and proxies the domain to `127.0.0.1:8787`.
+`80` and `443` and proxies requests to `127.0.0.1:8787`（IP 访问走 80 端口 HTTP）。
 
 ### Post-Deploy Checks
 
 Run these checks after deployment:
 
 ```bash
-dig +short ai.reeko.net.cn A
-curl -s http://ai.reeko.net.cn/ | sed -n '1,40p'
-curl -s -H 'Host: ai.reeko.net.cn' http://64.83.17.240/ | sed -n '1,40p'
+curl -s -o /dev/null -w 'health=%{http_code}\n' http://64.83.17.240/_gateway/health
+curl -s http://64.83.17.240/ | sed -n '1,40p'
+curl -s -o /dev/null -w 'callback=%{http_code}\n' 'http://64.83.17.240/_gateway/wecom/callback?msg_signature=x&timestamp=1&nonce=1&echostr=x'
 ssh root@64.83.17.240 'docker logs --tail 80 ai-zero-token'
 ssh root@64.83.17.240 'docker ps --filter name=ai-zero-token --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 ```
 
-The DNS lookup must return `64.83.17.240`. Before DNS propagation completes,
-use the direct-IP check with the `Host` header to verify the new server.
+`/_gateway/health` 返回 JSON、`/` 返回 `AI Zero Token` 的 HTML 才算部署成功；未配置回调时 callback 探测返回 400「企业微信回调校验失败」是预期。域名 `ai.reeko.net.cn` 已迁走，不要再拿它做部署验证。
 
 Expected auth status without browser cookie:
 
@@ -90,7 +89,7 @@ This means the admin auth system is configured and the unauthenticated curl is c
 - If a UI change appears stale, check the asset hash in the served HTML:
 
   ```bash
-  curl -s http://ai.reeko.net.cn/ | sed -n '1,40p'
+  curl -s http://64.83.17.240/ | sed -n '1,40p'
   ```
 
 ### Useful Server Debug Commands
